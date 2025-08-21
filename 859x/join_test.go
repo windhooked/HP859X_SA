@@ -31,19 +31,6 @@ func Test(t *testing.T) {
 	}
 	fo.Write(buf.Bytes())
 	//hex.Dump(word)
-	/*
-	   	int i;
-	    FILE *f = fopen(argv[1], "r");
-	    fread(a, sizeof(a), 1, f);
-	    fclose(f);
-	    f = fopen(argv[2], "r");
-	    fread(b, sizeof(b), 1, f);
-
-
-
-	    for(i=0; i < sizeof(a); i++) {
-	     fwrite(a+i, 1, 1, stdout);
-	     fwrite(b+i, 1, 1, stdout);
-	    }
-	*/
+	
 }
+
