@@ -2,6 +2,7 @@ package join
 
 import (
 	"bytes"
+	"encoding/hex"
 	"log"
 	"os"
 	"testing"
@@ -18,19 +19,28 @@ func Test(t *testing.T) {
 	if err != nil {
 		log.Fatalf("%v", err)
 	}
-	fo, err := os.OpenFile("../../hp8593a_eeproms/U23_U6.bin", os.O_CREATE|os.O_TRUNC, 777)
+
+	// D0-7
+	lsbtop, err := os.ReadFile("../../hp8593a_eeproms/08592-80084_U7_top0.bin")
 	if err != nil {
 		log.Fatalf("%v", err)
 	}
+	// D8-15
+	msbtop, err := os.ReadFile("../../hp8593a_eeproms/08592-80086_U24_top3.bin")
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+
 	buf := bytes.NewBuffer(nil)
 	for i, v := range lsb {
-		//word := (msb[i] << 0xff) | v
-		//fmt.Fprintf(fo, "%c%c", rune(msb[i]), rune(v))
 		buf.WriteByte(msb[i])
 		buf.WriteByte(v)
 	}
-	fo.Write(buf.Bytes())
-	//hex.Dump(word)
-	
-}
+	for i, v := range lsbtop {
+		buf.WriteByte(msbtop[i])
+		buf.WriteByte(v)
+	}
 
+	os.WriteFile("../../hp8593a_eeproms/rom.bin", buf.Bytes(), 0644)
+	os.WriteFile("../../hp8593a_eeproms/rom.hex", []byte(hex.Dump(buf.Bytes())), 0644)
+}
