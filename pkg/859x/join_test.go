@@ -1,8 +1,9 @@
-package join
+package x
 
 import (
 	"bytes"
 	"encoding/hex"
+	"fmt"
 	"log"
 	"os"
 	"testing"
@@ -30,17 +31,32 @@ func Test(t *testing.T) {
 	if err != nil {
 		log.Fatalf("%v", err)
 	}
+	fh, err := os.Create("../../hp8593a_eeproms/rom.hex")
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+	defer fh.Close()
 
 	buf := bytes.NewBuffer(nil)
 	for i, v := range lsb {
 		buf.WriteByte(msb[i])
 		buf.WriteByte(v)
+		_, err := fmt.Fprintf(fh, "%4X: %02X%02X\n", i, msb[i], v)
+		if err != nil {
+			log.Fatalf("%v", err)
+		}
 	}
+	if err := fh.Sync(); err != nil {
+		log.Fatalf("%v", err)
+	}
+	fh.Close()
+
 	for i, v := range lsbtop {
 		buf.WriteByte(msbtop[i])
 		buf.WriteByte(v)
 	}
 
 	os.WriteFile("../../hp8593a_eeproms/rom.bin", buf.Bytes(), 0644)
-	os.WriteFile("../../hp8593a_eeproms/rom.hex", []byte(hex.Dump(buf.Bytes())), 0644)
+	os.WriteFile("../../hp8593a_eeproms/rom_dump.hex", []byte(hex.Dump(buf.Bytes())), 0644)
+
 }
