@@ -9,7 +9,12 @@ import (
 	"testing"
 )
 
-func Test(t *testing.T) {
+func TestEmu(t *testing.T) {
+	Emu()
+
+}
+
+func TestJoin(t *testing.T) {
 	// D0-7
 	lsb, err := os.ReadFile("../../hp8593a_eeproms/08592-80083_U6_top1.bin")
 	if err != nil {
