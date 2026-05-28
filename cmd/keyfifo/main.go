@@ -78,22 +78,32 @@ func main() {
 	m.Bus.Write(0xFFBBA6+0x16, bus.Word, bbbcOld+1)
 	dump("After manual bbbc++")
 
-	// Run a few chunks WITH IRQ4 injection. fcn.1D58 (the dispatcher
-	// where path A vs path B is decided) is only called from IRQ4.
-	// With bbba != bbbc (FIFO non-empty), path B should fire and
-	// reach fcn.18568 naturally — clearing bc67.0 + advancing bbba.
+	// Run a few chunks WITH IRQ4 injection AND befd bit 7 pre-armed.
+	// This combo simulates what the HP-IB data-send routine at PC 0x2258
+	// would naturally produce (writes 0xE7 to f120 → bit 7 ends up in
+	// befd via fcn.1D58's `or.b $f120, $befd`).
 	for i := 0; i < 100; i++ {
 		m.CPU.Run(chunkCycles)
 		m.CPU.SetIRQ(5)
 		m.CPU.Run(400)
 		m.CPU.SetIRQ(0)
 		if i%8 == 4 {
+			// Pre-arm befd bit 7 (so fcn.1D58 takes deep branch) AND
+			// befe bit 6 (so the 0x1ED0 bsr $1b40 fires inside path B,
+			// dispatching with bf0a==0 → operating tick at slot 0x148).
+			befd := byte(m.Bus.Read(0xFFBEFD, bus.Byte)) | 0x80
+			befe := byte(m.Bus.Read(0xFFBEFE, bus.Byte)) | 0x40
+			m.Bus.Write(0xFFBEFD, bus.Byte, uint32(befd))
+			m.Bus.Write(0xFFBEFE, bus.Byte, uint32(befe))
+			// Also force bf0a clear so fcn.1B40 dispatches to slot 0x148
+			// (operating tick) and not to whatever was previously queued.
+			m.Bus.Write(0xFFBF0A, bus.Long, 0)
 			m.CPU.SetIRQ(4)
 			m.CPU.Run(400)
 			m.CPU.SetIRQ(0)
 		}
 	}
-	dump("After 100 chunks w/ IRQ4")
+	dump("After 100 chunks w/ IRQ4 + befd.7")
 	bc67 := m.Bus.Read(0xFFBC67, bus.Byte)
 	fmt.Printf("\nbc67 = %02X (bit 0 = %d; key flag should be 0 if consumer ran)\n",
 		bc67, bc67&1)
