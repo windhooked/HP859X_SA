@@ -79,7 +79,7 @@ func main() {
 	// with single-step so we can watch PC. This is slow, so limit to a few
 	// hundred-thousand instructions.
 	visits := make(map[uint32]int)
-	const maxSteps = 200_000
+	const maxSteps = 2_000_000
 	var firstSee uint32 = 0xFFFFFFFF
 
 	// To make the operating tick run we mimic DriveOperatingTick by
@@ -99,7 +99,24 @@ func main() {
 	// not already in watchPCs, and the bus reads at that PC start with
 	// 0x4E56 (link.w opcode). We sample at most maxNewFuncs distinct PCs.
 	newFuncs := make(map[uint32]int) // pc → first step seen
-	const maxNewFuncs = 50
+	const maxNewFuncs = 200
+
+	// Snapshot known "IP would touch this" cells before stepping, so we
+	// can report whether the Initial Preset side effects actually fire.
+	// These are the addresses observed by cmd/hpibtrace when sending
+	// a 2-byte ASCII input that triggered parser-state init (44 cells).
+	// If they change AFTER step 1000 (well after the parser state init
+	// runs), that's command execution proper.
+	ipWitnesses := []uint32{
+		0xFF901A, 0xFF9242, 0xFF92F2, 0xFF92FE, 0xFF9310, 0xFF9314,
+		0xFF931C, 0xFF9320, 0xFF9326, 0xFF9342, 0xFF9352, 0xFF9356,
+		0xFF935A, 0xFF935E, 0xFF9362, 0xFF9367, 0xFF9374, 0xFF9378,
+		0xFF937C, 0xFF938C, 0xFF939C,
+	}
+	witnessBefore := make(map[uint32]byte)
+	for _, addr := range ipWitnesses {
+		witnessBefore[addr] = byte(m.Bus.Read(addr, bus.Byte))
+	}
 
 	for step := 0; step < maxSteps; step++ {
 		pc := m.CPU.Reg(cpu.PC)
@@ -196,5 +213,22 @@ func main() {
 			}
 		}
 		fmt.Println("|")
+	}
+
+	// Report which IP-witness cells changed.
+	fmt.Printf("\n=== IP witness cells (parser-state-init pattern from cmd/hpibtrace) ===\n")
+	changedWitnesses := 0
+	for _, addr := range ipWitnesses {
+		now := byte(m.Bus.Read(addr, bus.Byte))
+		if now != witnessBefore[addr] {
+			fmt.Printf("  %#06X  %#02X → %#02X  CHANGED\n", addr, witnessBefore[addr], now)
+			changedWitnesses++
+		}
+	}
+	if changedWitnesses == 0 {
+		fmt.Printf("  (none changed — the parser-state-init pattern did NOT fire)\n")
+	} else {
+		fmt.Printf("  %d of %d witness cells changed — command execution likely fired\n",
+			changedWitnesses, len(ipWitnesses))
 	}
 }
