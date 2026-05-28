@@ -491,6 +491,51 @@ to be empirically tested against the per-byte behavior):
 - `bc64.13` set → fcn.58c2e bit-13 path at `0x58C9E → 0x58CA2` (the
   "PRINT/PLOT mode" — calls fcn.586ae instead of fcn.567e0).
 
+**Update (next commit) — the dispatch trigger is the PS/2 Enter key
+(scancode `0x5A`)**. Verified empirically by cmd/hpibstep:
+
+| Input scancode sequence  | bc36 after | fcn.567e0 calls | fcn.56d1a calls |
+|---------------------------|------------|-----------------|-----------------|
+| `43 4D 4C` (IP;)         | 3 (buffered) | 3              | 0               |
+| `43 4D 4C 5A` (IP;<CR>)  | 0 (reset!) | 3              | **1**           |
+
+So `0x5A` (Enter) takes a *different* path through `fcn.57278`. At
+PC `0x57564` the parser tests for byte `0x5A` and on match sets
+`-6(a6) = 0x9800` (high byte 0x98). When fcn.58c2e reads this back,
+the high-byte-non-zero test at PC `0x58D54` falls through to the
+**binary dispatcher** path (`fcn.56d1a`), NOT the ASCII per-byte
+handler (`fcn.567e0`).
+
+`fcn.56d1a` extracts dispatch index from d0: `(d0 >> 8) & 0x3F - 0x10`.
+For 0x9800 → 0x98 → 0x18 → 0x08. So Enter dispatches to handler #8
+in the binary-code jump table at PC `0x57144`.
+
+Empirical chain reached after Enter (cmd/hpibstep PC discovery, in
+order of first sighting): `fcn.4DF34` (step 4176), `fcn.227BA`
+(step 4179), `fcn.22668` (step 4181), `fcn.5E84A` (4236),
+`fcn.5E6E8` (4241), `0x47FC` (4246), `0x4824` (4265). The
+`fcn.227BA` → `fcn.22668` pair is reached via dispatch-table slot
+`0x9A6` (`jmp fcn.227BA`).
+
+After Enter, the buffer state changes:
+
+```
+before  bc34 = 0x000003   bc36 = 3   bc2e = 0  (buffered)
+after   bc34 = 0x030000   bc36 = 0   bc2e = 3  (dispatched: cursor reset,
+                                                count advanced by length)
+```
+
+So Enter DOES execute the buffered command. **The IP handler still
+isn't observably running its side effects** — Initial Preset would
+clobber many RAM cells — so there's a final layer to find:
+
+- Either the actual handler lookup against the `0x07E780` table happens
+  inside one of these new functions and we need more steps;
+- Or the firmware needs additional state (e.g., REMOTE mode flag,
+  HP-IB controller-addressed-us state) before commands take effect.
+
+`cmd/hpibstep` with a longer step budget would clarify which.
+
 **The 0x07E780 command-name table** found earlier is still a real
 artifact — it's reachable from the byte-buffer side (after a complete
 command is collected at 0xFFBE02+, a separate parser must walk that

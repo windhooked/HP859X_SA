@@ -94,6 +94,13 @@ func main() {
 	fmt.Printf("bc36 at trace start = %#04X\n", m.Bus.Read(0xFFBC36, bus.Word))
 	fmt.Printf("bc34 at trace start = %#06X\n", m.Bus.Read(0xFFBC34, bus.Long))
 
+	// Also record every new function entry (`link.w a6, ...`-like) for
+	// post-buffer discovery. We mark a PC as a "function entry" if it's
+	// not already in watchPCs, and the bus reads at that PC start with
+	// 0x4E56 (link.w opcode). We sample at most maxNewFuncs distinct PCs.
+	newFuncs := make(map[uint32]int) // pc → first step seen
+	const maxNewFuncs = 50
+
 	for step := 0; step < maxSteps; step++ {
 		pc := m.CPU.Reg(cpu.PC)
 		if name, ok := watchPCs[pc]; ok {
@@ -103,10 +110,44 @@ func main() {
 				fmt.Printf("  first watch-PC at step %d: %#06X = %s\n", step, pc, name)
 			}
 		}
+		// Discover NEW function entries by looking for `link.w a6, ...`
+		// (opcode 0x4E56) at the current PC. Limit to first sighting.
+		if _, ok := newFuncs[pc]; !ok && len(newFuncs) < maxNewFuncs {
+			if pc < 0x80000 { // ROM only
+				w := m.Bus.Read(pc, bus.Word)
+				if w == 0x4E56 {
+					newFuncs[pc] = step
+				}
+			}
+		}
 		if err := m.CPU.Step(); err != nil {
 			fmt.Printf("step %d: CPU error: %v at PC=%#06X\n", step, err, pc)
 			break
 		}
+	}
+
+	fmt.Printf("\n=== NEW function entries (link.w a6 at PC) — %d found ===\n", len(newFuncs))
+	// Sort by step seen.
+	type entry struct {
+		pc, step uint32
+	}
+	var sorted []entry
+	for pc, step := range newFuncs {
+		sorted = append(sorted, entry{pc, uint32(step)})
+	}
+	for i := range sorted {
+		for j := i + 1; j < len(sorted); j++ {
+			if sorted[j].step < sorted[i].step {
+				sorted[i], sorted[j] = sorted[j], sorted[i]
+			}
+		}
+	}
+	for _, e := range sorted {
+		name := watchPCs[e.pc]
+		if name == "" {
+			name = "(unknown)"
+		}
+		fmt.Printf("  step %6d  PC=%#06X  %s\n", e.step, e.pc, name)
 	}
 
 	fmt.Printf("\n=== PC visit summary (after %d steps) ===\n", maxSteps)
