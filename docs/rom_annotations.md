@@ -248,6 +248,48 @@ b07a, b07c, b0ce) that route execution AWAY from the bclrs under
 steady-state RAM. `Machine.DriveOperatingTick` remains the canonical
 primitive for forcing the operating tick to execute its deep path.
 
+#### LAYER 2 investigation summary
+
+Each state-flag gate has its own production site, and the chain is
+deep. Findings from `cmd/tickflags` LAYER 2 experiment:
+
+| Gate bit         | Production site PC | Gated on            |
+|------------------|-------------------|---------------------|
+| `$b0ce.11`       | `0x0A2F2` (bset)  | Inside `fcn.A250`. `fcn.A250` runs only when `$b0ab != 0`. `$b0ab = 0x12` is written at PC `0x1B310` IF dispatch slot `0x5C8` returns D0 bit 0 set. |
+| `$b1f8.11`       | `0x3C960` (bset)  | Inside some display/state function. Reached only when D0 > 0 from PC `0x3C952`'s prior computation. |
+| `$b1f8.12`       | `0x12290`, `0x12E0E`, `0x15154`, `0x165E8`, `0x31FE4`, `0x34B5A`, `0x34E68`, `0x34EDA`, `0x352C4`, `0x357DA` — 10 sites | Multiple display / sweep / mode-change functions. |
+| `$b1e0.9`        | (no direct bset/bclr found — set via word writes to `$b1e0`) | Likely set when a key is queued for processing. |
+| `$9afb.2`        | `0x56CC8` (bset), `0x568FC` (bclr) | In some operating-mode handler. |
+| `$befa.10` clear | IRQ5 handler-related | Periodically set; needs to be clear when the operating tick checks it. |
+
+The production sites depend on *each other* — many are reached only
+when the operating tick has already done some prior work. So
+"naturally setting LAYER 2 bits" reduces to "letting the operating
+tick run far enough that it sets its own bits via its work loop" —
+which is what the natural dispatch is trying to do.
+
+**Workaround that works** (committed in `cmd/tickflags`): force PC to
+`0x18ADC` (deep block) WITH the LAYER 2 probe `$b0ab := 0x12` plus
+the original DriveOperatingTick pre-arms. The key bclr at `0x18F42`
+fires + the sweep-done bclr at `0x17346` fires. Verified end-to-end
+in `TestDriveOperatingTickClearsKeyAndSweepFlags`.
+
+**Path to a clean LAYER 2 fix** (multi-week scope; not done):
+
+1. Drive a tick from natural IRQ4 (TMS9914A + key FIFO non-empty —
+   already works post-`ad73a99`).
+2. Let the operating tick body's first iteration set the gating bits
+   via its work loops.
+3. The SECOND tick (and subsequent ones) would then take the deep
+   path naturally because the gates are now set.
+4. The complication: each iteration's state is rolled back partially
+   by other handlers (IRQ5 timers, sweep handlers, etc) so subsequent
+   iterations may need DIFFERENT state arming.
+
+This is a deep model-of-the-firmware-state-machine task. The TMS9914A
+model is the prerequisite that's now in place; the full LAYER 2 fix
+is a separate multi-week investigation.
+
 ---
 
 ## A16 analog-bus select map (decoded via `cmd/abusprobe`, 100M-cycle survey)

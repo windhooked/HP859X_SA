@@ -125,8 +125,13 @@ func main() {
 	m.Bus.Write(0xFFBEFA, bus.Word, befaInit)
 	b9afb := uint32(m.Bus.Read(0xFF9AFB, bus.Byte)) | (1 << 2)
 	m.Bus.Write(0xFF9AFB, bus.Byte, b9afb)
-	// Leave b1f8 alone — the 0x188B6 loop is on a DIFFERENT path we
-	// no longer need to traverse since we're taking the early exit.
+	// LAYER 2 investigation: b0ab=0x12 would normally be set by the
+	// firmware at PC 0x1B310 IF the dispatch at slot 0x5C8 returned
+	// D0 with bit 0 set. With b0ab non-zero, fcn.A250 (which sets
+	// b0ce.11) runs to completion instead of early-exiting. Pre-arm
+	// it to see whether the operating tick takes a different path.
+	m.Bus.Write(0xFFB0AB, bus.Byte, 0x12)
+	fmt.Println("  b0ab := 0x12  (LAYER 2: enables fcn.A250 which sets b0ce.11 dynamically)")
 
 	fmt.Println("\nForcing operating tick (10M cycles, instrumented):")
 
@@ -159,12 +164,10 @@ func main() {
 	fmt.Printf("  IRQ3 re-injected: bc67=%02X\n",
 		uint32(m.Bus.Read(0xFFBC67, bus.Byte)))
 
-	// Force PC directly to 0x18ADC — the start of the deep-block path
-	// to the key bclr. This skips the entry-block checks (PC 0x18568 —
-	// 0x185D0) which would overwrite our b010 pre-arm via `move.w
-	// f300, b010` at PC 0x1856C. From 0x18ADC we should flow through
-	// 0x18B00 → 0x18E20 → 0x18E54 → 0x18E62 → 0x18E6E → (if 9afb.2
-	// set) 0x18E76 → 0x18E7A → bra 0x18F42 → bclr fires.
+	// Force PC directly to 0x18ADC — the deep-block entry. With the
+	// pre-arms above (including the b0ab=0x12 LAYER 2 probe that
+	// enables fcn.A250 to set b0ce.11 dynamically when reached), the
+	// deep path fires the key bclr at PC 0x18F42.
 	fmt.Println("\n>>> Force PC = 0x18ADC (deep-block entry) <<<")
 	m.CPU.SetReg(cpu.PC, 0x18ADC)
 	const maxInstrumented = 20_000_000
