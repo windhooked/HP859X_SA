@@ -297,6 +297,52 @@ mapped — that's future work to verify a specific command's
 observable side effect (e.g. center-frequency value written to a
 RAM cell).
 
+### Per-command execution status (empirical from `cmd/hpibtrace`)
+
+After confirming the receive + parser chain works end-to-end
+(`TestSendHPIBPlusDriveOperatingTickDrainsParserFIFO`), the next
+question is whether a specific command produces an observable side
+effect (e.g. `CF1GZ;` updates the center-frequency RAM cell).
+
+`cmd/hpibtrace "CF1GZ;"` runs a baseline `DriveOperatingTick` without
+a command, then a second run with `SendHPIB("CF1GZ;")` + the same
+tick, and diffs the resulting RAM state — filtering out ambient
+tick noise (~1135 baseline byte changes).
+
+**Result for `CF1GZ;`** (commit `51d8ac3`+):
+
+  11 command-specific byte changes:
+
+    [0xFF93A5]               0x56 → 0x57   (some counter +1)
+    [0xFFB05F]               0x00 → 0x01   (b05f bit 0 — our SendHPIB pre-arm)
+    [0xFFBC27]               0x00 → 0x06   (bc26 read idx = 6, parser consumed 6 bytes)
+    [0xFFBC29]               0x00 → 0x06   (bc28 write idx = 6, all 6 bytes pushed)
+    [0xFFBDB0..0xFFBDB5]     'C' 'F' '1' 'G' 'Z' ';'  (the bytes themselves in buffer)
+    [0xFFBF05]               0x00 → 0x03   (bf05 from f160 read)
+
+**Interpretation**: the parser consumed the bytes but **the
+center-frequency RAM cell did NOT update**. The handler either
+didn't run, or it writes to RAM areas we haven't identified yet
+(CalRAM at `0x2FC000`, or other state regions), or the firmware
+needs additional state for command execution (REMOTE mode flag,
+EOI handling, command-pending queue, etc.).
+
+The mystery write at `0xFF93A5` is intriguing — it's not directly
+referenced from any ROM PC (search returned 0 hits for both
+`93A4` and `93A5`), so it must be accessed via an indirect
+pointer (struct + offset, etc.).
+
+**Open follow-up threads:**
+
+1. Try different command terminators (newline, EOI, no `;`).
+2. Try simpler commands (`IP;` = Initial Preset — should write
+   many RAM cells if it runs).
+3. Trace `0xFF93A5` access via single-step instrumentation.
+4. Check whether the firmware needs a REMOTE-mode setup before
+   accepting commands.
+5. Verify CalRAM (`0x2FC000`-`0x2FFFFF`) doesn't contain the
+   command-state region we're missing.
+
 ### Architectural status (post-TMS9914A)
 
 The TMS9914A model **unblocks LAYER 1** of the natural-dispatch
