@@ -173,6 +173,31 @@ func (m *HP8593AMMIO) Read(addr uint32, sz bus.Size) uint32 {
 		return uint32(m.HPIB.ReadByte(addr - 0x600))
 	}
 
+	// HP-IB data path via the front-panel μC ports (Rev L Empirically
+	// derived from the IRQ4 handler at PC 0x2642+):
+	//   $f160 (read) — HP-IB status byte. Bit 0 = "I/O active", bit 1
+	//                  = "data byte available" — the firmware checks
+	//                  these before reading $f140.
+	//   $f140 (read) — HP-IB data byte. Returns the next byte the chip
+	//                  has queued; reading consumes it.
+	// We route both through the TMS9914A's input buffer so the
+	// SendHPIB/Push API can feed bytes via the chip and the firmware
+	// will receive them via this hardware path (which is how the
+	// 8593A wires up HP-IB inside the box).
+	if sz == bus.Byte {
+		switch addr {
+		case 0x160:
+			// Report bits 0+1 set when bytes are pending.
+			if m.HPIB.PendingInput() > 0 {
+				return 0x03
+			}
+			return 0
+		case 0x140:
+			// Pop one byte from the chip's input buffer when read.
+			return uint32(m.HPIB.ReadByte(0xE)) // chip's DIR
+		}
+	}
+
 	// Hard-override: SCI status byte is always "ready" regardless of what the
 	// firmware may have written — the real hardware asserts this asynchronously.
 	// Sweep-status register bit 12 is always asserted so display-update loops

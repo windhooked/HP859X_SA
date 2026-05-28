@@ -60,6 +60,12 @@ type TMS9914A struct {
 	// model we initialise these to a "bus idle" snapshot so polling
 	// loops see a quiescent bus.
 	rregs [8]byte
+
+	// inputBuf holds bytes queued via Push() for the firmware to read
+	// via DIR (register 7, MMIO offset 0xE). Each read of DIR drains
+	// one byte from the head; when the buffer is non-empty IS0.BI is
+	// set, modelling the chip's "byte in available" behaviour.
+	inputBuf []byte
 }
 
 // TMS9914 register offsets (from chip base; both read and write).
@@ -139,11 +145,23 @@ func tms9914RegFromOffset(off uint32) int {
 }
 
 // ReadByte returns the byte at the given chip-local offset (0..0x1F).
-// Reads at odd offsets and at offsets above 0x0F return 0.
+// Reads at odd offsets and at offsets above 0x0F return 0. A read of
+// DIR (offset 0xE / register 7) drains one byte from the input buffer;
+// when the buffer becomes empty IS0.BI is cleared automatically.
 func (t *TMS9914A) ReadByte(off uint32) byte {
 	idx := tms9914RegFromOffset(off)
 	if idx < 0 {
 		return 0
+	}
+	if idx == tms9914Reg7 && len(t.inputBuf) > 0 {
+		b := t.inputBuf[0]
+		t.inputBuf = t.inputBuf[1:]
+		t.rregs[tms9914Reg7] = b
+		if len(t.inputBuf) == 0 {
+			// Drop BI; firmware sees "no more bytes pending".
+			t.rregs[tms9914Reg0] &^= TMS9914_IS0_BI
+		}
+		return b
 	}
 	return t.rregs[idx]
 }
@@ -208,6 +226,27 @@ func (t *TMS9914A) SetIS0(bits byte) {
 func (t *TMS9914A) SetIS1(bits byte) {
 	t.rregs[tms9914Reg1] |= bits
 }
+
+// Push queues `bytes` for the firmware to read via the DIR register.
+// On the first push to an empty buffer the chip asserts IS0.BI (Byte
+// In available); subsequent reads of DIR drain bytes one at a time
+// (see ReadByte). A real bus would clock bytes in one at a time; for
+// the minimal model we batch them so callers can push a whole command
+// string in one call.
+//
+// Returns the new buffer length so callers can verify the chip
+// accepted the bytes.
+func (t *TMS9914A) Push(bytes []byte) int {
+	t.inputBuf = append(t.inputBuf, bytes...)
+	if len(t.inputBuf) > 0 {
+		t.rregs[tms9914Reg0] |= TMS9914_IS0_BI
+	}
+	return len(t.inputBuf)
+}
+
+// PendingInput returns how many bytes are still queued for the
+// firmware to read.
+func (t *TMS9914A) PendingInput() int { return len(t.inputBuf) }
 
 // IS0 / IMR0 / IS1 / IMR1 / ADSR / AUXCR / BSR / ADR accessors for tests
 // and the IRQ-trigger logic.

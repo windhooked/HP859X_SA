@@ -235,6 +235,68 @@ register but have no modelled side effect.
     `fcn.1D58` (LAYER 1 of the path-A obstruction fix; LAYER 2 still
     in place per the operating-tick early-exit branches).
 
+### HP-IB command receive + dispatch chain
+
+The HP 8593A's HP-IB command flow (Rev L, decoded empirically):
+
+1. **External**: bytes arrive via either the TMS9914A chip (real bus) or
+   the front-panel μC's HP-IB-bridge port at MMIO `0xFFF160`/`0xFFF140`.
+   Our model: `Machine.SendHPIB(bytes, maxCycles)` pushes bytes via the
+   chip's `Push(bytes)` API, which makes the f140 read return queued
+   bytes one at a time and f160 read return status `0x03` (bits 0+1
+   set) while bytes are pending.
+
+2. **IRQ4 handler** at PC `0x002642`:
+   - Tests `b05f.0` — must be set to take the f160 path (`SendHPIB`
+     pre-arms this).
+   - `move.b $f160.w, $bf05.w` — read HP-IB status into bf05.
+   - `btst #0, $bf05.w` AND `btst #1, $bf05.w` — verify "data ready".
+   - `move.b #$c, $f130.w` — strobe the front-panel μC.
+   - `move.b $f140.w, D0` — read the data byte.
+   - `lea $bc12.w, A0; jsr $42f8.w` — push the byte into the parser
+     FIFO at `0xFFBC12` (data buffer at `0xFFBDB0`).
+
+3. **Parser FIFO** at `0xFFBC12`:
+   - size = 0x52 (82 bytes) at offset `0xE` = `$bc20`
+   - data buffer pointer at offset `0x10` = `$bc22` = `0xFFBDB0`
+   - read index at offset `0x14` = `$bc26`
+   - write index at offset `0x16` = `$bc28`
+
+4. **Parser invocation** at operating-tick PC `0x18F3E`:
+   `jsr $69a.w` → slot `0x69A` → `fcn.58C2E` — the HP-IB command parser.
+
+5. **Parser** `fcn.58C2E`:
+   - Checks the FIFO via `lea $bc12.w, A0; jsr $4340.w` (count).
+   - Pops bytes via `lea $bc12.w, A0; jsr $427c.w` at PC `0x58C6A`.
+   - Calls a per-byte state machine `bsr $57278` to recognise
+     mnemonics + collect arguments + dispatch handlers.
+
+### `Machine.SendHPIB` API (LAYER 1 fully wired)
+
+```go
+// SendHPIB queues `bytes` for the firmware to receive over HP-IB,
+// then drives the natural receive path until the chip's input
+// buffer is drained. After the call, `bytes` are in the parser FIFO
+// at $bc12; call DriveOperatingTick to make the operating tick's
+// slot 0x69A consume them via fcn.58C2E.
+func (m *Machine) SendHPIB(bytes []byte, maxCycles int) int
+```
+
+Empirically verified end-to-end (`TestSendHPIBPlusDriveOperatingTickDrainsParserFIFO`):
+
+  - `SendHPIB("ABCDE", 5M)` returns `pending=0` (chip drained).
+  - bc12 FIFO write index `$bc28` advances `0x0000 → 0x0005`.
+  - Bytes at `0xFFBDB0..0xFFBDB4` = `'A','B','C','D','E'`.
+  - `DriveOperatingTick(20M)` runs the parser via slot 0x69A.
+  - bc12 FIFO read index `$bc26` advances `0x0000 → 0x0005` —
+    **all 5 bytes consumed by fcn.58C2E**.
+
+The parser ran end-to-end. Per-command HANDLER PCs (e.g. for CF
+center-frequency, SP span) and their RAM-side effects are not yet
+mapped — that's future work to verify a specific command's
+observable side effect (e.g. center-frequency value written to a
+RAM cell).
+
 ### Architectural status (post-TMS9914A)
 
 The TMS9914A model **unblocks LAYER 1** of the natural-dispatch

@@ -204,6 +204,58 @@ const OperatingTickEntry = uint32(0x018568)
 // 0x1856C).
 const OperatingTickDeepBlock = uint32(0x018ADC)
 
+// SendHPIB queues `bytes` for the firmware to receive over HP-IB, then
+// drives the natural receive path until the chip's input buffer is
+// drained (or `maxCycles` elapses). The firmware's IRQ4 handler at
+// PC 0x2642 reads bytes from the chip's DIR register and pushes them
+// into the FIFO at RAM 0xFFBC12 via fcn.42F8. The operating tick's
+// slot 0x69A dispatch then pops bytes from that FIFO and feeds them
+// to the HP-IB command parser at fcn.58C2E.
+//
+// Returns the number of bytes still queued (0 = chip drained, the
+// firmware's IRQ4 path consumed them all).
+//
+// Verification baseline: after SendHPIB("abc"), the FIFO at
+// RAM[0xFFBC14..] should hold 'a', 'b', 'c'. (FIFO write index at
+// $bbbc advances by 3.) Reaching the COMMAND HANDLER for a recognised
+// mnemonic (e.g. CF) requires the operating tick body to dispatch
+// slot 0x69A → fcn.58C2E, which is gated by the LAYER 2 obstruction
+// documented elsewhere — pair SendHPIB with DriveOperatingTick for
+// end-to-end execution.
+func (m *Machine) SendHPIB(bytes []byte, maxCycles int) int {
+	m.MMIO.HPIB.Push(bytes)
+
+	// The IRQ4 handler at PC 0x2642 gates on `btst #0, $b05f.w` —
+	// it routes to the f160-reading data path only when b05f bit 0
+	// is set (otherwise it falls through to the PIT path at PC
+	// 0x26DC). Pre-arm bit 0 so our path runs.
+	b05f := byte(m.Bus.Read(0xFFB05F, bus.Byte)) | 0x01
+	m.Bus.Write(0xFFB05F, bus.Byte, uint32(b05f))
+
+	// Drive the receive path: fire IRQ4 with the chip in BI state so
+	// the firmware's handler reads bytes from DIR (via the MMIO
+	// route) into bf05, then bc12.
+	for done := 0; done < maxCycles; done += bootChunkCycles {
+		// Inject IRQ4 if the chip has data pending.
+		if m.MMIO.HPIB.PendingInput() == 0 {
+			break
+		}
+		m.CPU.SetIRQ(4)
+		m.CPU.Run(bootIRQServiceCost)
+		m.CPU.SetIRQ(0)
+		m.CPU.Run(bootChunkCycles)
+
+		// IRQ5 between IRQ4 ticks so timer waits inside the handler
+		// can advance.
+		if (done/bootChunkCycles)%bootIRQPeriod == 0 {
+			m.CPU.SetIRQ(5)
+			m.CPU.Run(bootIRQServiceCost)
+			m.CPU.SetIRQ(0)
+		}
+	}
+	return m.MMIO.HPIB.PendingInput()
+}
+
 // DriveOperatingTick pre-arms the RAM flags that the operating tick's
 // deep-path block tests, forces the CPU PC into the deep block, and
 // runs for `maxCycles` cycles with periodic IRQ5 ticks so internal

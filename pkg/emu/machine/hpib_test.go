@@ -66,6 +66,134 @@ func TestHPIBReadWriteRoutedThroughChip(t *testing.T) {
 	}
 }
 
+// TestSendHPIBPushesToChipInput verifies the Push/PendingInput API
+// on the TMS9914A chip — pushed bytes show up in the chip's input
+// buffer and IS0.BI gets asserted.
+func TestSendHPIBPushesToChipInput(t *testing.T) {
+	m := newMachine(t)
+
+	// Push "CF1.0GZ;" to the chip's input buffer (no firmware run yet).
+	bytes := []byte("CF1.0GZ;")
+	n := m.MMIO.HPIB.Push(bytes)
+	if n != len(bytes) {
+		t.Errorf("Push returned %d, want %d", n, len(bytes))
+	}
+	if got := m.MMIO.HPIB.PendingInput(); got != len(bytes) {
+		t.Errorf("PendingInput = %d, want %d", got, len(bytes))
+	}
+	if m.MMIO.HPIB.IS0()&device.TMS9914_IS0_BI == 0 {
+		t.Error("after Push, IS0.BI not asserted")
+	}
+
+	// Drain the buffer one byte at a time via the chip's ReadByte at
+	// DIR (chip offset 0xE).
+	for i, want := range bytes {
+		got := m.MMIO.HPIB.ReadByte(0xE)
+		if got != want {
+			t.Errorf("drain byte %d = %#02X, want %#02X (%q)", i, got, want, string(want))
+		}
+	}
+
+	// Buffer empty + BI cleared.
+	if got := m.MMIO.HPIB.PendingInput(); got != 0 {
+		t.Errorf("after drain, PendingInput = %d, want 0", got)
+	}
+	if m.MMIO.HPIB.IS0()&device.TMS9914_IS0_BI != 0 {
+		t.Errorf("after drain, IS0.BI still asserted (IS0=%#02X)", m.MMIO.HPIB.IS0())
+	}
+}
+
+// TestSendHPIBDrivesIRQ4Path verifies the receive chain end-to-end:
+// after boot, SendHPIB("ABC") should drain the chip's input buffer
+// (firmware's IRQ4 handler reads DIR repeatedly) AND push at least
+// one byte into the FIFO at $bc12 (the parser's input queue).
+//
+// This validates that LAYER 1 (TMS9914A → IRQ4 handler → fcn.42F8 →
+// bc12 FIFO) is fully wired. The PARSER step (slot 0x69A → fcn.58C2E)
+// is gated by the LAYER 2 obstruction on the operating tick body
+// running; that's verified separately by combining SendHPIB with
+// DriveOperatingTick (see TestSendHPIBPlusDriveOperatingTick below).
+func TestSendHPIBDrivesIRQ4Path(t *testing.T) {
+	m := newMachine(t)
+	m.CPU.Reset()
+	m.BootToOperating(30_000_000)
+
+	// The HP-IB FIFO struct is at $bc12 with the data buffer at
+	// $bba6+0x10 = $bdb0 (per fcn.42F8 push semantics + run-time
+	// verification). The READ/WRITE indexes are at $bc12+0x14=$bc26
+	// and $bc12+0x16=$bc28.
+	bc28Before := m.Bus.Read(0xFFBC28, bus.Word)
+
+	pending := m.SendHPIB([]byte("ABC"), 5_000_000)
+
+	if pending != 0 {
+		t.Errorf("after SendHPIB, %d bytes still queued at chip — receive path didn't drain",
+			pending)
+	}
+
+	bc28After := m.Bus.Read(0xFFBC28, bus.Word)
+	if bc28After == bc28Before {
+		t.Errorf("bc12 FIFO write index did not advance (bc28=%#04X) — IRQ4 path drained chip but did NOT push to parser FIFO",
+			bc28Before)
+		return
+	}
+
+	advance := bc28After - bc28Before
+	t.Logf("bc12 FIFO write index advanced %#04X → %#04X (+%d bytes) — receive path landed bytes in the parser queue",
+		bc28Before, bc28After, advance)
+
+	// Verify the bytes match what we sent — the buffer at $bdb0 should
+	// hold "ABC" in order.
+	want := []byte("ABC")
+	for i, w := range want {
+		got := byte(m.Bus.Read(0xFFBDB0+uint32(i), bus.Byte))
+		if got != w {
+			t.Errorf("buf[%d] = %#02X, want %#02X (%q)", i, got, w, string(w))
+		}
+	}
+}
+
+// TestSendHPIBPlusDriveOperatingTickDrainsParserFIFO verifies the full
+// receive + dispatch chain: SendHPIB lands bytes in the parser FIFO
+// at $bc12, then DriveOperatingTick runs the operating tick body
+// which calls slot 0x69A (= fcn.58C2E, the HP-IB parser) from PC
+// 0x18F3E. The parser pops bytes from the FIFO; we observe by
+// checking the FIFO READ index ($bc26) advances.
+//
+// The full command-execution verification (e.g. CF 1.0GZ landing in
+// the center-frequency RAM cell) requires tracing the parser's
+// state machine to the per-command handlers — those PCs aren't yet
+// documented. This test validates the chain UP TO the parser
+// consuming the bytes; per-command execution is future work.
+func TestSendHPIBPlusDriveOperatingTickDrainsParserFIFO(t *testing.T) {
+	m := newMachine(t)
+	m.CPU.Reset()
+	m.BootToOperating(30_000_000)
+
+	// Push bytes via SendHPIB — receive path fills $bc12 FIFO.
+	pending := m.SendHPIB([]byte("ABCDE"), 5_000_000)
+	if pending != 0 {
+		t.Fatalf("SendHPIB left %d bytes pending at chip", pending)
+	}
+
+	bc26Before := m.Bus.Read(0xFFBC26, bus.Word)
+	bc28After := m.Bus.Read(0xFFBC28, bus.Word)
+	t.Logf("after SendHPIB: bc26=%#04X (read idx) bc28=%#04X (write idx) — FIFO has %d bytes",
+		bc26Before, bc28After, bc28After-bc26Before)
+
+	// Drive the operating tick — slot 0x69A should pop bytes from $bc12.
+	endPC := m.DriveOperatingTick(20_000_000)
+
+	bc26After := m.Bus.Read(0xFFBC26, bus.Word)
+	if bc26After == bc26Before {
+		t.Errorf("after DriveOperatingTick, bc26 read index did not advance — parser fcn.58C2E was NOT reached (end PC=%#06x)",
+			endPC)
+	} else {
+		t.Logf("bc26 read index advanced %#04X → %#04X (+%d bytes consumed) — parser ran end-to-end!",
+			bc26Before, bc26After, bc26After-bc26Before)
+	}
+}
+
 // TestHPIBNaturalDispatchReachesFcn1D58 is the architectural-unblock
 // integration test. Goal: with the TMS9914A chip in a state where it
 // is signaling activity, AND the front-panel key FIFO at $bba6 having
