@@ -379,7 +379,82 @@ and later replayed via fcn.58C2E. The receive path we have
 plumbed feeds the **tokenized** interpreter — sending ASCII
 through it is effectively a no-op.
 
-**The ASCII parser must be a different entry point.** Candidates:
+**Update (next commit) — ASCII parser chain LOCATED, via PC-trace probe
+`cmd/hpibstep`**. The earlier "fcn.58C2E is binary-only" framing was
+incomplete. There IS an ASCII byte-handling branch inside the same
+`fcn.58C2E` / `fcn.57278` pair — it just routes the byte through a
+translation table BEFORE buffering it. Concretely (for input ASCII 'I'
+= 0x49, verified with 200 000-step PC trace):
+
+| Step | PC      | Function | Notes |
+|------|---------|----------|-------|
+| 1 | 0x58C2E | fcn.58c2e entry | tick parser-slot called from operating loop |
+| 2 | 0x58C68 | fcn.58c2e loop top | pops byte from bc12 FIFO |
+| 3 | 0x58C88 | bsr fcn.57278 | per-byte classifier |
+| 4 | 0x57278 | fcn.57278 entry | state machine on bc64/bc65 mode bits |
+| 5 | 0x576EC | bsr fcn.5714c | byte falls into the 0x0E..0x7D printable range |
+| 6 | 0x5714C | fcn.5714c entry | **input-code → ASCII translator** |
+| 7 | 0x5717A | indexed table lookup | `lea.l ROM_0x55C28(pc), a4; -3(a6) = (a4)[d1]` |
+| 8 | 0x57180 | optional case-fold | gated by bc65.2 (currently SET) |
+| 9 | 0x57274 | return d0 = translated byte | |
+| 10 | 0x57940 | fcn.57278 returns d0 | (= translated byte for ASCII path) |
+| 11 | 0x58C8C | store d0 → -6(a6) | |
+| 12 | 0x58D4A | bit-13 of bc64 clear → normal dispatch | |
+| 13 | 0x58D50 | mask 0xFF00 → high byte 0 (ASCII case) | |
+| 14 | 0x58D60 | ASCII branch | |
+| 15 | 0x58D68 | bsr fcn.567e0 | ASCII per-byte handler |
+| 16 | 0x567E0 | fcn.567e0 entry | checks bc36 vs 0xF3 (buffer-full), branches on bc38 |
+| 17 | 0x564BE | fcn.564be (bc38==0 path) | tests `0x9afb.7` |
+| 18 | 0x56414 | fcn.56414 (9afb.7 SET) | **writes translated byte to ASCII buffer** |
+
+After SendHPIB('I') + one parser-tick, RAM observed at:
+
+```
+0xFFBC32 = 0x0001  (ASCII buffer read idx — advanced)
+0xFFBC34 = 0x0001  (long ptr seed — advanced)
+0xFFBC36 = 0x0001  (ASCII buffer write idx — advanced)
+0xFFBE02 = 0x2E    ('.' — the translated ASCII byte!)
+0xFFBDB0 = 0x49    ('I' — the original byte in the FIFO buffer)
+```
+
+So the pipeline IS wired and the firmware DOES execute byte-by-byte
+buffering. The blocker is the **translation table at ROM 0x55C28**:
+
+| input byte | (input-0x0E)\*2 | table value | meaning |
+|-----------|----------------|-------------|---------|
+| 0x41 'A'  | 0x66           | 0x2C ','    | NOT identity |
+| 0x49 'I'  | 0x76           | 0x2E '.'    | NOT identity |
+| 0x43 'C'  | 0x6A           | 0x69 'i'    | NOT identity |
+
+So the firmware is NOT directly accepting host-sent ASCII. The table maps
+**internal-code bytes** to ASCII. The host (or a tokenizer layer between
+the front-panel μC and the CPU) must convert real ASCII → internal-code
+before bytes arrive at bc12, OR a mode bit bypasses the table for
+plain-ASCII operation.
+
+Likely candidates for the bypass:
+
+- `bc65.5` set → fcn.57278 takes the `0x57290` path (sub-mode A), which
+  recognises different bytes;
+- `bc65.4` set → similar sub-mode B at `0x57344`;
+- `bc65.3` set → sub-mode at `0x5736a`;
+- `bc64.13` set → fcn.58c2e bit-13 path at `0x58C9E → 0x58CA2` (the
+  "PRINT/PLOT mode" — calls fcn.586ae instead of fcn.567e0).
+
+The next investigation is whether REMOTE-mode setup (LISTEN, MLA, etc.
+in HP-IB protocol) sets one of these bits, which would let raw ASCII
+pass through.
+
+**The 0x07E780 command-name table** found earlier is still a real
+artifact — it's reachable from the byte-buffer side (after a complete
+command is collected at 0xFFBE02+, a separate parser must walk that
+buffer and look up command names in the table). That follow-up needs
+to find the buffer-consumer (likely a function that reads from bc34
+and scans the 0x07E780 table on `<CR>` or `;`).
+
+---
+
+**Original "Open follow-up threads" (mostly superseded by the above):**
 
 - A command-name lookup table starts at ROM `0x07E780`–`0x07F400`
   with entries like `30 02 'ID\0' 83 01 B2`, `30 08 'REV \0'

@@ -85,7 +85,26 @@ func main() {
 
 	fmt.Printf("after DriveOperatingTick: end PC=%#06X\n", endPC)
 	fmt.Printf("  bc26 = %#04X (parser read idx)\n", m.Bus.Read(0xFFBC26, bus.Word))
-	fmt.Printf("  bc28 = %#04X (parser write idx)\n\n", m.Bus.Read(0xFFBC28, bus.Word))
+	fmt.Printf("  bc28 = %#04X (parser write idx)\n", m.Bus.Read(0xFFBC28, bus.Word))
+	// ASCII-buffer state cells used by fcn.567e0 / fcn.56dae:
+	// bc32 = read idx, bc34 = base ptr (longword), bc36 = write idx, bc38 = state flag.
+	// Print these BEFORE filtering — they tell us if the ASCII parser ran.
+	fmt.Printf("  bc32 = %#04X bc34 = %#06X (long) bc36 = %#04X bc38 = %#04X\n",
+		m.Bus.Read(0xFFBC32, bus.Word),
+		m.Bus.Read(0xFFBC34, bus.Long),
+		m.Bus.Read(0xFFBC36, bus.Word),
+		m.Bus.Read(0xFFBC38, bus.Word))
+	// Compare to baseline values for these cells:
+	fmt.Printf("  (baseline at same cells: bc32=%#04X bc34=%#06X bc36=%#04X bc38=%#04X)\n",
+		mBase.Bus.Read(0xFFBC32, bus.Word),
+		mBase.Bus.Read(0xFFBC34, bus.Long),
+		mBase.Bus.Read(0xFFBC36, bus.Word),
+		mBase.Bus.Read(0xFFBC38, bus.Word))
+	// Parser state bits used by fcn.58C2E / fcn.57278 / fcn.5714c:
+	fmt.Printf("  parser state: bc64=%#06X bc65=%#04X (mode bits) 9afb=%#04X (bit 7 = handler-select)\n\n",
+		m.Bus.Read(0xFFBC64, bus.Word),
+		m.Bus.Read(0xFFBC65, bus.Byte),
+		m.Bus.Read(0xFF9AFB, bus.Byte))
 
 	// Diff: find addresses that CHANGED.
 	type change struct {
