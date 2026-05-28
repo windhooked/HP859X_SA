@@ -196,6 +196,65 @@ func (m *Machine) bootLoop(maxCycles int, lb *emutest.LoopBreaker) {
 // table" / slot 0x148.
 const OperatingTickEntry = uint32(0x018568)
 
+// OperatingTickDeepBlock is the entry to the deep-path block of the
+// operating tick that leads to the key-flag bclr at PC 0x18F42 AND
+// (via slot dispatch) the sweep-done bclr at fcn.17346. Use this with
+// DriveOperatingTick to bypass the entry-block MMIO reads (which would
+// overwrite any pre-arm of $b010 via `move.w $f300.w, $b010.w` at PC
+// 0x1856C).
+const OperatingTickDeepBlock = uint32(0x018ADC)
+
+// DriveOperatingTick pre-arms the RAM flags that the operating tick's
+// deep-path block tests, forces the CPU PC into the deep block, and
+// runs for `maxCycles` cycles with periodic IRQ5 ticks so internal
+// timer-wait loops advance. Returns the PC at exit.
+//
+// The deep-block path flows through:
+//
+//	0x18ADC → 0x18B00 → 0x18E20 → 0x18E54 → 0x18E62 → 0x18E6E →
+//	(gated on 9afb bit 2 set) → 0x18E76 → bra 0x18F42 → bclr fires
+//
+// and also reaches the sweep-done processor at fcn.17346 via slot
+// dispatches from inside the deep block. Empirically (cmd/tickflags
+// force-experiment, commit d40b9d8) with the pre-arms below the bclr
+// at PC 0x18F42 fires 2× and the bclr at PC 0x17346 fires 6× within
+// 20M cycles, clearing both the key flag (bc67 bit 0) and the
+// sweep-done flag (befa bit 13).
+//
+// Pre-arm:
+//
+//	$b1e0 := 0x0200   bit 9 set so 0x18AFC doesn't skip to 0x18FD6
+//	$befa &= ~0x0400  bit 10 clear so 0x18B00 doesn't skip to 0x18FD6
+//	$9afb |= 0x04     bit 2 set so 0x18E6E falls through to bra-to-bclr
+//
+// Why this exists: the natural dispatch chain via fcn.1B40 never
+// reaches fcn.18568 in our environment because path A at PC 0x1E60
+// always pre-sets RAM[0xFFBF0A] to the sweep-handler pointer 0x3AD0
+// (which itself doesn't return), so fcn.1B40's stack-rts dispatches
+// to the sweep handler instead of slot 0x148 (operating tick). Even
+// when fcn.18568 IS reached (via ForceOperatingTick from the entry),
+// the entry block's MMIO reads overwrite the pre-arm before the
+// deep-path checks fire. DriveOperatingTick is the validated
+// programmatic substitute.
+func (m *Machine) DriveOperatingTick(maxCycles int) uint32 {
+	m.Bus.Write(0xFFB1E0, bus.Word, 0x0200)
+	befa := m.Bus.Read(0xFFBEFA, bus.Word) &^ 0x0400
+	m.Bus.Write(0xFFBEFA, bus.Word, befa)
+	b9afb := m.Bus.Read(0xFF9AFB, bus.Byte) | 0x04
+	m.Bus.Write(0xFF9AFB, bus.Byte, b9afb)
+
+	m.CPU.SetReg(cpu.PC, OperatingTickDeepBlock)
+	for done := 0; done < maxCycles; done += bootChunkCycles {
+		m.CPU.Run(bootChunkCycles)
+		if (done/bootChunkCycles)%bootIRQPeriod == 0 {
+			m.CPU.SetIRQ(5)
+			m.CPU.Run(bootIRQServiceCost)
+			m.CPU.SetIRQ(0)
+		}
+	}
+	return m.CPU.Reg(cpu.PC)
+}
+
 // ForceOperatingTick directly invokes the firmware's main operating-tick
 // function at fcn.18568 by setting the CPU's PC to OperatingTickEntry and
 // running for `maxCycles` cycles, with periodic IRQ5 (timer) injection

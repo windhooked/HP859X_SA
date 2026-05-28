@@ -90,13 +90,50 @@ func TestForceOperatingTickRunsAndExits(t *testing.T) {
 // cycles. If this test fails the operating tick's body has changed
 // (different early-exit branch taken) or the key-flag RAM location
 // has moved — both notable Rev-L firmware changes.
-// A stronger test of ForceOperatingTick — asserting it reaches the
-// bclr at PC 0x18F42 and clears bc67 bit 0 — would require setting up
-// the dispatcher's RAM state in the configuration the firmware would
-// natively build before invoking the operating tick. That setup is
-// non-trivial (the natural path-A entry at 0x1E60 perpetually
-// redirects bf0a to the sweep handler at 0x3AD0, so the firmware
-// itself never gets there). cmd/keystate is the experimental harness
-// for investigating that line. The basic-contract test above —
-// "PC advances past entry, function runs" — is what holds without
-// further pre-arming.
+// TestDriveOperatingTickClearsKeyAndSweepFlags is the end-to-end
+// integration test for the tick-driver primitive. After boot, with
+// IRQ3 fired (key flag set), DriveOperatingTick MUST:
+//
+//   (a) reach the bclr at PC 0x18F42 (the key-flag clear), and
+//   (b) reach the bclr at PC 0x17346 (the sweep-done flag clear),
+//
+// observable as bc67 bit 0 going 1→0 and befa bit 13 going 1→0.
+//
+// This validates the WHOLE dispatcher / operating-tick / consumer
+// chain end-to-end without relying on the natural firmware-event
+// flow (which the path-A 0x1E60 obstruction blocks; see
+// docs/rom_annotations.md and the rev-l-key-consumer-chain memory).
+func TestDriveOperatingTickClearsKeyAndSweepFlags(t *testing.T) {
+	m := newMachine(t)
+	m.CPU.Reset()
+	m.BootToOperating(30_000_000)
+
+	// Inject IRQ3; handler at ROM 0x2B26 does `bset #0, $bc67.w`.
+	m.CPU.SetIRQ(3)
+	m.CPU.Run(400)
+	m.CPU.SetIRQ(0)
+	keyBefore := byte(m.Bus.Read(keyFlagRAM, bus.Byte))
+	if keyBefore&0x01 == 0 {
+		t.Fatalf("IRQ3 did not set bc67 bit 0 (before=%#02x); IRQ3 handler may have changed",
+			keyBefore)
+	}
+
+	// Pre-arm the sweep-done flag too so we can verify the bclr at
+	// PC 0x17346 fires alongside the key-flag bclr.
+	befaBefore := uint32(m.Bus.Read(0xFFBEFA, bus.Word)) | (1 << 13)
+	m.Bus.Write(0xFFBEFA, bus.Word, befaBefore)
+
+	endPC := m.DriveOperatingTick(20_000_000)
+
+	keyAfter := byte(m.Bus.Read(keyFlagRAM, bus.Byte))
+	befaAfter := m.Bus.Read(0xFFBEFA, bus.Word)
+
+	if keyAfter&0x01 != 0 {
+		t.Errorf("DriveOperatingTick did not clear bc67 bit 0: before=%#02x after=%#02x final PC=%#06x",
+			keyBefore, keyAfter, endPC)
+	}
+	if befaAfter&(1<<13) != 0 {
+		t.Errorf("DriveOperatingTick did not clear befa bit 13: before=%04X after=%04X",
+			befaBefore, befaAfter)
+	}
+}
