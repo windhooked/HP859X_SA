@@ -120,8 +120,8 @@ func main() {
 	fmt.Printf("  IRQ6 ticks=%d  draw: moves=%d glyphs=%d lines=%d dots=%d paints=%d\n",
 		irq6Count, preMoves, preGlyphs, preLines, preDots, prePaints)
 
-	fmt.Printf("\n>>> Forcing operating tick (PC=0x18568) <<<\n")
-	endPC := m.ForceOperatingTick(10_000_000)
+	fmt.Printf("\n>>> Driving operating tick (deep-block + pre-arm; 20M cycles) <<<\n")
+	endPC := m.DriveOperatingTick(20_000_000)
 
 	fmt.Printf("\nPOST-TICK:\n")
 	fmt.Printf("  end PC=%06X  bf30=%08X bf34=%08X befa=%04X\n",
