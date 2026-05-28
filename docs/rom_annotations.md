@@ -230,16 +230,35 @@ Total entries ≈ 200+; only a small fraction has been mapped to semantics.
 | `0x00D6`  | `0x00C470`  | fcn.5E?    | Used by analog-bus init |
 | `0x0124`  | `0x00ABD0`  | fcn.1B40   | SCI write: `mode=0x0002, data=0x8100` |
 | `0x012A`  | `0x05FAAE`  | n/a        | Cal subsystem helper |
-| `0x0148`  | `0x018568`  | **gate C** | **Key consumer entry** — final destination when fcn.1B40 dispatches with bf03==0 AND bf0a==0 |
+| `0x0148`  | `0x018568`  | **gate C** | **Operating tick (a.k.a. "key consumer" entry)** — see note below. fcn.1B40 dispatches here when bf03==0 AND bf0a==0. |
 | `0x014E`  | `0x032522`  | fcn.3AD0   | Sweep handler — called from operating loop |
 | `0x015A`  | `0x05ECA2`  | rev-l-memo | Indirect handler (RAM 0xCA dispatches here)|
 | `0x02FE`  | `0x02FFF4`  | rev-l-memo | RAM[0x2FE] indirect handler |
 | `0x0304`  | `0x05F11A`  | rev-l-memo | RAM[0x304] indirect handler |
+| `0x0430`  | `0x059E2C`  | key-cons   | Called by 0x18F4A inside the operating-tick — small wrapper into the 0x59000 (DLP/display state) subsystem |
 | `0x043C`  | `0x009A52`  | rev-l-memo | Sweep-done first-stage processor (called immediately after `bclr #D, $befa.w`) |
 | `0x04A2`  | `0x0192C8`  | **gate C** | **Operating-loop handler** — what bf0a perpetually points to; its body ends `bra 0x18568` (key consumer) |
 | `0x05A4`  | `0x0309C0`  | rev-l-memo | Indirect handler pointer |
 | `0x0640`  | `0x030020`  | rev-l-memo | Indirect handler pointer |
+| `0x067C`  | `0x05A0E8`  | key-cons   | Called by 0x18F84 / 0x18FA0 inside the operating-tick — DLP-state subsystem |
+| `0x069A`  | `0x058C2E`  | key-cons   | Called by 0x18F3E inside the operating-tick — reads `$b05f.w`, processes input state |
+| `0x06DC`  | `0x00967A`  | key-cons   | Called by 0x18FAC inside the operating-tick — tests `$b071.w` bit 6 |
+| `0x0736`  | `0x059D2A`  | key-cons   | Called by 0x18F54 inside the operating-tick — DLP-state subsystem (sibling of slot 0x430) |
 | `0x0C4C`  | `0x05ECDC`  | **dormant**| **Cal-init entry** — no external callers; only via user CAL command |
+
+**Note on slot 0x148 / fcn.18568**: previously called "the key consumer".
+It IS where the bclr of `$bc67.0` (the key-available flag) lives — at PC
+0x18F42, deep inside the function. But the function itself is the
+firmware's **main operating tick**: a long sequence that tests sweep
+state (`$f300.w → $b010.w`, then bits 11), display state (`$b07a.w`,
+`$b07c.w`, `$b0ce.w`), mode bits (`$b1e0.w & 6`, `$b1e4.w == 0x34`), and
+calls many other dispatch slots (`$6fa`, `$640`, `$5af4`, …) to update
+sub-states. Processing the key flag is just ONE of many sub-steps.
+
+So the gate-C investigation's framing was misleading: even if fcn.1B40
+dispatched here, a huge amount of sweep / display / mode work runs
+before (and after) the key-flag clear. The whole function is what
+the firmware would run for one "user-facing tick" cycle.
 
 To look up any slot quickly use `cmd/dispatch` — it reads the JMP at the
 slot, prints the target, and disassembles the first three instructions
