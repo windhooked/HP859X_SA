@@ -432,18 +432,64 @@ the front-panel μC and the CPU) must convert real ASCII → internal-code
 before bytes arrive at bc12, OR a mode bit bypasses the table for
 plain-ASCII operation.
 
-Likely candidates for the bypass:
+**Resolved**: the table is the **IBM PS/2 Keyboard Scan Code Set 2 →
+ASCII translation**. The match against the PS/2 Set 2 standard is exact:
 
-- `bc65.5` set → fcn.57278 takes the `0x57290` path (sub-mode A), which
-  recognises different bytes;
+| Scancode | Output  | PS/2 Set 2 |
+|----------|---------|-----------|
+| 0x15 | q/Q     | Q ✓ |
+| 0x1D | w/W     | W ✓ |
+| 0x24 | e/E     | E ✓ |
+| 0x2D | r/R     | R ✓ |
+| 0x2C | t/T     | T ✓ |
+| 0x35 | y/Y     | Y ✓ |
+| 0x3C | u/U     | U ✓ |
+| 0x43 | i/I     | I ✓ |
+| 0x44 | o/O     | O ✓ |
+| 0x4D | p/P     | P ✓ |
+| 0x1C | a/A     | A ✓ |
+| 0x1B | s/S     | S ✓ |
+| 0x23 | d/D     | D ✓ |
+| 0x2B | f/F     | F ✓ |
+| 0x66 | BS (0x08) | Backspace ✓ |
+| 0x5A | CR (0x0D) | Enter ✓ |
+| 0x29 | SP (0x20) | Space ✓ |
+| 0x16 | 1/!     | Number row ✓ |
+| 0x1E | 2/@     | Number row ✓ |
+
+So `fcn.5714c` is the **PS/2 keyboard driver**, and the bytes flowing
+through `fcn.58c2e ← bc12 FIFO ← f140/f160` are PS/2 scancodes from
+the front-panel μC — **not** raw HP-IB ASCII data.
+
+The architectural consequence: `Machine.SendHPIB` is misnamed and
+mis-routed. It injects bytes into the **keyboard input path**, which
+treats them as PS/2 scancodes. Sending ASCII 'I' (0x49) produces ASCII
+'.' in the buffer because PS/2 scancode 0x49 decodes to '.'.
+
+**To actually send HP-IB ASCII**, two architectural fixes are needed:
+
+1. **The TMS9914A chip needs its own receive route** independent of
+   the μC bridge. Real HP-IB bytes arrive at the chip at MMIO
+   `0xFFF600+`; the firmware reads them via the chip's DIR register
+   (window offset 0xE). Either the IRQ4 handler at 0x2642 has a chip-
+   direct branch we haven't located yet, OR HP-IB uses a different
+   IRQ vector / polled-read path entirely. Need to find:
+   - any read of `0xFFF60E` (DIR) or `0xFFF608` (BSR) in rom.asm;
+   - any code that writes to TMS9914A AUXCR (offset 0x4) with the
+     "listen-active" auxiliary command (0x12 — `take control` / TCA).
+2. **Either**: model the front-panel μC's HP-IB → PS/2 encoding (i.e.
+   the μC receives ASCII over HP-IB and emits scancodes to the CPU,
+   so to send 'I' we'd push scancode 0x43 not byte 0x49); **or**:
+   find the bypass mode that disables the table.
+
+**Open mode-bit candidates** (still plausible bypasses, but each needs
+to be empirically tested against the per-byte behavior):
+
+- `bc65.5` set → fcn.57278 takes the `0x57290` path (sub-mode A);
 - `bc65.4` set → similar sub-mode B at `0x57344`;
 - `bc65.3` set → sub-mode at `0x5736a`;
 - `bc64.13` set → fcn.58c2e bit-13 path at `0x58C9E → 0x58CA2` (the
   "PRINT/PLOT mode" — calls fcn.586ae instead of fcn.567e0).
-
-The next investigation is whether REMOTE-mode setup (LISTEN, MLA, etc.
-in HP-IB protocol) sets one of these bits, which would let raw ASCII
-pass through.
 
 **The 0x07E780 command-name table** found earlier is still a real
 artifact — it's reachable from the byte-buffer side (after a complete
