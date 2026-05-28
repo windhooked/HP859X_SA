@@ -201,12 +201,23 @@ func main() {
 			c.Run(bootIRQServiceCost)
 			c.SetIRQ(0)
 		}
-		// Every 8th chunk try IRQ4 (HP-IB). fcn.1D58 — the entry into
-		// the dispatch path that calls fcn.1B40 (and the key consumer)
-		// — is invoked from multiple sites in the 0x26xx region, which
-		// is the IRQ4 handler body. Without IRQ4 ticks the dispatcher
-		// never runs, regardless of bf03/bf0a state.
+		// Every 8th chunk try IRQ4 (HP-IB) AFTER forcing the dispatch
+		// state into the path that reaches the operating-tick at
+		// fcn.18568:
+		//   - befd.7 set so fcn.1D58 takes the bit-7-was-set branch,
+		//     bypassing the 0x21EC short-cut
+		//   - befe.6 set so fcn.1D58's 0x1EC2 `bclr #6, befe; beq skip`
+		//     sees the bit was set, falling through to `bsr 0x1ED0`
+		//   - bf0a forced to 0 so fcn.1B40, when finally called,
+		//     dispatches to JMP $148 (operating tick) rather than to
+		//     the sweep handler (0x3AD0) the firmware otherwise queues
 		if i%8 == 4 {
+			befd := b.Read(0xFFBEFD, bus.Byte) | 0x80
+			befe := b.Read(0xFFBEFE, bus.Byte) | 0x40
+			b.Write(0xFFBEFD, bus.Byte, befd)
+			b.Write(0xFFBEFE, bus.Byte, befe)
+			b.Write(0xFFBF0A, bus.Long, 0)
+
 			c.SetIRQ(4)
 			c.Run(bootIRQServiceCost)
 			c.SetIRQ(0)
@@ -228,6 +239,23 @@ func main() {
 			// the bf03==0 && bf0a==0 path -> JMP $148 -> key consumer.
 			b.Write(0xFFBF0A, bus.Long, 0)
 			fmt.Printf(">>> bf0a forced to 0; continuing run <<<\n\n")
+
+			// Now FORCE PC to the operating tick at fcn.18568. The natural
+			// dispatch chain via fcn.1B40 doesn't reach it in our env
+			// because path A through PC 0x1E60 always pre-sets bf0a to
+			// 0x3AD0 (sweep handler). Force-jumping here exercises the
+			// operating-tick body so we can observe (a) whether it runs
+			// to completion, (b) whether the key-flag bclr at 0x18F42
+			// fires (clearing bc67 bit 0), and (c) whether the analog-bus
+			// state machine gets exercised via sel=0x9F reads inside it.
+			fmt.Println(">>> Forcing PC = 0x18568 (operating tick entry) <<<")
+			c.SetReg(cpu.PC, 0x18568)
+			c.Run(500_000) // generous budget; function is large
+			fmt.Printf(">>> After forced tick: PC=%06X  bc67=%02X  bf03=%02X  bf0a=%08X <<<\n\n",
+				c.Reg(cpu.PC),
+				b.Read(0xFFBC67, bus.Byte),
+				b.Read(0xFFBF03, bus.Byte),
+				b.Read(0xFFBF0A, bus.Long))
 		}
 	}
 
