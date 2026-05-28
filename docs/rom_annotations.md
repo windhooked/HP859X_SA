@@ -332,16 +332,83 @@ referenced from any ROM PC (search returned 0 hits for both
 `93A4` and `93A5`), so it must be accessed via an indirect
 pointer (struct + offset, etc.).
 
-**Open follow-up threads:**
+**Update (commit pending)**: empirically follow-up on threads 1+2
+established a critical finding — **fcn.58C2E is NOT the ASCII
+mnemonic parser**. It is a binary-opcode interpreter.
 
-1. Try different command terminators (newline, EOI, no `;`).
-2. Try simpler commands (`IP;` = Initial Preset — should write
-   many RAM cells if it runs).
-3. Trace `0xFF93A5` access via single-step instrumentation.
-4. Check whether the firmware needs a REMOTE-mode setup before
-   accepting commands.
-5. Verify CalRAM (`0x2FC000`-`0x2FFFFF`) doesn't contain the
-   command-state region we're missing.
+Evidence collected with `cmd/hpibtrace`:
+
+| Input          | bytes consumed | RAM changes | Notes |
+|----------------|---------------|-------------|-------|
+| `IP;` (3 ASCII) | 3 | 8 (bookkeeping only) | `bc26=3` |
+| `IP\n` (3 ASCII)| 3 | 8 (bookkeeping only) | `bc26=3` |
+| `IP` (2 ASCII)  | 2 | 44 (parser-state pattern A) | `bc26=2` |
+| `CF` (2 ASCII)  | 2 | 44 — **identical bytes** to IP | shared cells |
+| `XQ` (garbage)  | 2 | 44 — **identical bytes** to IP/CF | shared cells |
+| `X` (1 byte)    | 1 | 5 (bookkeeping only) | no pattern A |
+| `}` (0x7D, 1B)  | 1 | 5 (bookkeeping only) | binary opcode alone |
+| `0xF0 0x7D`     | 2 | 44 — same shared cells | F0=bit5 prefix |
+| `0xE0 0x7D`     | 2 | 44 — same shared cells | E0=bit3 prefix |
+
+**Conclusion**: the 44-cell "pattern A" at `0xFF901A`, `0xFF9242`,
+and the dense block at `0xFF92F2..0xFF93AD` fires on ANY 2-byte
+input regardless of value. It is **parser state-init bookkeeping**,
+not command execution. None of the inputs tested actually
+dispatched a per-command handler with observable side effects.
+
+**Walking fcn.57278 (the per-byte interpreter)** explains why:
+
+- It is a state machine on bits in `$bc64.w`/`$bc65.w`.
+- Tested literal bytes (the only ones that produce a non-`0xFFFF`
+  return code): `0xE0`, `0xF0`, `0x7D`, `0x7A`, `0x4A`, `0x77`,
+  `0x76`, `0x68`, `0x66`, `0x78`, `0x79`, `0x5A`, `0x59`, `0x58`,
+  `0x12`, `0x14`, `0x11`, `0x7C`.
+- ASCII letters `I`, `P`, `C`, `F`, `S`, `1`, `G`, `Z`, `;` do
+  NOT match any branch — fall through to `0x5793a` exit with the
+  default `d0=0xFFFF` → caller (`fcn.58C2E` at PC `0x58C94`)
+  skips to next byte via `beq.w 0x58D6C`.
+- The bytes that DO match set state bits (`bset 5,bc65` etc.) or
+  call `fcn.56a6a` / dispatch via `fcn.56d1a` / `fcn.567e0`. They
+  are **tokenized binary opcodes**, possibly with a prefix
+  (`0xF0` → bit 5 mode, `0xE0` → bit 3 mode).
+
+This matches the architecture of the HP 859X "DLP" (Downloadable
+Programs) system: human-readable ASCII like `CF300MZ` gets
+**compiled** to byte tokens by a separate tokenizer, then stored
+and later replayed via fcn.58C2E. The receive path we have
+plumbed feeds the **tokenized** interpreter — sending ASCII
+through it is effectively a no-op.
+
+**The ASCII parser must be a different entry point.** Candidates:
+
+- A command-name lookup table starts at ROM `0x07E780`–`0x07F400`
+  with entries like `30 02 'ID\0' 83 01 B2`, `30 08 'REV \0'
+  98 03 37`, `30 03 'PRINT \0' 80 03 0B`, `30 05 'PREAMPG \0' …`,
+  etc. — record format roughly `<tag><subtype><name><sep><handler>`.
+  CF/SP/IP are **not** in this table (would be obvious as table
+  entries; the regex sweep finds them only in user-help / DLP
+  source strings). They may be in a separate fast-path or a
+  second table.
+- The tokeniser/ASCII-parser entry hasn't yet been located in
+  rom.asm. Search candidates: any function with a string-compare
+  inner loop reading from a buffer at `$bb58` or `$bdb0`, or
+  cross-references from the IRQ4 handler that aren't `fcn.58C2E`.
+
+**Open threads to resume per-command execution:**
+
+1. Locate the ASCII command parser entry (likely separate from
+   fcn.58C2E). The dispatch-table sweep at ROM `0x07E780+` is one
+   handle; cross-referencing `$bb58.w` reads is another.
+2. Decode the table-entry format at `0x07E780` (tag byte, subtype
+   byte, handler-data layout) and map handlers to their RAM-cell
+   effects.
+3. Try sending the binary-token form of `IP` (Initial Preset) once
+   the byte sequence is known — this should produce a wide RAM
+   wipe (good signal for a "command executed" baseline).
+4. Trace `0xFF93A5` access via single-step instrumentation (the
+   counter has no direct ROM xref — must be accessed via a struct
+   pointer; finding the pointer reveals the per-command state
+   struct).
 
 ### Architectural status (post-TMS9914A)
 
