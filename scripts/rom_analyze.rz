@@ -1,0 +1,48 @@
+# rizin analysis script for the HP 8593A firmware (M68K, big-endian).
+#
+# Run against the gold image reconstructed from the four Rev L Intel-HEX dumps:
+#
+#   go run ./cmd/dumprom/ /tmp/rom_gold.bin
+#   rizin -a m68k -b 32 -e cfg.bigendian=true -B 0 -i scripts/rom_analyze.rz /tmp/rom_gold.bin
+#
+# Active firmware: Rev L 98.06.15 Opt-027 (1 MB image, reset PC=0x1B34, SP=0xFF948A).
+# The earlier 17.12.90 build's firmware-specific addresses (IRQ handlers, main
+# loop, key reader/consumer) are NOT seeded here because most of them have
+# moved in Rev L. They will be discovered through rizin's recursive analysis
+# (`aa`/`aap`/`aac`/`aar`) below; flag them by hand from rom.asm once located.
+#
+# Peripheral / RAM addresses ARE seeded because they're hardware-fixed and
+# stable across firmware revisions.
+
+e asm.arch=m68k
+e asm.bits=32
+e cfg.bigendian=true
+
+# ── Hardware-fixed peripheral / RAM flags (stable across revisions) ───────────
+# Short-absolute (.w) MMIO/RAM as capstone renders them (unsigned 16-bit):
+f sci_cmd       @ 0xf5fc
+f sci_status    @ 0xf5fd
+f sci_data      @ 0xf5fe
+f sweep_start   @ 0xf200
+f sweep_status  @ 0xf300
+f dac_f400      @ 0xf400
+f timer_ack     @ 0xf634
+# Long-absolute (.l) peripherals:
+f pit_ef8000    @ 0xffef8000
+f pit_psrr_ef8002 @ 0xffef8002
+f frontpanel_ef4000 @ 0xffef4000
+f fp_status_ef401b @ 0xffef401b
+f calnvram_200000   @ 0x200000
+
+# ── Reset vector (Rev L) ──────────────────────────────────────────────────────
+f reset_pc @ 0x1b34
+af @ 0x1b34
+
+# ── Recursive analysis ────────────────────────────────────────────────────────
+# aap: find function prologues (this firmware uses `link a6,#x` heavily)
+# aac: analyze called functions recursively
+# aar: analyze data/code references (xrefs)
+aa
+aap
+aac
+aar

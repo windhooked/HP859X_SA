@@ -1,0 +1,46 @@
+Note: The table below is not valid for the 8590EM series or the 8590A/B/D series, ONLY the 8590E/L/C series Spectrum Analyzers.
+8590 Series Firmware Details
+Firmware
+Datecode 	Serial Prefix
+Break 	Revision
+Number 	Revision History
+991130 	n/a 	M 	Update to Display Agilent Logo.
+980615	3829A	L	Y2K compliant with user perform
+adjustment.  Fixes scaling error.
+Support 8594L.
+95.09.14 	3543A 	K 	Fixed lost Option issues. 
+Fixed dpi issue.
+95.03.08	3513A	J	Correct Group Delay, NTSC, and
+Secam-Pal Sync Problems.
+95.02.21 	3506A 	I 	Intro of 2X Memory for
+dual I/O.  Supports DJ540C.
+94.08.22 	3440A 	H 	Allows plot of special
+characters.  Misc. bug fixes.
+94.03.15 	3412A 	G 	Supports option 024, parallel.
+Adds more color print drivers.
+93.09.23	3340A	F	Add option 107 support.  1st
+revision for the 8591C.
+93.05.06	3322A	E	Supports DECT & Dig. Demod.
+Fixes linear clipping issue.
+27.10.92	3246A	D	Support Group Delay &
+Gated Video. 
+01.07.92	3230A 	C 	Improves power up sequence.
+Changed DATA terminator.
+01.06.92	3223A	B	Fixes RPG issues, allows
+negative flatness values.
+20.03.90	3205A	A	1st firmware revision
+
+There are only (2) possible firmware upgrade kits for the 8590 series:
+
+    08590-60372 (Serial prefix =3246A)
+    08590-60422 (Serial numbers =3340A)
+
+Note: If the Serial prefix of the instrument is 3322A, the actual firmware ROMS need to be exposed to see which version of firmware can be used. See details below.
+
+Press [Config], {More}, {Show Options} on the analyzer. This will bring up an analyzer display that lists the options, model number, serial number suffix, and the firmware revision.
+
+    If the revision date is 20.03.90, 01.06.92, 01.07.92, or 27.10.92 you MUST order the 08590-60372 Firmware Kit dated 94.08.22, which is Revision H.
+    If the revision date is 93.05.06 you MUST expose the A16 CPU board and see how many ROMS are plugged into the CPU assembly at A16U7, U6, U23, and U24. Refer to the A16 component level information to see where these (4) firmware ROMS are located.
+    If there are (4) ROMS order 08590-60372 Firmware Kit dated 94.08.22 Revision H. If there are (2) ROMS order 08590-60422 Firmware Kit dated 98.06.15 Revision M.
+    If the revision date is 93.09.23 and later, you can order the 08590-60422 Firmware Kit dated 991130.
+    If the customer has an older vintage of Agilent 8590 series and wants today's shipping firmware, they MUST order the CPU board kit part number 08590-60361. This CPU board is still the single I/O, but will have the latest firmware revision loaded, but will NOT provide dual I/O capability nor will it have expanded DLP memory for larger down loadable programs. Contact your local service center if you want to upgrade your 8590 series with expanded memory and dual I/O capability.

@@ -1,0 +1,10 @@
+# Scratch / IDE noise
+tmp/
+.DS_Store
+
+# Stray Go-build artifacts that end up at the repo root when running
+# `go build` / `go run` without `-o /tmp/...`. The actual binaries live
+# under cmd/*/ and are built on demand.
+/hwprobe
+/runlevel
+/frame.png
