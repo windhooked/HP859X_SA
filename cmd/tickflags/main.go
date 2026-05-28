@@ -107,30 +107,26 @@ func main() {
 	bc67Before := uint32(m.Bus.Read(0xFFBC67, bus.Byte))
 	fmt.Printf("\nIRQ3 injected ⇒ bc67 = %02X (bit 0 = key-available flag)\n", bc67Before)
 
-	// Now experiment: pre-arm flags and force the operating tick.
-	fmt.Println("\nPre-arming flags to take the deep path:")
-	fmt.Println("  b1e0 := 0x0200  (bit 9 SET so beq at 0x18AFC doesn't skip to 0x18FD6;")
-	fmt.Println("                    bits 1+2 clear so no 0x191E0 branch)")
-	fmt.Println("  b1e4 := 0  (not 0x34 so no 0x185AC branch)")
-	fmt.Println("  b07a := 0  (bit 11 clear so no 0x18ABC exit)")
-	fmt.Println("  b07c bits 13+15 := 0  (preserve other bits)")
-	fmt.Println("  b0ce bit 11 := 1  (so DON'T branch to 0x18642)")
-	fmt.Println("  befa bit 10 := 0  (so bne at 0x18B00 doesn't skip to 0x18FD6)")
+	// Now experiment: pre-arm flags so the operating tick takes the
+	// EARLY EXIT at PC 0x18578 to 0x18ADC, which is the path-prefix
+	// that leads to the key bclr at 0x18F42. (The disasm shows xrefs
+	// FROM 0x18578 + 0x18584 INTO 0x18ADC; from there the function
+	// flows through 0x18B00 → 0x18E20 → 0x18E54 → 0x18E62 → 0x18E6E
+	// → 0x18E76 → 0x18E7A → bra 0x18F42.)
+	fmt.Println("\nPre-arming flags to take the EARLY-EXIT-to-0x18ADC path:")
+	fmt.Println("  b010 bit 11 := 1  (so bne at 0x18578 branches to 0x18ADC)")
+	fmt.Println("  b1e0 := 0x0200    (bit 9 set so 0x18AFC doesn't skip to 0x18FD6)")
+	fmt.Println("  befa bit 10 := 0  (so 0x18B00 doesn't skip to 0x18FD6)")
+	fmt.Println("  9afb bit 2  := 1  (so 0x18E6E falls through to jsr+bra-to-bclr)")
+	b010 := uint32(m.Bus.Read(0xFFB010, bus.Word)) | (1 << 11)
+	m.Bus.Write(0xFFB010, bus.Word, b010)
 	m.Bus.Write(0xFFB1E0, bus.Word, 0x0200)
-	m.Bus.Write(0xFFB1E4, bus.Word, 0)
-	m.Bus.Write(0xFFB07A, bus.Word, 0)
-	b07c := uint32(m.Bus.Read(0xFFB07C, bus.Word)) & ^uint32(1<<13|1<<15)
-	m.Bus.Write(0xFFB07C, bus.Word, b07c)
-	b0ce := uint32(m.Bus.Read(0xFFB0CE, bus.Word)) | (1 << 11)
-	m.Bus.Write(0xFFB0CE, bus.Word, b0ce)
 	befaInit := uint32(m.Bus.Read(0xFFBEFA, bus.Word)) & ^uint32(1<<10)
 	m.Bus.Write(0xFFBEFA, bus.Word, befaInit)
-	// b1f8 needs bits 11 AND 12 BOTH set (the cmp at PC 0x188FC checks
-	// `(b1f8 & 0x1800) == 0x1800`; if not equal the loop at 0x188B6
-	// spins forever).
-	b1f8Init := uint32(m.Bus.Read(0xFFB1F8, bus.Word)) | 0x1800
-	m.Bus.Write(0xFFB1F8, bus.Word, b1f8Init)
-	fmt.Println("  b1f8 bits 11+12 := 1  (so loop at 0x188B6 can exit at 0x188FC)")
+	b9afb := uint32(m.Bus.Read(0xFF9AFB, bus.Byte)) | (1 << 2)
+	m.Bus.Write(0xFF9AFB, bus.Byte, b9afb)
+	// Leave b1f8 alone — the 0x188B6 loop is on a DIFFERENT path we
+	// no longer need to traverse since we're taking the early exit.
 
 	fmt.Println("\nForcing operating tick (10M cycles, instrumented):")
 
@@ -143,7 +139,34 @@ func main() {
 	maxTickPC := uint32(0)
 	visitsInsideTick := 0
 
-	m.CPU.SetReg(cpu.PC, 0x18568)
+	// Direct-force experiment: jump straight to PC 0x18F42 (the bclr
+	// for bc67 bit 0). If this clears the key flag, the chain itself
+	// works and we know the question is purely about reaching that PC.
+	fmt.Printf("\n>>> Direct force PC = 0x18F42 (the bclr) — 1K cycles <<<\n")
+	m.CPU.SetReg(cpu.PC, 0x18F42)
+	m.CPU.Run(1000)
+	bc67Direct := uint32(m.Bus.Read(0xFFBC67, bus.Byte))
+	fmt.Printf("  After: bc67=%02X (bit 0 = %d)  PC=%06X\n",
+		bc67Direct, bc67Direct&1, m.CPU.Reg(cpu.PC))
+	if bc67Direct&1 == 0 {
+		fmt.Println("  ✓ direct-force bclr works — the question is purely path-reach")
+	}
+
+	// Re-prime bc67 so the proper instrumented test below starts fresh.
+	m.CPU.SetIRQ(3)
+	m.CPU.Run(400)
+	m.CPU.SetIRQ(0)
+	fmt.Printf("  IRQ3 re-injected: bc67=%02X\n",
+		uint32(m.Bus.Read(0xFFBC67, bus.Byte)))
+
+	// Force PC directly to 0x18ADC — the start of the deep-block path
+	// to the key bclr. This skips the entry-block checks (PC 0x18568 —
+	// 0x185D0) which would overwrite our b010 pre-arm via `move.w
+	// f300, b010` at PC 0x1856C. From 0x18ADC we should flow through
+	// 0x18B00 → 0x18E20 → 0x18E54 → 0x18E62 → 0x18E6E → (if 9afb.2
+	// set) 0x18E76 → 0x18E7A → bra 0x18F42 → bclr fires.
+	fmt.Println("\n>>> Force PC = 0x18ADC (deep-block entry) <<<")
+	m.CPU.SetReg(cpu.PC, 0x18ADC)
 	const maxInstrumented = 20_000_000
 	for step := 0; step < maxInstrumented; step++ {
 		pc := m.CPU.Reg(cpu.PC)
