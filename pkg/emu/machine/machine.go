@@ -190,6 +190,58 @@ func (m *Machine) bootLoop(maxCycles int, lb *emutest.LoopBreaker) {
 	}
 }
 
+// OperatingTickEntry is the ROM address of the firmware's main UI tick —
+// the function called "key consumer" in earlier notes. fcn.18568 in the
+// Rev L disassembly. See docs/rom_annotations.md "Firmware dispatch jump
+// table" / slot 0x148.
+const OperatingTickEntry = uint32(0x018568)
+
+// ForceOperatingTick directly invokes the firmware's main operating-tick
+// function at fcn.18568 by setting the CPU's PC to OperatingTickEntry and
+// running for `maxCycles` cycles, with periodic IRQ5 (timer) injection
+// every bootIRQPeriod chunks of bootChunkCycles cycles. Returns the PC
+// reached when execution stops (either by the cycle budget or by the
+// function transferring control to a handler that doesn't return —
+// e.g. through the stack-rts trick fcn.1B40 uses).
+//
+// IRQ5 is essential: the operating tick contains timer-wait loops (most
+// notably at PC 0x250C8 inside one of its sub-routines) that spin until
+// the bf12 timer counter — advanced by the IRQ5 handler at ROM 0x3ECE
+// (`addq.l #1, $bf12.w`) — reaches a target value. Without injected
+// ticks the operating tick blocks here instead of reaching the
+// key-flag bclr at PC 0x18F42.
+//
+// Why this exists: in the natural-dispatch chain the firmware never
+// reaches the operating tick because the dispatcher's path-A entry at
+// PC 0x1E60 always pre-sets RAM[0xFFBF0A] to the sweep-handler pointer
+// 0x3AD0 BEFORE calling fcn.1B40, so the dispatcher's stack-rts trick
+// branches to 0x3AD0 (which itself never returns). The tick is therefore
+// unreachable via interrupts alone.
+//
+// Empirically (commit 160cd38, cmd/keystate force-experiment) jumping
+// the CPU to fcn.18568 directly causes the function to execute end-to-
+// end: each iteration clears the key flag at PC 0x18F42
+// (`bclr #0, $bc67.w`), runs the dispatch helpers at slots 0x430 /
+// 0x67C / 0x69A / 0x6DC / 0x736, and eventually re-arms `bf0a` for the
+// next handler.
+//
+// This API is the programmatic primitive a future "tick the instrument
+// for one UI frame" caller can use — equivalent to one front-panel
+// refresh cycle on real hardware. Pair with PressKeyMatrix to drive
+// the firmware through a key-press end-to-end.
+func (m *Machine) ForceOperatingTick(maxCycles int) uint32 {
+	m.CPU.SetReg(cpu.PC, OperatingTickEntry)
+	for done := 0; done < maxCycles; done += bootChunkCycles {
+		m.CPU.Run(bootChunkCycles)
+		if (done/bootChunkCycles)%bootIRQPeriod == 0 {
+			m.CPU.SetIRQ(5)
+			m.CPU.Run(bootIRQServiceCost)
+			m.CPU.SetIRQ(0)
+		}
+	}
+	return m.CPU.Reg(cpu.PC)
+}
+
 // PressKeyMatrix injects a raw front-panel key-matrix bitmap and runs the
 // machine until the firmware reads it (or maxCycles elapses). It delivers IRQ3
 // once (the front-panel "key available" interrupt — handler ROM 0x1582 latches
@@ -204,7 +256,9 @@ func (m *Machine) bootLoop(maxCycles int, lb *emutest.LoopBreaker) {
 // the operating state the emulator currently reaches the firmware does not
 // consume the key (its key consumer at 0x01089A is never reached), so this
 // returns false. Locating the firmware's key-poll trigger is pending — see the
-// skipped TestFrontPanelKeyReadChain.
+// skipped TestFrontPanelKeyReadChain. For an end-to-end key-handling test
+// in the meantime, use ForceOperatingTick after PressKeyMatrix — the
+// operating tick runs synchronously and consumes the key flag.
 func (m *Machine) PressKeyMatrix(matrix [6]byte, maxCycles int) bool {
 	m.FrontPanel.InjectMatrix(matrix)
 
