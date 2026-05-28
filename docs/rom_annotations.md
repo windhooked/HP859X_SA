@@ -101,7 +101,8 @@ subsystem code region 0x5E000–0x5F500.
 | `0x05E5DE` | **`wait_for_adc_match(mask, target)`** — args D0=mask, stack(+8)=target. Loop body at 0x5E5FA-0x5E62E: write select=0x9A, read data, test `(mask & low_byte) == target`. 1000-tick IRQ5 timer. Returns D0 bit 0 set on match, clear on timeout. |
 | `0x05E384` | **`send_dac_word(D0)`** — writes 24-bit value as 3 bytes via selects 0x95/0x96/0x97. Stores working copy in `$9492`-`$9494`. |
 | `0x05E63C` | **Cal-sweep stage A** — gated on `$94E4 == 0xD2D2`. Calls `wait_for_adc_match(0x12, 0x02)`, sends 3 setup bytes, waits again, sends `0xAF`, then loops 120 times sending `table[i]` from `$948E[]`. **NOT executed in our operating loop** (sentinel never set). |
-| `0x05EFAE` | **Cal-init function** (entry near 0x5EFD0) — writes DAC, waits, reads select=0x9F 3× (ADC settling), range-checks against [-0x200, 0x1FF], loops 120 iterations, eventually sets `$94E4 = 0xD2D2` at 0x5F046 and calls `fcn.5E3E2`. **NOT executed in our operating loop** (no PC samples observed). |
+| `0x05ECDC` | **Cal-init function entry** — only reached via `jmp $5ecdc.l` at the dispatch-table slot 0x00000C4C, AND via internal tail-recursion at 0x5F062. The C4C slot has **no external callers** in ROM — cal-init is intentionally only triggered by a specific user/SCPI command (the front-panel CAL key or `:CAL:` GPIB command), not by automatic boot. The analog-bus model in `pkg/emu/device/analogbus.go` is ready to handle this path if it ever fires (mux+ADC+DAC correlation in place) but the path is dormant in normal operation. |
+| `0x05EFAE` | **Cal-sweep main loop** (body of fcn.5ECDC) — writes DAC, waits, reads select=0x9F 3× (ADC settling), range-checks against [-0x200, 0x1FF], loops 120 iterations, eventually sets `$94E4 = 0xD2D2` at 0x5F046 to arm cal-sweep stage A. |
 
 ### Comparison sites against analog-bus reads (worth modelling against)
 
