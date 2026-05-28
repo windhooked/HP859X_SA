@@ -517,6 +517,52 @@ order of first sighting): `fcn.4DF34` (step 4176), `fcn.227BA`
 `fcn.227BA` → `fcn.22668` pair is reached via dispatch-table slot
 `0x9A6` (`jmp fcn.227BA`).
 
+**Located fcn.520 = the Initial Preset handler.** Its body at PC
+`0x4DF72` clears at least the following cells:
+`0xAD6C, 0xAD6A, 0xAD74, 0xAD72, 0xAD6E, 0xAD70, 0xA9AC, 0xB0EC,
+0xB058, 0xAD64, 0xB20E, 0xBA5E, 0xA5D4, 0xBF01, 0xBAF8` — a massive
+state reset consistent with Initial Preset semantics. `fcn.520` is
+dispatch-table slot `0x520` (`jmp 0x4DF72`). Its only callers are
+two thin wrappers, both passing a flag in d0:
+
+- `fcn.17546` — called from `reset_pc @ 0x184B6` (boot) and from
+  `fcn.1B7BE` at `+0xE5A` (PC `0x1C618`);
+- `fcn.17564` — called from `fcn.1B7BE` at `+0x1230` (PC `0x1C9EE`).
+
+So Initial Preset fires from boot OR from inside `fcn.1B7BE`.
+
+`fcn.1B7BE` is a huge ~3 KB inline switch dispatcher spanning roughly
+`0x1B1xx..0x1C9EE`, with each case starting on a different PC chosen
+by a computed entry. It has no direct callers — control reaches it
+by fall-through from `0x1B23A`-style branches and via internal
+`bra.w 0x1b956 (fcn.1B7BE+0x198)` jumps. The IP-call at `0x1C618`
+is one of many cases.
+
+Our Enter-trigger trace ends at `fcn.4DF34` (the scheduler-gate),
+which calls `fcn.9A6` (= `fcn.227BA`, a compound condition check
+`fcn.22668().bit0 ? fcn.2273C().bit2 : 0`). For our buffered
+"IP;<CR>" input that returned false, so `fcn.4DF34` didn't fire
+`fcn.610` (the per-handler dispatcher that would jump via the table
+at RAM `0x9566`).
+
+So the remaining gap is the **command-name → fcn.1B7BE entry-point
+mapping**. The firmware must:
+
+1. Read "IP" from the buffer at `0xFFBE02`;
+2. Look up the mnemonic against the `0x07E780` command-name table
+   (which has entries like `30 02 'ID\0' 83 01 B2`);
+3. Resolve the table entry's handler bytes (e.g. `83 01 B2`) into
+   either a dispatch-table slot index or an entry offset into
+   `fcn.1B7BE`;
+4. Set state/d0 such that fall-through into `fcn.1B7BE` lands at the
+   correct case (PC `0x1C618` for IP).
+
+The byte values in the command-table entries are the key. For
+`'ID\0 83 01 B2'`: `0x83` might be a flags byte (high bit = "use slot
+dispatch"?) and `0x01B2` might be the offset into `fcn.1B7BE` from
+its entry (PC `0x1B7BE + 0x01B2 = 0x1B970`). Or it could be a
+dispatch-table slot index. The decoding remains to be found.
+
 After Enter, the buffer state changes:
 
 ```
