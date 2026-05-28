@@ -10,14 +10,14 @@ package hd63484
 // a comment with the official ACRTC mnemonic + parameter count.
 const (
 	// System-control commands (top nibble 0x0).
-	cmdORG       = 0x0000 // ORG    — set drawing origin (2 args: X, Y)
-	cmdWPRBase   = 0x0800 // WPR    — write parameter register (low 5 bits = reg #; 1 arg)
-	cmdWPRMask   = 0xFFE0 // mask to match the WPR family (0x0800..0x081F)
-	cmdRPRBase   = 0x0C00 // RPR    — read parameter register (low 5 bits = reg #; 0 args, 1 result)
-	cmdRPRMask   = 0xFFE0
-	cmdWPTN      = 0x1800 // WPTN   — write pattern RAM (next word = count of pattern words)
-	cmdRPTN      = 0x1C00 // RPTN   — read pattern RAM (1 arg, returns count words)
-	cmdSCAN      = 0x1400 // SCAN   — scan boundary (rare; 1 arg)
+	cmdORG     = 0x0000 // ORG    — set drawing origin (2 args: X, Y)
+	cmdWPRBase = 0x0800 // WPR    — write parameter register (low 5 bits = reg #; 1 arg)
+	cmdWPRMask = 0xFFE0 // mask to match the WPR family (0x0800..0x081F)
+	cmdRPRBase = 0x0C00 // RPR    — read parameter register (low 5 bits = reg #; 0 args, 1 result)
+	cmdRPRMask = 0xFFE0
+	cmdWPTN    = 0x1800 // WPTN   — write pattern RAM (next word = count of pattern words)
+	cmdRPTN    = 0x1C00 // RPTN   — read pattern RAM (1 arg, returns count words)
+	cmdSCAN    = 0x1400 // SCAN   — scan boundary (rare; 1 arg)
 
 	// Pen-motion commands (top nibble 0x8). Low bit selects line draw vs move.
 	cmdAMOVE = 0x8000 // AMOVE  — absolute move (2 args: X, Y)
@@ -49,10 +49,10 @@ const (
 	cmdPAINT = 0xE000 // PAINT  — flood-fill from pen
 	cmdDMR   = 0xE800 // DMR    — DMA read
 	cmdDMW   = 0xEC00 // DMW    — DMA write
-	cmdCLR   = 0xF000 // CLR    — clear an area
-	cmdSCLR  = 0xF400 // SCLR   — screen clear
-	cmdCPY   = 0xF800 // CPY    — area copy
-	cmdSCPY  = 0xFC00 // SCPY   — screen-area copy
+	cmdCLR   = 0xF000 // CLR    — clear an area (3 args: data, dx, dy)
+	cmdSCLR  = 0xF400 // SCLR   — screen clear (1 arg: fill word)
+	cmdCPY   = 0xF800 // CPY    — area copy (4 args)
+	cmdSCPY  = 0xFC00 // SCPY   — screen-area copy (4 args)
 )
 
 // decoderState is the parser's "what word do I expect next" state. Each
@@ -88,6 +88,14 @@ const (
 	stORG2                             //      then     = origin Y
 	stCRCLArg                          // CRCL: radius
 	stPAINTSeed                        // PAINT: seed colour
+	stSCLRArg                          // SCLR: fill word
+	stCLRData                          // CLR:  fill word
+	stCLRDX                            // CLR:  dx (width-1)
+	stCLRDY                            // CLR:  dy (height-1)
+	stCPYSrcLo                         // CPY:  source MAR low
+	stCPYSrcHi                         // CPY:  source MAR high
+	stCPYDX                            // CPY:  dx
+	stCPYDY                            // CPY:  dy
 )
 
 // Glyph packet layout: a WPTN with count=10 is interpreted as a text-glyph
@@ -101,8 +109,8 @@ const (
 // Calibrated against the live Rev L firmware stream — see cmd/displayprobe
 // for the run-folded view of an actual packet.
 const (
-	glyphRows     = 8
-	glyphTrailLen = 4
+	glyphRows      = 8
+	glyphTrailLen  = 4
 	glyphWPTNCount = 0x000A // WPTN count that identifies a glyph packet
 )
 
@@ -112,13 +120,17 @@ type decoder struct {
 	st decoderState
 
 	// In-flight command working storage.
-	moveX, moveY int      // captured pen / endpoint coords during multi-word cmds
-	wprReg       uint16   // register selected by an in-flight WPR
+	moveX, moveY int    // captured pen / endpoint coords during multi-word cmds
+	wprReg       uint16 // register selected by an in-flight WPR
 	rows         [glyphRows]uint16
 	rowIdx       int
 	trailIdx     int
 	wptnCount    int // pending WPTN data-word count
 	wptnPos      int // words consumed so far in a non-glyph WPTN
+
+	// CLR working storage.
+	clrData uint16
+	clrDX   int
 }
 
 // feed dispatches a single 16-bit word into the chip according to the
@@ -149,7 +161,7 @@ func (dec *decoder) feed(c *Chip, w uint16) {
 		dec.st = stLineY
 	case stLineY:
 		ly := int(int16(w))
-		c.drawLine(c.penX, c.penY, dec.moveX, ly, fgColor)
+		c.drawLine(c.penX, c.penY, dec.moveX, ly, true)
 		c.penX, c.penY = dec.moveX, ly
 		c.Lines++
 		dec.st = stCmd
@@ -159,7 +171,7 @@ func (dec *decoder) feed(c *Chip, w uint16) {
 	case stRLineY:
 		ex := c.penX + dec.moveX
 		ey := c.penY + int(int16(w))
-		c.drawLine(c.penX, c.penY, ex, ey, fgColor)
+		c.drawLine(c.penX, c.penY, ex, ey, true)
 		c.penX, c.penY = ex, ey
 		c.Lines++
 		dec.st = stCmd
@@ -167,7 +179,7 @@ func (dec *decoder) feed(c *Chip, w uint16) {
 		dec.moveX = int(int16(w))
 		dec.st = stRctY
 	case stRctY:
-		c.drawRect(c.penX, c.penY, dec.moveX, int(int16(w)), fgColor)
+		c.drawRect(c.penX, c.penY, dec.moveX, int(int16(w)), true)
 		c.Rects++
 		dec.st = stCmd
 	case stRRctX:
@@ -176,14 +188,14 @@ func (dec *decoder) feed(c *Chip, w uint16) {
 	case stRRctY:
 		ex := c.penX + dec.moveX
 		ey := c.penY + int(int16(w))
-		c.drawRect(c.penX, c.penY, ex, ey, fgColor)
+		c.drawRect(c.penX, c.penY, ex, ey, true)
 		c.Rects++
 		dec.st = stCmd
 	case stFRctX:
 		dec.moveX = int(int16(w))
 		dec.st = stFRctY
 	case stFRctY:
-		c.drawFilledRect(c.penX, c.penY, dec.moveX, int(int16(w)), fgColor)
+		c.drawFilledRect(c.penX, c.penY, dec.moveX, int(int16(w)), true)
 		c.FilledRects++
 		dec.st = stCmd
 	case stORG1:
@@ -198,7 +210,7 @@ func (dec *decoder) feed(c *Chip, w uint16) {
 		dec.st = stCmd
 	case stCRCLArg:
 		// CRCL — circle of radius |w| at current pen.
-		c.drawCircle(c.penX, c.penY, int(int16(w)), fgColor)
+		c.drawCircle(c.penX, c.penY, int(int16(w)), true)
 		dec.st = stCmd
 	case stPAINTSeed:
 		// PAINT seed colour — flood fill from current pen until boundary.
@@ -207,6 +219,36 @@ func (dec *decoder) feed(c *Chip, w uint16) {
 		// histogram if it did).
 		_ = w
 		dec.st = stCmd
+	case stSCLRArg:
+		// SCLR — screen clear / fill. Replicates `w` across the entire
+		// vram. A common firmware call is `SCLR 0x0000` to zero the
+		// screen between frames.
+		c.fillVRAM(w)
+		c.ScreenClears++
+		dec.st = stCmd
+	case stCLRData:
+		dec.clrData = w
+		dec.st = stCLRDX
+	case stCLRDX:
+		dec.clrDX = int(int16(w))
+		dec.st = stCLRDY
+	case stCLRDY:
+		// CLR — clear (or fill) a (dx+1)×(dy+1) area starting at the pen.
+		// data=0 means "clear to dark"; non-zero means "fill lit". Real
+		// hardware uses the fill word as a pattern, but the firmware only
+		// uses 0/all-ones, so a binary lit/dark mapping is faithful.
+		dy := int(int16(w))
+		ex := c.penX + dec.clrDX
+		ey := c.penY + dy
+		c.drawFilledRect(c.penX, c.penY, ex, ey, dec.clrData != 0)
+		c.AreaClears++
+		dec.st = stCmd
+	case stCPYSrcLo, stCPYSrcHi, stCPYDX, stCPYDY:
+		// CPY — area copy. Not used by the 8593 boot stream; we consume
+		// the parameter words to keep the parser aligned and advance to
+		// the next command without actually performing the copy.
+		dec.st = nextCPYState(dec.st)
+		_ = w
 	case stWPRArg:
 		c.writeRegister(dec.wprReg, w)
 		// handleWPRSideEffect may transition the parser into a follow-up
@@ -232,6 +274,21 @@ func (dec *decoder) feed(c *Chip, w uint16) {
 		dec.feedGlyph(c, w)
 	case stRasterData:
 		dec.feedRaster(c, w)
+	}
+}
+
+// nextCPYState advances through the 4-word CPY parameter sequence and
+// returns stCmd after the last parameter has been consumed.
+func nextCPYState(s decoderState) decoderState {
+	switch s {
+	case stCPYSrcLo:
+		return stCPYSrcHi
+	case stCPYSrcHi:
+		return stCPYDX
+	case stCPYDX:
+		return stCPYDY
+	default:
+		return stCmd
 	}
 }
 
@@ -282,7 +339,7 @@ func (dec *decoder) dispatchCmd(c *Chip, w uint16) {
 	case cmdRFRCT, 0xA401: // 0xA400 / 0xA401 — RFRCT without/with attr
 		dec.st = stFRctX
 	case cmdDOT, 0xCC01: // 0xCC00 / 0xCC01 — DOT without/with attr
-		c.setPixel(c.penX, c.penY, fgColor)
+		c.setVRAMPixel(c.penX, c.penY)
 		c.Dots++
 	case cmdCRCL:
 		dec.st = stCRCLArg
@@ -290,10 +347,12 @@ func (dec *decoder) dispatchCmd(c *Chip, w uint16) {
 		dec.st = stWPTNCount
 	case cmdPAINT:
 		dec.st = stPAINTSeed
-	case cmdCLR, cmdSCLR:
-		// CLR / SCLR — clear screen / area. We don't model the clear
-		// operation (the firmware uses WPR-triggered raster fills for
-		// the same effect, which we DO model). Stay in stCmd.
+	case cmdSCLR, 0xF401: // 0xF400 / 0xF401 — SCLR without/with attr
+		dec.st = stSCLRArg
+	case cmdCLR, 0xF001: // 0xF000 / 0xF001 — CLR without/with attr
+		dec.st = stCLRData
+	case cmdCPY, 0xF801, cmdSCPY, 0xFC01:
+		dec.st = stCPYSrcLo
 	case cmdRPTN, cmdSCAN:
 		// 0-or-1 arg commands we don't currently exercise. Stay in stCmd.
 	default:

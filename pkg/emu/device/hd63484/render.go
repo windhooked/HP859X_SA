@@ -2,61 +2,38 @@ package hd63484
 
 import "image"
 
-// paint-area geometry. The 8593 firmware emits cell-extent parameter words
-// 0x003F=63 and 0x00FF=255 before each PAINT burst, meaning each burst
-// covers 64×256 = 16384 word-cells. Each cell is one 16-bit word ⇒ 16
-// horizontal pixels at 1bpp ⇒ a 1024×256 region per burst. Two bursts per
-// frame (top half + bottom half via auto-increment) ⇒ 1024×512 paint area
-// total. We clip to the visible 640×480 CRT viewport at render time.
-const (
-	paintRowWords  = 64
-	paintRowPixels = paintRowWords * 16 // 1024
-	paintHeight    = 512                // 2 × 16384 / 64
-)
-
-// RenderFrame composites the chip's external video RAM (filled by PAINT /
-// raster-write bursts — the background dot pattern, the trace bitmap when
-// the firmware draws it) underneath the drawing overlay (glyphs / lines /
-// dots painted directly into d.img by the drawing-command handlers) and
-// returns the composited image.
+// RenderFrame materialises the chip's VRAM into an RGBA framebuffer for
+// inspection / display. Every lit bit in the visible 640×480 sub-window of
+// the paint area renders as fgColor; everything else renders as opaque
+// black.
 //
-// Each VRAM word is 16 horizontal pixels at 1bpp; bit 0 = leftmost pixel
-// (little-endian within the word, matching the firmware's word writes).
-// Lit VRAM bits render in bgPaintColor (dim amber) so they don't overpower
-// the bright-amber drawing overlay sitting on top.
-//
-// The composite is idempotent: subsequent calls re-light the same pixels
-// (the condition "img pixel is currently black" gates the write), so callers
-// can invoke RenderFrame freely.
+// VRAM is now the SINGLE source of truth — drawing commands (lines, dots,
+// rectangles, glyph blits, raster bursts, SCLR/CLR) all manipulate vram
+// bits directly. RenderFrame is a pure read of that state, so calls are
+// idempotent and reflect exactly what the firmware has painted as of the
+// most recent command word.
 func (c *Chip) RenderFrame() *image.RGBA {
-	for i := 0; i < paintHeight*paintRowWords; i++ {
-		if 2*i+1 >= len(c.vram) {
-			break
-		}
-		w := uint16(c.vram[2*i]) | uint16(c.vram[2*i+1])<<8
-		if w == 0 {
-			continue
-		}
-		x0 := (i * 16) % paintRowPixels
-		y := (i * 16) / paintRowPixels
-		if y >= paintHeight {
-			break
-		}
-		for b := 0; b < 16; b++ {
-			if w&(1<<uint(b)) == 0 {
-				continue
+	if c.img == nil {
+		c.img = image.NewRGBA(image.Rect(0, 0, DisplayWidth, DisplayHeight))
+	}
+	pix := c.img.Pix
+	stride := c.img.Stride
+	for y := 0; y < DisplayHeight; y++ {
+		rowBase := y * PaintRowBytes
+		dstBase := y * stride
+		for x := 0; x < DisplayWidth; x++ {
+			off := dstBase + x*4
+			b := c.vram[rowBase+(x>>3)]
+			if b&(1<<uint(x&7)) != 0 {
+				pix[off] = fgColor.R
+				pix[off+1] = fgColor.G
+				pix[off+2] = fgColor.B
+			} else {
+				pix[off] = 0
+				pix[off+1] = 0
+				pix[off+2] = 0
 			}
-			x := x0 + b
-			if x >= DisplayWidth || y >= DisplayHeight {
-				continue
-			}
-			off := y*c.img.Stride + x*4
-			if c.img.Pix[off]|c.img.Pix[off+1]|c.img.Pix[off+2] == 0 {
-				c.img.Pix[off] = bgPaintColor.R
-				c.img.Pix[off+1] = bgPaintColor.G
-				c.img.Pix[off+2] = bgPaintColor.B
-				c.img.Pix[off+3] = 0xFF
-			}
+			pix[off+3] = 0xFF
 		}
 	}
 	return c.img
@@ -87,6 +64,15 @@ func (c *Chip) RenderCropped() image.Image {
 		y1 = DisplayHeight
 	}
 	return c.img.SubImage(image.Rect(x0, y0, x1, y1))
+}
+
+// Image returns the most recently rendered RGBA framebuffer, materialising
+// one if none exists yet. Test helpers use this to inspect drawing results.
+func (c *Chip) Image() *image.RGBA {
+	if c.img == nil {
+		c.RenderFrame()
+	}
+	return c.img
 }
 
 // VRAM returns a read-only view of the chip's video RAM (for inspection by

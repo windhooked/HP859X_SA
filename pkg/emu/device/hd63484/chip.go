@@ -7,15 +7,24 @@ import (
 
 // Display geometry. The HP 8593's CRT raster is 640×480; the ACRTC's PAINT
 // area (per the firmware's 0x003F=63 / 0x00FF=255 parameter words) covers a
-// 1024×N region of which we display the visible left 640. Sized generously
-// so the chip never needs to grow its buffers mid-frame.
+// 1024×512 region. The visible window is the left 640×480 of that area.
 const (
 	DisplayWidth  = 640
 	DisplayHeight = 480
 
-	// VRAMSize is the external video RAM size (64 KB on the 8593, U305/U306
-	// = 2× 256-Kbit static RAM per CLIP 5963-2591).
-	VRAMSize = 64 * 1024
+	// PaintRowPixels / PaintHeight describe the chip's logical 1bpp paint
+	// area. 1024 pixels per row × 512 rows = 524,288 bits = 65,536 bytes —
+	// exactly the chip's 64 KB external VRAM (U305/U306 = 2× 256-Kbit SRAM
+	// per CLIP 5963-2591). Bit packing matches the firmware's raster
+	// bursts: each 16-bit word covers 16 horizontal pixels stored little-
+	// endian within the word, and within each byte bit 0 is the LEFTMOST
+	// pixel of its 8-pixel run.
+	PaintRowPixels = 1024
+	PaintHeight    = 512
+	PaintRowBytes  = PaintRowPixels / 8 // 128 — bytes per scanline
+
+	// VRAMSize is the external video RAM size (64 KB).
+	VRAMSize = PaintRowBytes * PaintHeight // 65,536
 
 	// PatternRAMWords is the chip's internal pattern RAM (16 patterns × 16
 	// lines = 256 words). Used by the WPTN/RPTN commands and by area/fill
@@ -26,10 +35,10 @@ const (
 // fgColor and bgPaintColor define the two intensities the chip renders at.
 // The real ACRTC drives the CRT beam with continuous brightness control via
 // a colour-attribute register, but the 8593 uses a 1-bit monochrome amber
-// CRT, so we map "lit foreground" (glyphs, lines, dots, trace) to bright
-// amber and "lit background" (PAINT/raster fills) to dim amber. This gives
-// the same perceptual hierarchy a real instrument has — bright drawing on
-// top of a faint dot-pattern background.
+// CRT, so we collapse to a single "lit" colour. The legacy bgPaintColor
+// (dim amber) is preserved for backwards compatibility with any caller that
+// referenced it before the VRAM unification, but the unified model uses
+// fgColor for all lit bits.
 var (
 	fgColor      = color.RGBA{R: 0xFF, G: 0xB0, B: 0x00, A: 0xFF}
 	bgPaintColor = color.RGBA{R: 0x40, G: 0x2C, B: 0x00, A: 0xFF}
@@ -54,10 +63,13 @@ const (
 // 0xD70E in the Rev L firmware).
 const DefaultStatus = StatusCED | StatusARD | StatusWFR | StatusWFE
 
-// Chip models the HD63484 ACRTC. All state — register file, FIFOs, pattern
-// RAM, video RAM, framebuffer — is internal; the host interacts only via
-// the MMIO methods (WriteCmd / WriteData / ReadStatus / ReadData) and the
-// RenderFrame helper for headless inspection.
+// Chip models the HD63484 ACRTC. The chip's external video RAM is the
+// single source of truth — every drawing command (lines, dots, rectangles,
+// glyph blits, raster bursts) writes 1bpp pixels into vram, and RenderFrame
+// materialises an RGBA image from vram on demand. This matches the real
+// hardware's architecture (the CRT scans VRAM continuously to generate
+// video) and means commands that erase regions — SCLR, CLR, glyph BG fill —
+// naturally undo prior drawing without any per-surface tricks.
 type Chip struct {
 	// Address register (the last value written to the CMD port). Commands
 	// dispatched via the parser below; this field is retained for status /
@@ -72,29 +84,46 @@ type Chip struct {
 	// a flat array depending on WPTN parameter setup.
 	pattern [PatternRAMWords]uint16
 
-	// External video RAM, 64 KB. Bytes are little-endian within 16-bit
-	// pixel words to match the firmware's word writes (low byte = leftmost
-	// pixels of the 16-pixel run).
+	// External video RAM, 64 KB, treated as a packed 1bpp framebuffer of
+	// PaintRowPixels × PaintHeight. See setVRAMPixel / clearVRAMPixel for
+	// the bit-addressing convention.
 	vram [VRAMSize]byte
 
-	// Memory-access pointer for raster bursts (advances after each data-port
-	// write in raster mode). Word offset into vram.
+	// Memory-access pointer for raster bursts (advances after each data-
+	// port write in raster mode). BYTE offset into vram.
 	memPos int
 
 	// Pen / drawing state.
 	penX, penY int    // current pen position (pixels)
 	colorReg   uint16 // current foreground colour selector
 
+	// Last-set Memory Address Register pair (parameter regs 0x0C / 0x0D).
+	// Captured whenever the firmware writes BOTH registers in sequence;
+	// subsequent raster-burst or area commands start from this address.
+	marLow, marHigh uint16
+
+	// Glyph-blit colour state (captured between the WPTN header and the
+	// bitmap rows). FG is applied to bits set in the row; BG is applied to
+	// bits clear in the row (per HD63484 fill semantics). 0 means "do not
+	// touch this class of pixel", non-zero means "set this pixel lit".
+	glyphFG uint16
+	glyphBG uint16
+
 	// Command-decoder state (parser.go is the state machine).
 	dec decoder
 
-	// Composite framebuffer the chip "drives" to the CRT. Built lazily by
-	// RenderFrame from the SCI-vector overlay (lines/dots/glyphs paint
-	// directly here) plus the vram (composited in RenderFrame).
+	// Output framebuffer materialised by RenderFrame from vram. Allocated
+	// lazily; callers that don't render don't pay the 1.2 MB cost.
 	img *image.RGBA
 
 	// Drawn-content bounds (for cropped rendering / test inspection).
 	minX, minY, maxX, maxY int
+
+	// Optional glyph logger. If non-nil, blitGlyph hands each captured
+	// glyph row-tuple here for printable-character extraction; see
+	// glyph_logger.go. Constructed by New() when the
+	// HD63484_GLYPHLOG environment variable is set to a writable file path.
+	glyphLog *GlyphLogger
 
 	// Diagnostics (exported so tests + cmd/* probes can introspect).
 	DataWords      int            // total words fed to WriteData
@@ -106,27 +135,90 @@ type Chip struct {
 	Glyphs         int            // glyph (WPTN+count-of-10) packets blitted
 	Paints         int            // raster-write bursts entered
 	PaintWords     int            // total pixel-data words written into vram
+	ScreenClears   int            // SCLR commands executed
+	AreaClears     int            // CLR commands executed
 	UnknownCmds    int            // commands the parser saw but doesn't model
 	UnknownCmdHist map[uint16]int // histogram of unknown opcodes for RE
 }
 
-// New constructs a chip with a cleared framebuffer + zeroed state.
+// New constructs a chip with a cleared VRAM + zeroed state. If the
+// HD63484_GLYPHLOG environment variable is set, a GlyphLogger is attached
+// (see glyph_logger.go).
 func New() *Chip {
 	c := &Chip{
-		img:            image.NewRGBA(image.Rect(0, 0, DisplayWidth, DisplayHeight)),
 		UnknownCmdHist: make(map[uint16]int),
 	}
-	// Opaque black background (image.NewRGBA gives transparent black).
-	for i := 3; i < len(c.img.Pix); i += 4 {
-		c.img.Pix[i] = 0xFF
-	}
 	c.resetBounds()
+	c.glyphLog = newGlyphLoggerFromEnv()
 	return c
 }
 
 func (c *Chip) resetBounds() {
 	c.minX, c.minY = DisplayWidth, DisplayHeight
 	c.maxX, c.maxY = 0, 0
+}
+
+// vramByteAddr returns the byte offset within vram that holds pixel (x, y),
+// or -1 if the pixel is outside the paint area. The bit within that byte
+// (with bit 0 = leftmost) is (x & 7).
+func (c *Chip) vramByteAddr(x, y int) int {
+	if x < 0 || y < 0 || x >= PaintRowPixels || y >= PaintHeight {
+		return -1
+	}
+	return y*PaintRowBytes + (x >> 3)
+}
+
+// setVRAMPixel lights the pixel at (x, y) and updates the drawn-content
+// bounding box. Out-of-range coordinates are silently ignored — matches
+// the chip's hardware clipping behaviour.
+func (c *Chip) setVRAMPixel(x, y int) {
+	addr := c.vramByteAddr(x, y)
+	if addr < 0 {
+		return
+	}
+	c.vram[addr] |= 1 << uint(x&7)
+	c.expandBounds(x, y)
+}
+
+// clearVRAMPixel turns off the pixel at (x, y) — used by glyph BG fills,
+// CLR, and SCLR.
+func (c *Chip) clearVRAMPixel(x, y int) {
+	addr := c.vramByteAddr(x, y)
+	if addr < 0 {
+		return
+	}
+	c.vram[addr] &^= 1 << uint(x&7)
+}
+
+// isVRAMPixelLit reports whether the pixel at (x, y) is currently set.
+// Returns false for out-of-range coordinates.
+func (c *Chip) isVRAMPixelLit(x, y int) bool {
+	addr := c.vramByteAddr(x, y)
+	if addr < 0 {
+		return false
+	}
+	return c.vram[addr]&(1<<uint(x&7)) != 0
+}
+
+// expandBounds widens the drawn-content bbox to include (x, y). Visible-
+// region clamp so the bbox stays useful for RenderCropped on the 640×480
+// display window.
+func (c *Chip) expandBounds(x, y int) {
+	if x < 0 || y < 0 || x >= DisplayWidth || y >= DisplayHeight {
+		return
+	}
+	if x < c.minX {
+		c.minX = x
+	}
+	if y < c.minY {
+		c.minY = y
+	}
+	if x > c.maxX {
+		c.maxX = x
+	}
+	if y > c.maxY {
+		c.maxY = y
+	}
 }
 
 // WriteCmd handles a write to the chip's address register (offset 0 in its
@@ -157,9 +249,7 @@ func (c *Chip) ReadStatus() uint8 { return DefaultStatus }
 // data port at runtime, so this is exercised only by future tests.
 func (c *Chip) ReadData() uint16 { return 0 }
 
-// Counters / accessors used by tests + cmd/* probes. Exposing these here
-// keeps the diagnostic surface stable as internal decoder state evolves.
+// Counters / accessors used by tests + cmd/* probes.
 
-func (c *Chip) Image() *image.RGBA { return c.img }
-func (c *Chip) PenX() int          { return c.penX }
-func (c *Chip) PenY() int          { return c.penY }
+func (c *Chip) PenX() int { return c.penX }
+func (c *Chip) PenY() int { return c.penY }

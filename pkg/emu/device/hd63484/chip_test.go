@@ -5,15 +5,20 @@ import (
 	"testing"
 )
 
-// pixel returns the RGB of c.img at (x, y).
+// pixel returns the rendered RGBA at (x, y), materialising the framebuffer
+// from VRAM on demand. VRAM is the single source of truth in the unified
+// chip model; the RGBA framebuffer is derived from it by RenderFrame.
 func pixel(c *Chip, x, y int) color.RGBA {
-	off := y*c.img.Stride + x*4
-	return color.RGBA{c.img.Pix[off], c.img.Pix[off+1], c.img.Pix[off+2], c.img.Pix[off+3]}
+	img := c.RenderFrame()
+	off := y*img.Stride + x*4
+	return color.RGBA{img.Pix[off], img.Pix[off+1], img.Pix[off+2], img.Pix[off+3]}
 }
 
+// isLit reports whether VRAM has bit (x, y) set — equivalent to "the pixel
+// at (x, y) would be rendered in fgColor". Checks VRAM directly to avoid
+// the per-call full-frame render.
 func isLit(c *Chip, x, y int) bool {
-	p := pixel(c, x, y)
-	return p.R|p.G|p.B != 0
+	return c.isVRAMPixelLit(x, y)
 }
 
 // feedWords pushes a sequence of 16-bit words through the chip data port.
@@ -152,12 +157,12 @@ func TestWPR(t *testing.T) {
 }
 
 // TestRasterModeTrigger — writing PRMARLow=0x4000 then PRMARHigh=0x0000
-// enters raster mode; subsequent data words go into VRAM.
+// arms raster mode (the empirical screen-fill trigger); subsequent data
+// words go into VRAM.
 func TestRasterModeTrigger(t *testing.T) {
 	c := New()
 	feedWords(c, cmdWPRBase|PRMARLow, 0x4000)
 	feedWords(c, cmdWPRBase|PRMARHigh, 0x0000)
-	// Now the parser is in stRasterData. Two pixel data words.
 	feedWords(c, 0x4400, 0x4400)
 	if c.PaintWords != 2 {
 		t.Errorf("PaintWords=%d, want 2", c.PaintWords)
@@ -168,6 +173,82 @@ func TestRasterModeTrigger(t *testing.T) {
 	// vram[0..1] should hold 0x4400 little-endian.
 	if c.vram[0] != 0x00 || c.vram[1] != 0x44 {
 		t.Errorf("vram[0..1] = %02X %02X, want 00 44", c.vram[0], c.vram[1])
+	}
+}
+
+// TestSCLR — screen clear fills all of VRAM with the supplied word and
+// resets the drawn-content bounding box.
+func TestSCLR(t *testing.T) {
+	c := New()
+	// First light a pixel so the bbox tracks (10, 20).
+	feedWords(c, cmdAMOVE, 10, 20)
+	feedWords(c, cmdDOT)
+	if !isLit(c, 10, 20) {
+		t.Fatal("DOT setup failed")
+	}
+	// SCLR with 0x0000 should clear everything.
+	feedWords(c, cmdSCLR, 0x0000)
+	if isLit(c, 10, 20) {
+		t.Error("pixel (10,20) still lit after SCLR 0x0000")
+	}
+	if c.ScreenClears != 1 {
+		t.Errorf("ScreenClears=%d, want 1", c.ScreenClears)
+	}
+	// SCLR with all-ones should light every VRAM byte.
+	feedWords(c, cmdSCLR, 0xFFFF)
+	for i, b := range c.vram[:16] {
+		if b != 0xFF {
+			t.Errorf("vram[%d] = %02X after SCLR 0xFFFF, want FF", i, b)
+		}
+	}
+}
+
+// TestGlyphBGTransparent — with the firmware's standard FG=0/BG=0 pen
+// selectors, glyph blits light FG bits and leave BG bits untouched. This
+// matches observed firmware behaviour (every Rev L glyph uses pen 0 for
+// both); the per-frame screen clear must come from elsewhere (a partial
+// raster burst we don't model yet), not from the glyph BG fill.
+func TestGlyphBGTransparent(t *testing.T) {
+	c := New()
+	// Pre-light pixel (25, 33) — should still be lit after the blit.
+	c.setVRAMPixel(25, 33)
+	feedWords(c, cmdAMOVE, 20, 30)
+	feedWords(c, cmdWPTN, glyphWPTNCount, 0x0000, 0x0000)
+	for i := 0; i < glyphRows; i++ {
+		feedWords(c, 0x0001) // only bit 0 (column 0) set
+	}
+	feedWords(c, 0x0805, 0x0000, 0xD000, 0x0907)
+	// Column 0 of the cell (x=20) should be lit; the pre-existing pixel
+	// at (25, 33) should be unchanged (BG=0 is transparent).
+	for y := 30; y < 38; y++ {
+		if !isLit(c, 20, y) {
+			t.Errorf("glyph FG pixel (20,%d) not lit", y)
+		}
+	}
+	if !isLit(c, 25, 33) {
+		t.Error("pre-existing pixel (25, 33) was cleared by BG=0 blit")
+	}
+}
+
+// TestGlyphBGNonZeroFillsCell — when BG is explicitly non-zero the chip
+// fills the row-clear pixels in the cell (per HD63484 fill semantics).
+// No observed firmware path uses this, but the model honours it for
+// completeness.
+func TestGlyphBGNonZeroFillsCell(t *testing.T) {
+	c := New()
+	feedWords(c, cmdAMOVE, 100, 50)
+	feedWords(c, cmdWPTN, glyphWPTNCount, 0x0000, 0xFFFF)
+	for i := 0; i < glyphRows; i++ {
+		feedWords(c, 0x0000) // all rows blank
+	}
+	feedWords(c, 0x0805, 0x0000, 0xD000, 0x0907)
+	// Every pixel in the 16×8 cell should now be lit (BG=non-zero fills).
+	for y := 50; y < 58; y++ {
+		for x := 100; x < 116; x++ {
+			if !isLit(c, x, y) {
+				t.Errorf("BG-fill pixel (%d,%d) not lit", x, y)
+			}
+		}
 	}
 }
 

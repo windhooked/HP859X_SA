@@ -69,9 +69,11 @@ var RegisterNames = [32]string{
 }
 
 // writeRegister stores a value into the parameter register file and applies
-// any side effects: PRPenX/Y updates the drawing pen; PRMARLow/High prime
-// the memory-access pointer; PRColor selects foreground colour. Other slots
-// are stored faithfully but don't trigger immediate behaviour.
+// any side effects on the drawing state. The MAR pair side-effect (priming
+// raster mode at the byte address derived from PRMARLow/PRMARHigh) lives
+// in `handleWPRSideEffect` (wptn.go) where it can also drive parser state
+// transitions; this function only mutates the register file and
+// drawing-state mirrors.
 func (c *Chip) writeRegister(reg, value uint16) {
 	if int(reg) >= len(c.regs) {
 		return
@@ -84,16 +86,6 @@ func (c *Chip) writeRegister(reg, value uint16) {
 		c.penY = int(int16(value))
 	case PRColor:
 		c.colorReg = value
-	case PRMARHigh:
-		// We do NOT bind memPos to the raw MAR value. The 8593 firmware
-		// uses MARLow=0x4000 + MARHigh=0x0000 as a *trigger* for video-
-		// RAM-write mode, then writes the same trigger again before each
-		// subsequent burst. If we treated MAR as a literal address each
-		// burst would overwrite the same half-vram region. Instead, the
-		// `handleWPRSideEffect` hook in wptn.go arms raster mode and lets
-		// the existing memPos auto-increment carry across bursts —
-		// matching the behaviour that produces the full-screen render
-		// (top half + bottom half of paint area).
 	}
 }
 
