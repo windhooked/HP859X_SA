@@ -142,10 +142,43 @@ func (a *analogBus) readData() uint16 {
 		}
 		return 0
 	case abSelADC:
-		// 12-bit signed ADC result. We return the stored adcResult masked
-		// into the chip's 13-bit two's-complement range so the firmware's
-		// `cmpi.w` against ±0x200 sees a number in the expected window.
-		return uint16(a.adcResult) & 0x1FFF
+		// 12-bit signed ADC result. Derived from the current state of the
+		// chip's input mux (selected via control-reg writes 0x90/0x91/0x93)
+		// and the most-recent DAC value, so the firmware's cal sweeps see
+		// a coherent response curve rather than a flat zero.
+		//
+		// Approximation, calibrated to firmware expectations:
+		//   - mux channel inferred from regs[0x91] bits [2:0] (per the
+		//     observed init value 0x0012 the firmware seems to write
+		//     channel-id + enable here; if a real CLIP page proves a
+		//     different bit-layout, this is the place to fix it).
+		//   - channel 0 = CRD_ANLG_2: returns 0 (centred analog ground)
+		//   - channel 1 = VIDEO_IF: returns a small positive noise-floor
+		//     reading (~+32, well below the 0x1FF clamp)
+		//   - channel 2 = +2VREF: returns ~+0x100 (the firmware's "+2V"
+		//     reference, scaled into ADC counts)
+		//   - other channels: track the DAC value (lower 9 bits) so a
+		//     cal sweep that programs the DAC and reads back sees a
+		//     linear response — enough to pass `bgt 0x1FF` / `blt -0x200`
+		//     bounds checks but not so high it pegs the ADC.
+		ch := a.regs[abSelCtrlB] & 0x07
+		var adc int16
+		switch ch {
+		case 0:
+			adc = 0
+		case 1:
+			adc = 32
+		case 2:
+			adc = 0x100
+		default:
+			// Linear from DAC LSBs, sign-extended from 9 bits.
+			v := int16(a.dac & 0x1FF)
+			if v&0x100 != 0 {
+				v |= ^int16(0x1FF)
+			}
+			adc = v
+		}
+		return uint16(adc) & 0x1FFF
 	default:
 		// Register-file passthrough for every other select: read what was
 		// last written. Defaults to 0 for any select the firmware reads
