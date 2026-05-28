@@ -189,6 +189,82 @@ with the firmware setting initial value `(0,0,0x93)` at boot (= signed `0x000093
 
 ---
 
+## Sweep / trace render pathway
+
+The IRQ6 sample-capture handler at ROM `0x40C2` (idle mode) detects
+end-of-sweep and sets bit 13 of RAM `0xFFBEFA`. The firmware's main
+loop is supposed to detect this flag and render the captured samples
+as a trace polyline.
+
+### Sweep-done processor
+
+| PC      | Func                                                  |
+|---------|-------------------------------------------------------|
+| `0x017346` | `fcn.17346` — sweep-done processor. First instruction is `bclr #13, $befa.w` (acknowledges the sweep-done flag). Calls slot `0x43C` (fcn.9A52 = first-stage sweep-done processor) then chains through slots `0x640`, `0x5A4`, `0x15A` for further processing. |
+| `0x008A4`  | Dispatch table slot pointing at `fcn.17346` — `jmp $17346.l`. **Has no direct callers**: nothing in ROM does `jsr $8a4.w` or `bsr fcn.17346` via the slot. fcn.17346 is reached only via PC-relative `jsr fcn.00017346(pc)` from the 0x18000-0x18200 range of the **operating tick** body (10+ call sites). |
+| `0x019088` / `0x019098` | Operating-tick call sites in `fcn.18568`'s body that lead (transitively, via slots `0x472` / `0x50E`) to the sweep-done processor. |
+
+### The shared architectural gate
+
+The sweep-done processor at `fcn.17346` is only reached when the
+operating tick at `fcn.18568` runs FAR ENOUGH to execute PC `0x19088`+
+(deep inside the function body, well past the early state-test exits).
+Like the key consumer, this is blocked by:
+
+1. The natural dispatch chain doesn't reach `fcn.18568` (path A at
+   PC `0x1E60` perpetually redirects via `bf0a = 0x3AD0`).
+2. Even when forced (`ForceOperatingTick`), the function exits early
+   via one of its many state-flag branches (`b1e0 & 6`, `b1e4 == 0x34`,
+   `b07a.b`, `b07c.d`, `b0ce.b`, etc.) before reaching `0x19088`.
+
+**Verified by `cmd/sweeprender`** (Rev L, 80M-cycle pre-tick boot +
+10M-cycle forced operating tick with IRQ5 ticks):
+  - `befa.13 = 1` confirms the sweep-done flag IS set (IRQ6 fired
+    1109 times, samples captured into the trace buffer at
+    `0x2FD508`-`0x2FD82A`).
+  - After `ForceOperatingTick`: `befa.13` STAYS set, no `lines` /
+    `paints` delta — the operating tick exits before reaching either
+    the sweep-done bclr at `0x17346` or any trace-drawing code.
+
+So both gate C (key consumer) and the trace render are blocked by the
+SAME architectural issue: the operating tick can't be reached or made
+to run to completion. Fixing either deliverable requires either:
+
+  - A sophisticated "tick driver" that pre-arms all the operating-tick
+    state-flag conditions to take the deep paths.
+  - Finding and patching the path-A obstruction at PC `0x1E60` so
+    `fcn.1B40` dispatches to `0x148` (the operating tick) rather than
+    `0x3AD0` (the sweep handler that never returns).
+  - Building the GPIB/TMS9914A command pipe so external commands
+    can drive the firmware through paths that bypass this gate.
+
+### Where the trace actually gets drawn (when it does)
+
+Per [docs/research.md](research.md) section 7 + the rev-l-firmware-switch
+memory: the trace is NOT drawn via SCI vector commands (`0x8801` ALINE
+opcode). The A/B test in `cmd/sweeprun` confirmed 7684 IRQ6 events
+produced +378 extra glyphs (annunciator updates) but **zero additional
+lines, rects, or dots**. The trace must go through direct HD63484
+video-RAM writes via PAINT / WPTN-with-large-count / WRITE-AREA
+commands — exactly the kind of raster-write the screen-background
+fill at MAR=`0x4000/0x0000` uses, just targeting a different MAR in
+the trace area.
+
+### Trace buffer addresses
+
+| Address    | Func                                                      |
+|------------|-----------------------------------------------------------|
+| `0x2FD508` | Trace buffer start (A5 initialises here when sweep arms)  |
+| `0x2FD82A` | Trace buffer end (= start + 802 = 401 samples × 2 bytes) — held in `RAM[0xFFBF30]` |
+| `0x40B8`   | IRQ6 capture handler — A5++ stores samples, compares with `RAM[0xFFBF30]` for end-of-buffer |
+| `0x40C2`   | IRQ6 idle/end-of-sweep handler — sets `$befa.w` bit 13 (sweep-done) and bit 11 (=`0x2400`) |
+
+`RAM[0xFFBF34]` holds the active IRQ6 vector: `0x40C2` at idle,
+`0x40B8` when actively sweeping. The firmware arms the sweep by
+switching this pointer.
+
+---
+
 ## CalRAM working buffer (`0x2FC000`–`0x2FFFFF`)
 
 | Offset | Func                                                              |
