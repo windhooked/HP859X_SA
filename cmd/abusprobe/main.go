@@ -1,17 +1,19 @@
-// Command abusprobe records every write to the analog-bus select register
-// (0xFFF75C) and every read from the data register (0xFFF75E) during the
-// post-boot operating loop. Output: a stream of (select, data_returned)
-// pairs along with the PC that issued each access, so we can identify
-// which select values the firmware uses and what return values would
-// unblock it (vs. the current always-0x06 / sometimes-0).
+// Command abusprobe records every access to the analog-bus ports on the
+// HP 8593A's A16 board: writes to 0xFFF75C (the select register), reads
+// from 0xFFF75E (the data port — used as the ADC result for the most-
+// recent select), and writes to 0xFFF75E (the data port — used as DAC
+// data bytes after selects 0x95/0x96/0x97 etc).
+//
+// Output covers the whole simulated lifetime: boot to operating loop
+// plus post-boot run. Events are grouped by (kind, PC, select) so a hot
+// loop folds to one line, with the distinct values observed per group.
 //
 // Usage:
 //
-//	go run ./cmd/abusprobe/ [cycles]   # default 100_000_000 post-boot
+//	go run ./cmd/abusprobe/ [post_boot_cycles]   # default 100_000_000
 //
-// The output groups events by PC + select; the bus-side responder is the
-// existing pkg/emu/device.HP8593AMMIO so the readings reflect the same
-// model used in all other tests.
+// The bus-side responder is the existing pkg/emu/device.HP8593AMMIO so
+// the readings reflect the same model used in all other tests.
 package main
 
 import (
@@ -28,28 +30,29 @@ import (
 	"github.com/windhooked/HP859X_SA/pkg/emu/romloader"
 )
 
-// abusEvent: one access to either 0x75C (write of a select) or 0x75E
-// (read returning a data value).
+// abusEvent: one access to the analog-bus ports.
 type abusEvent struct {
-	kind    byte   // 'W' = write to 75C (select); 'R' = read from 75E
-	pc      uint32 // CPU PC at the time
-	val     uint32 // value written or read
-	curSel  uint16 // current select for context on read events
+	kind   byte   // 'S' = select write (75C); 'R' = data read (75E); 'D' = data write (75E)
+	pc     uint32 // CPU PC at the time
+	val    uint32 // value written or read
+	curSel uint16 // most-recent select (context for R and D events)
+	phase  byte   // 'b' = during boot, 'o' = operating-loop run
 }
 
-// abusTracer wraps the real HP8593AMMIO and intercepts 0x75C writes +
-// 0x75E reads. It also keeps the "last select" so each read can be
-// paired with its select for analysis.
+// abusTracer wraps the real HP8593AMMIO and intercepts 0x75C writes,
+// 0x75E reads, and 0x75E writes. It also keeps the "last select" so each
+// read/write can be paired with its select for analysis.
 type abusTracer struct {
 	inner   *device.HP8593AMMIO
 	pcFn    func() uint32
+	phase   byte // 'b' = boot, 'o' = operating-loop
 	curSel  uint16
 	events  []abusEvent
 	enabled bool
 }
 
 func newAbusTracer() *abusTracer {
-	return &abusTracer{inner: device.NewHP8593AMMIO()}
+	return &abusTracer{inner: device.NewHP8593AMMIO(), phase: 'b'}
 }
 
 func (a *abusTracer) setPCFunc(fn func() uint32) { a.pcFn = fn }
@@ -57,7 +60,7 @@ func (a *abusTracer) setPCFunc(fn func() uint32) { a.pcFn = fn }
 func (a *abusTracer) Read(addr uint32, sz bus.Size) uint32 {
 	v := a.inner.Read(addr, sz)
 	if a.enabled && addr == 0x75E && sz == bus.Word {
-		ev := abusEvent{kind: 'R', val: v, curSel: a.curSel}
+		ev := abusEvent{kind: 'R', val: v, curSel: a.curSel, phase: a.phase}
 		if a.pcFn != nil {
 			ev.pc = a.pcFn()
 		}
@@ -68,9 +71,20 @@ func (a *abusTracer) Read(addr uint32, sz bus.Size) uint32 {
 
 func (a *abusTracer) Write(addr uint32, sz bus.Size, val uint32) {
 	a.inner.Write(addr, sz, val)
-	if a.enabled && addr == 0x75C && sz == bus.Word {
+	if !a.enabled {
+		return
+	}
+	if addr == 0x75C && sz == bus.Word {
 		a.curSel = uint16(val)
-		ev := abusEvent{kind: 'W', val: val}
+		ev := abusEvent{kind: 'S', val: val, phase: a.phase}
+		if a.pcFn != nil {
+			ev.pc = a.pcFn()
+		}
+		a.events = append(a.events, ev)
+		return
+	}
+	if addr == 0x75E && sz == bus.Word {
+		ev := abusEvent{kind: 'D', val: val, curSel: a.curSel, phase: a.phase}
 		if a.pcFn != nil {
 			ev.pc = a.pcFn()
 		}
@@ -117,7 +131,11 @@ func main() {
 
 	c.Reset()
 
-	// Boot
+	// Enable tracing from cold-reset so the boot-phase analog-bus dance
+	// (cal-init, sentinel writes, DAC setup) is captured too.
+	mmio.enabled = true
+	mmio.phase = 'b'
+
 	const (
 		bootChunkCycles    = 2000
 		bootBreakThresh    = 50
@@ -135,10 +153,10 @@ func main() {
 		}
 	}
 
-	fmt.Printf("Post boot: PC=%06X\n", c.Reg(cpu.PC))
+	bootEvents := len(mmio.events)
+	fmt.Printf("Post boot: PC=%06X  events during boot=%d\n", c.Reg(cpu.PC), bootEvents)
 
-	// Enable tracing for the operating-loop sweep
-	mmio.enabled = true
+	mmio.phase = 'o'
 
 	const chunkCycles = 50_000
 	loops := postCycles / chunkCycles
@@ -154,85 +172,120 @@ func main() {
 		}
 	}
 
-	fmt.Printf("Final PC=%06X  events captured=%d\n", c.Reg(cpu.PC), len(mmio.events))
+	fmt.Printf("Final PC=%06X  total events=%d (boot=%d, operating=%d)\n",
+		c.Reg(cpu.PC), len(mmio.events), bootEvents, len(mmio.events)-bootEvents)
 
-	// Group reads by (PC, curSel) and writes by (PC, value). Show counts.
-	type readKey struct {
-		pc, sel uint32
-	}
-	type writeKey struct {
+	// Group select writes by (phase, PC, value), data reads by (phase, PC, sel),
+	// data writes by (phase, PC, sel).
+	type selKey struct {
+		phase   byte
 		pc, val uint32
 	}
-	readSel := make(map[readKey]map[uint32]int) // map[readKey] -> {val -> count}
-	writeStat := make(map[writeKey]int)
+	type dataKey struct {
+		phase   byte
+		pc, sel uint32
+	}
+	selStat := make(map[selKey]int)
+	readStat := make(map[dataKey]map[uint32]int)
+	writeStat := make(map[dataKey]map[uint32]int)
 
 	for _, e := range mmio.events {
 		switch e.kind {
+		case 'S':
+			selStat[selKey{phase: e.phase, pc: e.pc, val: e.val}]++
 		case 'R':
-			k := readKey{pc: e.pc, sel: uint32(e.curSel)}
-			if readSel[k] == nil {
-				readSel[k] = make(map[uint32]int)
+			k := dataKey{phase: e.phase, pc: e.pc, sel: uint32(e.curSel)}
+			if readStat[k] == nil {
+				readStat[k] = make(map[uint32]int)
 			}
-			readSel[k][e.val]++
-		case 'W':
-			k := writeKey{pc: e.pc, val: e.val}
-			writeStat[k]++
+			readStat[k][e.val]++
+		case 'D':
+			k := dataKey{phase: e.phase, pc: e.pc, sel: uint32(e.curSel)}
+			if writeStat[k] == nil {
+				writeStat[k] = make(map[uint32]int)
+			}
+			writeStat[k][e.val]++
 		}
 	}
 
-	fmt.Println("\n=== Writes to 0xFFF75C (select port) ===")
-	var ws []writeKey
-	for k := range writeStat {
-		ws = append(ws, k)
-	}
-	sort.Slice(ws, func(i, j int) bool {
-		if writeStat[ws[i]] != writeStat[ws[j]] {
-			return writeStat[ws[i]] > writeStat[ws[j]]
+	// Helpers to render sorted summaries per phase.
+	phaseName := func(p byte) string {
+		if p == 'b' {
+			return "BOOT"
 		}
-		return ws[i].pc < ws[j].pc
-	})
-	for _, k := range ws {
-		fmt.Printf("  PC=%06X writes select=0x%04X ×%d\n", k.pc, k.val, writeStat[k])
+		return "OPERATING-LOOP"
 	}
 
-	fmt.Println("\n=== Reads from 0xFFF75E (data port; grouped by PC + select) ===")
-	var rs []readKey
-	for k := range readSel {
-		rs = append(rs, k)
-	}
-	sort.Slice(rs, func(i, j int) bool {
-		ci, cj := 0, 0
-		for _, c := range readSel[rs[i]] {
-			ci += c
-		}
-		for _, c := range readSel[rs[j]] {
-			cj += c
-		}
-		if ci != cj {
-			return ci > cj
-		}
-		return rs[i].pc < rs[j].pc
-	})
-	for _, k := range rs {
-		total := 0
-		for _, c := range readSel[k] {
-			total += c
-		}
-		vals := []uint32{}
-		for v := range readSel[k] {
-			vals = append(vals, v)
-		}
-		sort.Slice(vals, func(i, j int) bool { return readSel[k][vals[i]] > readSel[k][vals[j]] })
-		valStr := ""
-		for i, v := range vals {
-			if i >= 4 {
-				break
+	dumpSelects := func(p byte) {
+		fmt.Printf("\n=== [%s] Writes to 0xFFF75C (select port) ===\n", phaseName(p))
+		var ks []selKey
+		for k := range selStat {
+			if k.phase == p {
+				ks = append(ks, k)
 			}
-			if valStr != "" {
-				valStr += ", "
-			}
-			valStr += fmt.Sprintf("0x%04X(%d)", v, readSel[k][v])
 		}
-		fmt.Printf("  PC=%06X sel=0x%02X read ×%d  values: %s\n", k.pc, k.sel, total, valStr)
+		sort.Slice(ks, func(i, j int) bool {
+			if selStat[ks[i]] != selStat[ks[j]] {
+				return selStat[ks[i]] > selStat[ks[j]]
+			}
+			return ks[i].pc < ks[j].pc
+		})
+		for _, k := range ks {
+			fmt.Printf("  PC=%06X select=0x%04X ×%d\n", k.pc, k.val, selStat[k])
+		}
 	}
+
+	dumpData := func(stat map[dataKey]map[uint32]int, p byte, label string) {
+		fmt.Printf("\n=== [%s] %s from 0xFFF75E (grouped by PC + select) ===\n",
+			phaseName(p), label)
+		var ks []dataKey
+		for k := range stat {
+			if k.phase == p {
+				ks = append(ks, k)
+			}
+		}
+		sort.Slice(ks, func(i, j int) bool {
+			ci, cj := 0, 0
+			for _, c := range stat[ks[i]] {
+				ci += c
+			}
+			for _, c := range stat[ks[j]] {
+				cj += c
+			}
+			if ci != cj {
+				return ci > cj
+			}
+			return ks[i].pc < ks[j].pc
+		})
+		for _, k := range ks {
+			total := 0
+			for _, c := range stat[k] {
+				total += c
+			}
+			vals := []uint32{}
+			for v := range stat[k] {
+				vals = append(vals, v)
+			}
+			sort.Slice(vals, func(i, j int) bool { return stat[k][vals[i]] > stat[k][vals[j]] })
+			valStr := ""
+			for i, v := range vals {
+				if i >= 6 {
+					valStr += fmt.Sprintf(", +%d more", len(vals)-i)
+					break
+				}
+				if valStr != "" {
+					valStr += ", "
+				}
+				valStr += fmt.Sprintf("0x%04X(%d)", v, stat[k][v])
+			}
+			fmt.Printf("  PC=%06X sel=0x%02X ×%d  values: %s\n", k.pc, k.sel, total, valStr)
+		}
+	}
+
+	dumpSelects('b')
+	dumpData(writeStat, 'b', "Writes")
+	dumpData(readStat, 'b', "Reads")
+	dumpSelects('o')
+	dumpData(writeStat, 'o', "Writes")
+	dumpData(readStat, 'o', "Reads")
 }

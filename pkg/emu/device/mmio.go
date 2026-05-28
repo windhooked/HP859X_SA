@@ -128,22 +128,10 @@ type HP8593AMMIO struct {
 	b       [MMIOSize]byte
 	Display *SCIDisplay
 
-	// indirectMatchPending models a one-shot "ADC ready" on 0xFFF75E. The
-	// firmware's poll at ROM 0x5E5FA wants `(0x12 & low_byte(read)) == 0x02`;
-	// returning 0x0002 satisfies this. We arm the match periodically (every
-	// indirectMatchEveryNReads reads) and clear it on first consumption so
-	// the firmware experiences the same "occasionally ready, mostly busy"
-	// cadence a real ADC produces — preserving the annunciator-redraw work
-	// the firmware does between ready events.
-	indirectMatchPending bool
-	indirectReadCount    uint64
+	// abus models the A16 analog-control hybrid (mux + ADC + DAC) behind
+	// the indirect register pair at 0xFFF75C/0xFFF75E. See analogbus.go.
+	abus analogBus
 }
-
-// indirectMatchEveryNReads controls how often the 0xFFF75E read returns a
-// "match" value (0x0002). Higher = the firmware does more background work
-// between sample-ready events. 256 is a balance: ~85 ready events per 22k
-// reads in a 30M-cycle boot, comparable to a real instrument's sweep rate.
-const indirectMatchEveryNReads = 256
 
 // NewHP8593AMMIO returns an initialised MMIO stub with an attached SCIDisplay.
 func NewHP8593AMMIO() *HP8593AMMIO {
@@ -192,24 +180,11 @@ func (m *HP8593AMMIO) Read(addr uint32, sz bus.Size) uint32 {
 		if addr == sweepStatusOffset {
 			return v | sweepStatusReady
 		}
-		// Indirect analog-bus data port: see indirectDataOffset comment.
-		// One match per indirectMatchEveryNReads reads; clear on consume.
-		// Returns 0x0006 to satisfy both observed firmware polls:
-		//   - PC 0x5E5FA operating loop: `(0x12 & low_byte) == 0x02`
-		//     ⇒ 0x12 & 0x06 = 0x02 ✓
-		//   - PC 0x5E708 init/cal stage: `low_byte == 0x06`
-		//     ⇒ 0x06 == 0x06 ✓
-		// Both polls also break out on timer expiration, so returning a
-		// matching value periodically just speeds the firmware up; it
-		// shouldn't push it into an unmodelled state.
+		// Indirect analog-bus data port: dispatch via analogBus, which holds
+		// the most-recent select written to 0xFFF75C and returns a different
+		// quantity per select (status / ADC / register-file). See analogbus.go.
 		if addr == indirectDataOffset {
-			m.indirectReadCount++
-			arm := m.indirectReadCount%indirectMatchEveryNReads == 0
-			if arm || m.indirectMatchPending {
-				m.indirectMatchPending = false
-				return 0x0006
-			}
-			return 0
+			return uint32(m.abus.readData())
 		}
 	}
 
@@ -238,6 +213,18 @@ func (m *HP8593AMMIO) Write(addr uint32, sz bus.Size, val uint32) {
 			m.Display.WriteCmd(uint16(val))
 		case 0x5FE:
 			m.Display.WriteData(uint16(val))
+		}
+	}
+
+	// Analog-bus dispatch: 0xFFF75C latches the select; 0xFFF75E is the
+	// data port whose write semantics depend on the current select. See
+	// analogbus.go for the per-select model.
+	if sz == bus.Word {
+		switch addr {
+		case 0x75C:
+			m.abus.writeSelect(uint16(val))
+		case indirectDataOffset:
+			m.abus.writeData(uint16(val))
 		}
 	}
 }
