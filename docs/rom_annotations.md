@@ -250,6 +250,54 @@ commands — exactly the kind of raster-write the screen-background
 fill at MAR=`0x4000/0x0000` uses, just targeting a different MAR in
 the trace area.
 
+### Operating-tick state machine (gate-common to gate C and trace render)
+
+`fcn.18568` is **a continuous loop, not a one-shot function**: PC 0x18A88
+is `bra $18568` — a tail-call back to entry. Each iteration tests state
+flags, takes one of many branches, and either reaches a deep target
+(key-flag bclr at 0x18F42, sweep-done bclr at 0x17346 via slot dispatch)
+or loops back to the entry. The dispatcher's stack-rts trick into this
+function is what would *start* the loop from interrupt context.
+
+**Early-branch tests in the entry block (PC 0x18568 — 0x185D0):**
+
+| PC      | Test                                | Default value after boot     | Pre-arm to take deep path |
+|---------|-------------------------------------|------------------------------|---------------------------|
+| 0x18572 | `btst #11, $b010.w` ⇒ exit 0x18ADC  | `b010 = 0x0000` ✓            | (no change needed)        |
+| 0x18588 | `(b1e0 & 6) != 0` ⇒ 0x191E0         | `b1e0 = 0x1900` ✓            | `b1e0 := 0x0200`          |
+| 0x18592 | `b1e4 == 0x34` ⇒ 0x185AC            | `b1e4 = 0x0000` ✓            | (no change)               |
+| 0x1859A | `bc64 bit 13`                       | `bc64 = 0x8006` (bit 13 = 0) | (no change)               |
+| 0x185AC | `b07a bit 11` ⇒ exit 0x18ABC        | `b07a = 0x0000` ✓            | (no change)               |
+| 0x185B6 | `b07c bit 13` ⇒ exit 0x18ABC        | `b07c = 0x0011` (bit 13 = 0) | (no change)               |
+| 0x185C4 | `b0ce bit 11` clear ⇒ 0x18642       | `b0ce = 0x8000` (bit 11 = 0) | `b0ce \|= 0x0800`          |
+
+**Deep-path gates discovered (PC 0x188B6 — 0x18A88 main loop body):**
+
+| PC      | Test                                | After pre-arm     | Needed     |
+|---------|-------------------------------------|-------------------|------------|
+| 0x188FC | `(b1f8 & 0x1800) == 0x1800`         | `b1f8 = 0x0056`   | `b1f8 \|= 0x1800` |
+| 0x18AFC | `b1e0 bit 9` clear ⇒ 0x18FD6 (past key bclr) | `b1e0 = 0x0200` ✓ | (bit 9 set) |
+| 0x18B00 | `befa bit 10` set ⇒ 0x18FD6         | befa keeps getting bit 10 set | `befa &= ~0x0400` |
+
+**Empirical findings (`cmd/tickflags`, Rev L, 30M boot + 20M instrumented steps):**
+
+  - WITHOUT pre-arm: 0 instructions executed inside `fcn.18568` body
+    (function exits via early branches before doing any work).
+  - WITH pre-arm above: **2,062,783 instructions executed inside the
+    body**, deepest PC reached `0x18A88` (the loop-back instruction).
+    Function ran its full main linear path.
+  - PC 0x18F42 (key bclr): NOT REACHED — gated on additional state we
+    haven't yet enumerated, somewhere between 0x18B14 and 0x18F30.
+  - PC 0x17346 (sweep-done): NOT REACHED — same reason; this is reached
+    via slot dispatches from inside the loop body.
+
+**Next step**: enumerate the remaining conditional branches between
+PC 0x18B14 and PC 0x18F42 to find the additional state gates. Use
+`cmd/disasm` + `cmd/dispatch` to follow branches; pre-arm matching
+RAM bits in `cmd/tickflags` and re-measure deepest PC reached.
+
+---
+
 ### Trace buffer addresses
 
 | Address    | Func                                                      |
