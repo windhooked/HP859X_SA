@@ -3,12 +3,11 @@
 //
 // Usage:
 //
-//	go run ./cmd/renderframe/ [cycles] [out.png] [--synth]
+//	go run ./cmd/renderframe/ [cycles] [out.png]
 //
-// Flags:
-//
-//	--synth   populate the cal NVRAM at 0x200000 with the synthesised image
-//	          (CalNVRAM.Synthesize) instead of a blank "dead battery" chip.
+// The machine is always constructed with a valid-checksum cal NVRAM
+// (machine.New8593A calls CalNVRAM.Synthesize automatically). The legacy
+// --synth flag is accepted but has no additional effect.
 package main
 
 import (

@@ -39,21 +39,45 @@ func TestCalNVRAMReadWriteRoundtrip(t *testing.T) {
 	}
 }
 
-// TestCalNVRAMSynthesizeIsNoOpForBlank verifies Synthesize() leaves a blank
-// NVRAM blank under Rev L. cmd/caltrace established that no boot-time gate
-// byte exists in Rev L (the firmware only reads offset 0 multiple times for
-// the CPU integrity test); Synthesize() is intentionally a no-op until
-// post-boot cal consumers are RE'd. This test pins that contract so future
-// changes that re-introduce boot-time writes are flagged explicitly.
-func TestCalNVRAMSynthesizeIsNoOpForBlank(t *testing.T) {
+// TestCalNVRAMSynthesizeRevL verifies SynthesizeRevL() produces an image whose
+// checksums satisfy the Rev L startup check at ROM 0x454A:
+//
+//	Σ(even-indexed bytes) ≡ 1 (mod 256)   [D2 init=0xFF → 0xFF+1=0x00 → pass]
+//	Σ(odd-indexed  bytes) ≡ 1 (mod 256)   [D3 init=0xFF → 0xFF+1=0x00 → pass]
+func TestCalNVRAMSynthesizeRevL(t *testing.T) {
 	n := NewCalNVRAM()
-	n.Synthesize()
+	n.SynthesizeRevL()
 	img := n.Image()
+	if len(img) != int(CalNVRAMSize) {
+		t.Fatalf("image length = %d, want %d", len(img), CalNVRAMSize)
+	}
+
+	var evenSum, oddSum uint32
 	for i, b := range img {
-		if b != 0 {
-			t.Fatalf("Synthesize() wrote %#02X at offset %#06X — Rev L boot has no "+
-				"gate-byte to set; updating Synthesize requires updating the package "+
-				"comment + cmd/caltrace findings", b, i)
+		if i%2 == 0 {
+			evenSum += uint32(b)
+		} else {
+			oddSum += uint32(b)
+		}
+	}
+	if evenSum%256 != 1 {
+		t.Errorf("even-byte sum %d mod 256 = %d, want 1 (D2 init=0xFF+sum=0x00 for pass)", evenSum, evenSum%256)
+	}
+	if oddSum%256 != 1 {
+		t.Errorf("odd-byte sum %d mod 256 = %d, want 1 (D3 init=0xFF+sum=0x00 for pass)", oddSum, oddSum%256)
+	}
+
+	// Verify the anchor bytes are as documented.
+	if img[0] != 0x01 {
+		t.Errorf("img[0] = %#02X, want 0x01 (even-sum anchor)", img[0])
+	}
+	if img[1] != 0x01 {
+		t.Errorf("img[1] = %#02X, want 0x01 (odd-sum anchor)", img[1])
+	}
+	// All other bytes must be zero (firmware uses ROM defaults for zero constants).
+	for i := 2; i < len(img); i++ {
+		if img[i] != 0 {
+			t.Fatalf("img[%d] = %#02X, want 0x00 (non-anchor bytes must be zero)", i, img[i])
 		}
 	}
 }

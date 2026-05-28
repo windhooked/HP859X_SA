@@ -112,6 +112,7 @@ func New8593A(romImage []byte) (*Machine, error) {
 
 	rom := bus.NewROM(romImage)
 	calNVRAM := device.NewCalNVRAM()
+	calNVRAM.Synthesize() // embed valid checksum so the startup check passes
 	calRAM := bus.NewRAM(CalRAMSize)
 	pit := bus.NewRAM(PITSize)
 	fp := device.NewFrontPanel()

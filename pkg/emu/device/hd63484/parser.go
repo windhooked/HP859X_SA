@@ -250,6 +250,18 @@ func (dec *decoder) dispatchCmd(c *Chip, w uint16) {
 		// We don't model the FIFO yet; just stay in stCmd.
 		return
 	}
+	// Strict exact-match dispatch. The family-mask approach (each top-6-
+	// bits subdivision = one shape command, low 10 bits = attribute
+	// flags) is structurally correct per the HD63484 datasheet, BUT in
+	// practice the firmware emits MANY 16-bit values as parameter / glyph
+	// row data that happen to have top nibbles overlapping the command
+	// space (e.g. a glyph row of 0x9300 would mask-match into the ARCT
+	// family and swallow 2 unrelated words as "arguments"). Each false
+	// positive cascades into 3-word desync. Until we can validate the
+	// chip-side parameter framing per command (which would let us tell
+	// "real opcode" from "data that looks like opcode"), keep exact
+	// matches only and add the specific attribute-bit variants the
+	// firmware actually uses (sourced from cmd/_r2survey).
 	switch w {
 	case cmdORG:
 		dec.st = stORG1
@@ -257,27 +269,25 @@ func (dec *decoder) dispatchCmd(c *Chip, w uint16) {
 		dec.st = stMoveX
 	case cmdRMOVE:
 		dec.st = stRMoveX
-	case cmdALINE, cmdALIN0:
+	case cmdALIN0, cmdALINE: // 0x8800 / 0x8801 — ALINE without/with attr
 		dec.st = stLineX
-	case cmdRLINE:
+	case cmdRLINE, 0x8C01: // 0x8C00 / 0x8C01 — RLINE without/with attr
 		dec.st = stRLineX
-	case cmdARCT:
+	case cmdARCT, 0x9001: // 0x9000 / 0x9001 — ARCT without/with attr
 		dec.st = stRctX
-	case cmdRRCT:
+	case cmdRRCT, 0x9401: // 0x9400 / 0x9401 — RRCT without/with attr
 		dec.st = stRRctX
-	case cmdAFRCT:
+	case cmdAFRCT, 0xA001: // 0xA000 / 0xA001 — AFRCT without/with attr
 		dec.st = stFRctX
-	case cmdRFRCT:
-		// RFRCT (relative) — share state machine with absolute since both
-		// take 2 args; the conversion to absolute is in the X/Y handlers.
+	case cmdRFRCT, 0xA401: // 0xA400 / 0xA401 — RFRCT without/with attr
 		dec.st = stFRctX
-	case cmdDOT:
+	case cmdDOT, 0xCC01: // 0xCC00 / 0xCC01 — DOT without/with attr
 		c.setPixel(c.penX, c.penY, fgColor)
 		c.Dots++
-	case cmdWPTN:
-		dec.st = stWPTNCount
 	case cmdCRCL:
 		dec.st = stCRCLArg
+	case cmdWPTN:
+		dec.st = stWPTNCount
 	case cmdPAINT:
 		dec.st = stPAINTSeed
 	case cmdCLR, cmdSCLR:

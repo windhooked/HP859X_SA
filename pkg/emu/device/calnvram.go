@@ -62,24 +62,45 @@ type CalNVRAM struct {
 // behaviour when the region was previously unmapped (OnFault → 0).
 func NewCalNVRAM() *CalNVRAM { return &CalNVRAM{} }
 
-// Synthesize is currently a no-op under the Rev L firmware: cmd/caltrace shows
-// the boot reads every cal byte once (checksum sweep) and only re-touches
-// offset 0 (CPU integrity test). No polled "gate" byte exists in Rev L, so
-// writing values to specific offsets has no observable effect on the boot
-// progression. The function is preserved (rather than removed) because:
+// SynthesizeRevL builds a minimal-valid Rev L calibration NVRAM image.
 //
-//   - post-boot code paths (frequency sweeps, mode switches, correction-
-//     table lookups) DO consume cal bytes — synthesised cal data will
-//     matter there once we model those paths;
-//   - the API + unit-test surface stays stable for future use.
+// The Rev L startup checksum (ROM 0x454A) sweeps all 65536 bytes of the NVRAM
+// with two byte accumulators (D2 for even-indexed bytes, D3 for odd-indexed),
+// both initialised to 0xFF. After adding every byte, the loop tests:
 //
-// The legacy 17.12.90 implementation set 0x0A3C=5 to pass the staged
-// sweep-gate test. That offset has no Rev L analogue — see the package
-// comment for the measured access pattern.
+//	tst.b D2 ; sne D2  →  D2 = 0xFF if nonzero (fail), 0x00 if zero (pass)
+//
+// A checksum PASSES when the accumulator is 0x00, i.e.:
+//
+//	0xFF + Σ(even-indexed bytes) ≡ 0 (mod 256)  → Σ(even) ≡ 1 (mod 256)
+//	0xFF + Σ(odd-indexed  bytes) ≡ 0 (mod 256)  → Σ(odd)  ≡ 1 (mod 256)
+//
+// Failures set bits 4 (even) and 5 (odd) of D1, which are then ORed into the
+// diagnostic word at RAM[0xFFBB2C]. Firmware uses 0xFFBB2C to display the
+// "CAL: USING DEFAULT DATA" / "USING DEFAULTS" status annunciators.
+//
+// Setting byte[0]=0x01 satisfies the even constraint; byte[1]=0x01 satisfies
+// odd. All other bytes remain 0x00 (which the firmware treats as "no cal
+// constants loaded" and substitutes ROM defaults — correct for an emulator
+// that has not yet RE'd the full per-band correction table layout).
+func (n *CalNVRAM) SynthesizeRevL() {
+	// Clear then install checksum anchor bytes.
+	for i := range n.b {
+		n.b[i] = 0
+	}
+	// Even-byte checksum: Σ(positions 0,2,4,…) = 0x01.
+	n.b[0] = 0x01
+	// Odd-byte checksum: Σ(positions 1,3,5,…) = 0x01.
+	n.b[1] = 0x01
+}
+
+// Synthesize calls SynthesizeRevL to build a minimal-valid cal image.
+// This makes the Rev L startup checksum pass so the firmware clears the
+// "CAL: USING DEFAULTS" annunciator and marks calibration as valid in
+// RAM[0xFFBB2C]. Real correction-table values are left at zero; the
+// firmware substitutes ROM defaults for any zero entries it encounters.
 func (n *CalNVRAM) Synthesize() {
-	// Intentionally empty. Add Rev L cal-byte initialisation as post-boot
-	// consumers are RE'd (e.g. when the sweep / frequency-step path needs
-	// per-band correction values).
+	n.SynthesizeRevL()
 }
 
 // LoadImage replaces the NVRAM contents with the given image. Image must be no
