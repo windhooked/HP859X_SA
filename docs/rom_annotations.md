@@ -491,8 +491,23 @@ to be empirically tested against the per-byte behavior):
 - `bc64.13` set → fcn.58c2e bit-13 path at `0x58C9E → 0x58CA2` (the
   "PRINT/PLOT mode" — calls fcn.586ae instead of fcn.567e0).
 
-**Update (next commit) — the dispatch trigger is the PS/2 Enter key
-(scancode `0x5A`)**. Verified empirically by cmd/hpibstep:
+**FINAL Enter-key behavior (traced through nested jump tables)**:
+
+The full chain `0x5A → fcn.57278 → 0x9800 → fcn.56d1a → fcn.6862 →
+0x56F2E → (bc64>>14 dispatch) → 0x56FB2 → fcn.56e12 → fcn.56cd2`
+ends at **fcn.56cd2**, which does NOT execute the command — it
+**copies the buffer into a 40-slot history ring at `$a634`** (10-byte
+slots at `(a634)*5+3 - 0x59E4` from a0). So Enter is the "save to
+recall history" key, not the run-command key.
+
+This explains why our `IP;<CR>` test never fired Initial Preset
+despite the dispatch chain running: Enter on the external-keyboard
+interface stores the line for later recall, but the actual HP-IB
+COMMAND EXECUTION is triggered by a different signal — most likely
+EOI assertion or LF (`\n` = scancode 0x5A in our table maps to CR /
+0x0D, not LF) on the real HP-IB bus, which we don't model.
+
+**Original Enter discovery** (now superseded by the trace above):
 
 | Input scancode sequence  | bc36 after | fcn.567e0 calls | fcn.56d1a calls |
 |---------------------------|------------|-----------------|-----------------|
