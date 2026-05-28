@@ -131,11 +131,17 @@ type HP8593AMMIO struct {
 	// abus models the A16 analog-control hybrid (mux + ADC + DAC) behind
 	// the indirect register pair at 0xFFF75C/0xFFF75E. See analogbus.go.
 	abus analogBus
+
+	// HPIB models the TMS9914A IEEE-488 controller at MMIO offset
+	// 0x600..0x61F. The firmware initialises it during boot then leaves
+	// it alone; in the operating loop it accesses these registers via
+	// the IRQ4 handler when HP-IB activity occurs. See tms9914a.go.
+	HPIB *TMS9914A
 }
 
 // NewHP8593AMMIO returns an initialised MMIO stub with an attached SCIDisplay.
 func NewHP8593AMMIO() *HP8593AMMIO {
-	m := &HP8593AMMIO{Display: NewSCIDisplay()}
+	m := &HP8593AMMIO{Display: NewSCIDisplay(), HPIB: NewTMS9914A()}
 
 	// SCI/display controller: pre-assert all ready bits so every firmware
 	// polling pattern (bits 0, 1, and 2) returns immediately.
@@ -159,6 +165,13 @@ func (m *HP8593AMMIO) Read(addr uint32, sz bus.Size) uint32 {
 		return 0
 	}
 	v := beRead(m.b[:], addr, sz)
+
+	// TMS9914A HP-IB controller at offset 0x600..0x60F (8 registers,
+	// 2-byte stride). Byte reads route to the chip; reads outside that
+	// window fall through to the backing-store value.
+	if addr >= 0x600 && addr <= 0x60F && sz == bus.Byte {
+		return uint32(m.HPIB.ReadByte(addr - 0x600))
+	}
 
 	// Hard-override: SCI status byte is always "ready" regardless of what the
 	// firmware may have written — the real hardware asserts this asynchronously.
@@ -226,6 +239,11 @@ func (m *HP8593AMMIO) Write(addr uint32, sz bus.Size, val uint32) {
 		case indirectDataOffset:
 			m.abus.writeData(uint16(val))
 		}
+	}
+
+	// TMS9914A HP-IB controller writes (byte-only).
+	if addr >= 0x600 && addr <= 0x60F && sz == bus.Byte {
+		m.HPIB.WriteByte(addr-0x600, byte(val))
 	}
 }
 

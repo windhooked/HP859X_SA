@@ -148,6 +148,108 @@ subsystem code region 0x5E000–0x5F500.
 
 ---
 
+## TMS9914A IEEE-488 / HP-IB controller (MMIO `0xFFF600`–`0xFFF60F`)
+
+Texas Instruments TMS9914A talker/listener/controller. The firmware
+initialises it during boot at PC 0x32A6+:
+
+    move.b #$FF, $f606.w   ; ADR   = 0xFF (address register)
+    move.b #$FF, $f604.w   ; AUXCR = 0xFF (auxiliary command)
+    move.b #$FA, $f608.w   ; SPMR  = 0xFA (serial-poll mode response)
+
+Then leaves it alone unless HP-IB activity occurs (the operating loop
+doesn't touch it). Modelled in [pkg/emu/device/tms9914a.go](../pkg/emu/device/tms9914a.go).
+
+### Register layout (32-byte window, 2-byte stride)
+
+Same address selects DIFFERENT register for read vs write:
+
+| Offset | Read     | Write    | Purpose |
+|--------|----------|----------|---------|
+| `0x0`  | IS0      | IMR0     | Interrupt Status 0 / Mask 0 |
+| `0x2`  | IS1      | IMR1     | Interrupt Status 1 / Mask 1 |
+| `0x4`  | ADSR     | AUXCR    | Address Status / Auxiliary Command |
+| `0x6`  | BSR      | ADR      | Bus Status / Address |
+| `0x8`  | —        | SPMR     | Serial Poll Mode Response |
+| `0xA`  | CPTR     | PPR      | Command Pass-Through / Parallel Poll |
+| `0xC`  | —        | —        | (unused) |
+| `0xE`  | DIR      | CDOR     | Data In / Data Out |
+
+### Interrupt behavior
+
+The chip drives an IRQ line into the M68K's autovector IRQ4 whenever
+`(IS0 & IMR0) != 0 OR (IS1 & IMR1) != 0`. Both IS0 and IS1 must be
+explicitly set externally (via `TMS9914A.SetIS0` / `SetIS1`) — the
+minimal model doesn't simulate the chip's own state-transition logic
+that would normally set these bits in response to bus activity.
+
+### IS0 bits (read-side)
+
+| Bit | Name | Meaning |
+|-----|------|---------|
+| 7   | INT1 | An interrupt is pending in IS1 (cascade indicator) |
+| 6   | SRQ  | Service Request — another device on the bus requested attention |
+| 5   | MAC  | My Address Change |
+| 4   | RLC  | Remote/Local Change |
+| 3   | SPAS | Serial Poll Active State |
+| 2   | END  | END message received |
+| 1   | BO   | Byte Out — controller can send next data byte |
+| 0   | BI   | Byte In — received byte ready in DIR |
+
+### IS1 bits (read-side)
+
+| Bit | Name | Meaning |
+|-----|------|---------|
+| 7   | GET  | Group Execute Trigger received |
+| 6   | ERR  | Handshake error |
+| 5   | UNC  | Unrecognised command |
+| 4   | APT  | Address Pass-Through |
+| 3   | DCAS | Device Clear Active State |
+| 2   | MA   | My Address received |
+| 1   | IFC  | Interface Clear |
+
+### Auxiliary commands (AUXCR writes)
+
+The minimal model handles only one of the chip's ~24 auxiliary
+commands:
+
+| Command (bits 0..4) | Name  | Effect with SET bit (7) |
+|---------------------|-------|------------------------|
+| `0x00`              | swrst | Software Reset — clears IS0 and IS1 |
+
+Other commands (tcs, tca, gts, rtl, etc.) are stored in the AUXCR
+register but have no modelled side effect.
+
+### Tests
+
+- `pkg/emu/device/tms9914a_test.go`: 5 unit tests covering read/write
+  asymmetry, odd-offset access, swrst, IRQ assertion via IS0 mask,
+  IRQ assertion via IS1 mask.
+- `pkg/emu/machine/hpib_test.go`: chip-attached integration tests:
+  - `TestHPIBChipPresent` — chip survives boot init; firmware leaves
+    IMR0/IMR1 at 0/0 so no interrupt is asserted at idle.
+  - `TestHPIBReadWriteRoutedThroughChip` — MMIO bus correctly routes
+    reads/writes to the chip's read/write registers.
+  - `TestHPIBNaturalDispatchReachesFcn1D58` — with key FIFO pushed
+    and IS0.BI set + IRQ4 injected, the natural dispatch chain reaches
+    `fcn.1D58` (LAYER 1 of the path-A obstruction fix; LAYER 2 still
+    in place per the operating-tick early-exit branches).
+
+### Architectural status (post-TMS9914A)
+
+The TMS9914A model **unblocks LAYER 1** of the natural-dispatch
+obstruction documented earlier: the chip is now present, the firmware
+can read non-default status, and external code can trigger IRQ4 in
+ways the firmware recognises.
+
+**LAYER 2 remains**: even after the natural dispatcher reaches the
+operating tick, the tick's body has state-flag gates (b1e0, b1e4,
+b07a, b07c, b0ce) that route execution AWAY from the bclrs under
+steady-state RAM. `Machine.DriveOperatingTick` remains the canonical
+primitive for forcing the operating tick to execute its deep path.
+
+---
+
 ## A16 analog-bus select map (decoded via `cmd/abusprobe`, 100M-cycle survey)
 
 Each select value written to `0xFFF75C` addresses a different sub-function

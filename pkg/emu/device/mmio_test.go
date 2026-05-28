@@ -86,9 +86,16 @@ func TestMMIOReadWriteRoundtrip(t *testing.T) {
 		t.Errorf("PPI control = %#02x, want 0x82", got)
 	}
 
-	// 9914A HP-IB register at offset 0x606 (byte write).
+	// TMS9914A HP-IB controller at offset 0x600..0x60F. Reads and writes
+	// at the same chip-local address access DIFFERENT registers (read =
+	// status / data, write = mask / data / auxiliary command), so a
+	// write-then-read of 0xFF at 0x606 (= BSR read / ADR write on the
+	// chip) returns the read-side register's value (BSR), NOT what we
+	// wrote to ADR. The minimal model in tms9914a.go initialises both
+	// to zero, so we expect 0 back.
 	m.Write(0x606, bus.Byte, 0xFF)
-	if got := m.Read(0x606, bus.Byte); got != 0xFF {
-		t.Errorf("HP-IB reg 0x606 = %#02x, want 0xFF", got)
+	if got := m.Read(0x606, bus.Byte); got != 0x00 {
+		t.Errorf("HP-IB reg 0x606 read after write = %#02x, want 0x00 (read-side BSR, not write-side ADR)",
+			got)
 	}
 }
