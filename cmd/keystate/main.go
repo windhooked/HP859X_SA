@@ -201,22 +201,33 @@ func main() {
 			c.Run(bootIRQServiceCost)
 			c.SetIRQ(0)
 		}
-		// Halfway through: inject a key press.
+		// Every 8th chunk try IRQ4 (HP-IB). fcn.1D58 — the entry into
+		// the dispatch path that calls fcn.1B40 (and the key consumer)
+		// — is invoked from multiple sites in the 0x26xx region, which
+		// is the IRQ4 handler body. Without IRQ4 ticks the dispatcher
+		// never runs, regardless of bf03/bf0a state.
+		if i%8 == 4 {
+			c.SetIRQ(4)
+			c.Run(bootIRQServiceCost)
+			c.SetIRQ(0)
+		}
+		// Halfway through: inject a key press, then directly force the
+		// dispatch chain by clearing bf0a (the pending function-pointer
+		// gate). If the consumer is reached the IRQ3 handler at 0x18568
+		// runs and clears bc67 bit 0. This tests the chain end-to-end
+		// without needing the (currently unknown) natural event tick.
 		if i == injectIRQ3At {
-			var matrix [6]byte
-			matrix[0] = 0x01
-			// FrontPanel is at fixed addr; access it via the machine.Bus
-			// is tedious, so reach into the device list.
-			for _, m := range []bus.Device{} {
-				_ = m
-			}
-			// Use direct device methods via a separate handle — simpler
-			// to call SetIRQ(3) and let the IRQ3 handler latch bc67.
 			c.SetIRQ(3)
 			c.Run(bootIRQServiceCost)
 			c.SetIRQ(0)
-			fmt.Printf("\n>>> IRQ3 injected at i=%d (cycle ~%dM) <<<\n\n",
-				i, (i*chunkCycles)/1_000_000)
+			fmt.Printf("\n>>> IRQ3 injected at i=%d  bc67=%02X  bf0a=%08X <<<\n",
+				i, b.Read(0xFFBC67, bus.Byte), b.Read(0xFFBF0A, bus.Long))
+
+			// Forcibly clear bf0a — bypasses the "perpetual fcn.192C8"
+			// dispatch. Next call to fcn.1B40 (if any) will then take
+			// the bf03==0 && bf0a==0 path -> JMP $148 -> key consumer.
+			b.Write(0xFFBF0A, bus.Long, 0)
+			fmt.Printf(">>> bf0a forced to 0; continuing run <<<\n\n")
 		}
 	}
 
