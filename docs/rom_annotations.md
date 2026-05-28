@@ -200,6 +200,65 @@ with the firmware setting initial value `(0,0,0x93)` at boot (= signed `0x000093
 
 ---
 
+## Firmware dispatch jump table (ROM `0x000C0`–`0x007B0+`)
+
+The firmware's main organizational structure: a flat, contiguous table of
+6-byte JMP instructions starting at ROM offset `0x0C4`. Each entry is
+`4EF9 hh hh ll ll` = `jmp $longabs.l`. Entries are addressed by their
+offset within the table; the firmware uses `jsr $XXX.w` (16-bit short
+addressing) to invoke an entry, executing the JMP and tail-jumping to
+the actual handler.
+
+The table starts AFTER the M68K exception/IRQ vector area at
+`0x000`–`0x0BF` (which is 48 longwords: initial SP/PC at 0x0/0x4, then
+vectors 2..47 each as a 4-byte address). Use `cmd/dispatch` to resolve
+any slot quickly — see below.
+
+There is NO marker or boundary inside the table — earlier notes about a
+`dc.w 0x0E00` marker at offset 0x200 were wrong (that byte sequence was
+the low half of the JMP-target at slot 0x1FC = `jmp $030E00`).
+
+Total entries ≈ 200+; only a small fraction has been mapped to semantics.
+
+### Confirmed dispatch entries (used by mapped code paths)
+
+| Slot      | Target      | Mapped via | Function |
+|-----------|-------------|------------|----------|
+| `0x00C0`  | `0x001B34`  | (PC-rel)   | Reset vector — also reachable via the table |
+| `0x00CA`  | `0x05ECB6`  | rev-l-memo | Indirect handler pointer (RAM-resident var also points here) |
+| `0x00D0`  | `0x00ABDE`  | fcn.1B40   | SCI write: `mode=0x0002, data=0x0180` (display init helper) |
+| `0x00D6`  | `0x00C470`  | fcn.5E?    | Used by analog-bus init |
+| `0x0124`  | `0x00ABD0`  | fcn.1B40   | SCI write: `mode=0x0002, data=0x8100` |
+| `0x012A`  | `0x05FAAE`  | n/a        | Cal subsystem helper |
+| `0x0148`  | `0x018568`  | **gate C** | **Key consumer entry** — final destination when fcn.1B40 dispatches with bf03==0 AND bf0a==0 |
+| `0x014E`  | `0x032522`  | fcn.3AD0   | Sweep handler — called from operating loop |
+| `0x015A`  | `0x05ECA2`  | rev-l-memo | Indirect handler (RAM 0xCA dispatches here)|
+| `0x02FE`  | `0x02FFF4`  | rev-l-memo | RAM[0x2FE] indirect handler |
+| `0x0304`  | `0x05F11A`  | rev-l-memo | RAM[0x304] indirect handler |
+| `0x043C`  | `0x009A52`  | rev-l-memo | Sweep-done first-stage processor (called immediately after `bclr #D, $befa.w`) |
+| `0x04A2`  | `0x0192C8`  | **gate C** | **Operating-loop handler** — what bf0a perpetually points to; its body ends `bra 0x18568` (key consumer) |
+| `0x05A4`  | `0x0309C0`  | rev-l-memo | Indirect handler pointer |
+| `0x0640`  | `0x030020`  | rev-l-memo | Indirect handler pointer |
+| `0x0C4C`  | `0x05ECDC`  | **dormant**| **Cal-init entry** — no external callers; only via user CAL command |
+
+To look up any slot quickly use `cmd/dispatch` — it reads the JMP at the
+slot, prints the target, and disassembles the first three instructions
+there:
+```bash
+go run ./cmd/dispatch/ 148       # single slot
+go run ./cmd/dispatch/ C4 200    # range scan
+```
+
+### Why this table matters
+
+The dispatch table IS the firmware's high-level control flow. When tracing
+a runtime decision (e.g. "what does the IRQ4 handler do next?") the answer
+is almost always "jsr $XXX.w" through this table. Mapping any slot you see
+in disassembly to its target tells you which subsystem you've entered,
+without chasing PC arithmetic.
+
+---
+
 ## Memory-decode PAL (`U114`, source: `hp8593a_eeproms/PAL_8590-80159.zip`)
 
 The PAL produces chip-selects from the M68K address bus:
