@@ -224,6 +224,20 @@ func (m *HP8593AMMIO) Read(addr uint32, sz bus.Size) uint32 {
 		if addr == indirectDataOffset {
 			return uint32(m.abus.readData())
 		}
+		// A16 system-ID hardware-strap registers — fcn.2E74 reads these at
+		// boot to populate RAM[0xFFBF26+] which fcn.1A3E0 then turns into
+		// IDNUM (model number). See systemid.go for the full chain and the
+		// NEEDS-FURTHER-INVESTIGATION notes on option bits beyond the model.
+		switch addr {
+		case 0x73C:
+			return uint32(SystemIDWord73C)
+		case 0x73E:
+			return uint32(SystemIDWord73E)
+		case 0x77C:
+			return uint32(SystemIDWord77C)
+		case 0x77E:
+			return uint32(SystemIDWord77E)
+		}
 	}
 
 	return v
