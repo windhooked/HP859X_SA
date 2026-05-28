@@ -248,6 +248,53 @@ b07a, b07c, b0ce) that route execution AWAY from the bclrs under
 steady-state RAM. `Machine.DriveOperatingTick` remains the canonical
 primitive for forcing the operating tick to execute its deep path.
 
+#### LAYER 2 empirical measurements (`cmd/layer2`)
+
+Probe: wrap RAM with a write-tracer, boot, then run 100 chunks
+(5M cycles) of operating loop with IRQ5/IRQ6/IRQ4 injection. Report
+which firmware PCs touch each LAYER 2 gating address and how often.
+
+**Naturally inert during operating loop (zero writes in 5M cycles):**
+
+| Address | Symbol | Post-boot value | Implication |
+|---------|--------|----------------|-------------|
+| `0xFFB010` | sweep status snap | `0x0000` | Only written by `move.w $f300, $b010` inside the operating tick body, which doesn't run. |
+| `0xFFB072` | upstream gate | `0xC0A0` | Bits 2+5 (`0x24` mask for slot 0x5C8) stay at init. |
+| `0xFFB0AB` | fcn.A250 enable | `0x0000` | Never set → fcn.A250 always early-exits → `b0ce.11` never gets set naturally. |
+| `0xFFB0CE` | state (bit 11 deep) | `0x8000` | Bit 11 stays clear because fcn.A250 never runs. |
+| `0xFFB1F9` | service-request bits | `0x5600` | Bit 3 stays clear (needed by slot 0x5C8 fcn.40720). |
+
+**Written during operating loop (the firmware IS doing work):**
+
+| Address | Touch sites | Notes |
+|---------|------------|-------|
+| `0xFFB1E0` | PC `0x09A4E` (val 0x18), PC `0x1D318` (val 0x1820) | Bit 9 (0x0200) NEVER set; firmware writes 0x1820 = bits 5+11+12. |
+| `0xFFB1F8` | PC `0x0BFA6`, `0x1D2E8`, `0x1E992`, `0x179F8` | Values 0x56 and 0x1D6 — bits 11+12 set on some paths (0x1D6 has bit 8+7+6+4+2+1+0). |
+| `0xFFBEFA` | PC `0x40C8` (IRQ6 handler) ×25, PC `0x9AAE`, PC `0x17346` | IRQ6 keeps writing 0x24 (bit 2+5). Bit 13 (sweep-done) gets set by IRQ6 path 0x4088 then cleared by the sweep-done processor. |
+| `0xFFBEFD` | PC `0x1D60`, `0x1D74`, `0x1F16` ×12 each | All in fcn.1D58 body — dispatcher IS running 12× per 100 chunks. |
+
+#### Empirical conclusion
+
+The dispatcher (`fcn.1D58`) runs naturally — it's invoked 12 times per
+100 chunks via IRQ4. But the operating tick body (where `b0ab`, `b072`
+bits 2+5, `b0ce.11`, `b1f9.3` would be set) never executes. So those
+gating bits stay at their boot values forever.
+
+The cascade is concrete: each gate bit's production depends on the
+operating tick running its work loops, which requires earlier gates to
+be set, which requires the tick to run... a chicken-and-egg
+dependency that only resolves if some external stimulus (a key press
+modelled end-to-end, an HP-IB command processed naturally, a sweep
+completing through the firmware's expected mode handlers) causes one
+of the gating bits to flip via a path the firmware DOES execute.
+
+**This is the empirical evidence that LAYER 2 is multi-week**:
+modelling enough of the firmware's state machine that ANY one path
+produces a gating-bit set without the workaround. The TMS9914A model
+landed in `ad73a99` is the first step — the next steps are modelling
+the front-panel μC's command/response semantics and the sweep cycle's
+state-transition expectations.
+
 #### LAYER 2 investigation summary
 
 Each state-flag gate has its own production site, and the chain is
