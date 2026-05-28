@@ -194,12 +194,20 @@ func (m *HP8593AMMIO) Read(addr uint32, sz bus.Size) uint32 {
 		}
 		// Indirect analog-bus data port: see indirectDataOffset comment.
 		// One match per indirectMatchEveryNReads reads; clear on consume.
+		// Returns 0x0006 to satisfy both observed firmware polls:
+		//   - PC 0x5E5FA operating loop: `(0x12 & low_byte) == 0x02`
+		//     ⇒ 0x12 & 0x06 = 0x02 ✓
+		//   - PC 0x5E708 init/cal stage: `low_byte == 0x06`
+		//     ⇒ 0x06 == 0x06 ✓
+		// Both polls also break out on timer expiration, so returning a
+		// matching value periodically just speeds the firmware up; it
+		// shouldn't push it into an unmodelled state.
 		if addr == indirectDataOffset {
 			m.indirectReadCount++
 			arm := m.indirectReadCount%indirectMatchEveryNReads == 0
 			if arm || m.indirectMatchPending {
 				m.indirectMatchPending = false
-				return 0x0002
+				return 0x0006
 			}
 			return 0
 		}

@@ -1,36 +1,117 @@
-// Command keystate boots the HP 8593A to its operating loop and samples
-// the Rev L key-dispatch state machine — RAM[0xFFBF03] (event flag),
-// RAM[0xFFBF0A] (pending-function pointer), RAM[0xFFBC67] (IRQ3-set
-// key-available flag), and a few related state bytes. Goal: determine
-// whether the firmware ever reaches a state in which fcn.1B40 can
-// dispatch to the key consumer at 0x148 → 0x18568 (which requires bf03==0
-// AND bf0a==0 at the test point).
+// Command keystate boots the HP 8593A to its operating loop and traces
+// every write to the Rev L key-dispatch state machine — RAM[0xFFBF03]
+// (event flag), RAM[0xFFBF0A] (pending-function pointer), RAM[0xFFBC67]
+// (IRQ3-set key-available flag). Goal: identify the outer event tick that
+// invokes fcn.1B40 (the dispatch router that bridges to the key consumer
+// at 0x148 -> 0x18568), and detect whether the firmware ever calls it
+// during the operating loop.
+//
+// Strategy: wrap the main RAM with a tracing device that records every
+// write within the watched address range and stamps it with the current
+// PC. After boot, the operating loop is run while injecting IRQ5 ticks;
+// optionally an IRQ3 key event is injected partway through. The recorded
+// writes are dumped at the end, grouped by (addr, PC, value) so duplicate
+// writes from a hot loop collapse to one line.
 //
 // Usage:
 //
-//	go run ./cmd/keystate/ [cycles]   # default 30_000_000
-//
-// The boot uses the canonical Machine.BootToOperating; after boot the
-// machine is single-stepped while sampling the RAM bytes once per chunk,
-// printing a transition log.
+//	go run ./cmd/keystate/ [post_boot_cycles]   # default 30_000_000
 package main
 
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 
+	"github.com/windhooked/HP859X_SA/internal/emutest"
 	"github.com/windhooked/HP859X_SA/pkg/emu/bus"
 	"github.com/windhooked/HP859X_SA/pkg/emu/cpu"
-	"github.com/windhooked/HP859X_SA/pkg/emu/machine"
+	musashi "github.com/windhooked/HP859X_SA/pkg/emu/cpu/musashi"
+	"github.com/windhooked/HP859X_SA/pkg/emu/device"
 	"github.com/windhooked/HP859X_SA/pkg/emu/romloader"
 )
 
+// watchedAddrs lists the absolute RAM addresses we trace. Each is one byte
+// or longword inside the main RAM region (0xFF0000..0xFFEFFF).
+var watchedAddrs = []uint32{
+	0xFFBF03, // event flag (set 0x81 at PC 0x731E; cleared at 0x1BA4)
+	0xFFBF0A, // pending-function pointer (cleared at 0x1BA8)
+	0xFFBC67, // key-available flag bit 0 (set by IRQ3 at 0x002B26)
+}
+
+// watchedRange covers the watched addresses with a few bytes of slack —
+// the address range checked in the hot Write() path. Keep the range tight
+// to avoid logging noise.
+const (
+	watchLo = 0xFFBC67
+	watchHi = 0xFFBF0F
+)
+
+// traceEvent records one observed write. Aggregated by key (addr, pc, val).
+type traceEvent struct {
+	addr uint32
+	pc   uint32
+	val  uint32
+	sz   bus.Size
+}
+
+// ramTracer wraps a bus.RAM and records every write that falls in the
+// watched range. The trace channel is unbuffered until the run finishes;
+// to keep the hot-path overhead minimal we batch into a slice protected by
+// a single fast path test.
+type ramTracer struct {
+	inner    *bus.RAM
+	base     uint32
+	pcFn     func() uint32
+	events   []traceEvent
+	seen     map[traceEvent]int // dedupe counter
+	enabled  bool
+}
+
+func newRAMTracer(inner *bus.RAM, base uint32) *ramTracer {
+	return &ramTracer{
+		inner: inner,
+		base:  base,
+		seen:  make(map[traceEvent]int),
+	}
+}
+
+func (r *ramTracer) setPCFunc(fn func() uint32) { r.pcFn = fn }
+
+func (r *ramTracer) Read(addr uint32, sz bus.Size) uint32 {
+	return r.inner.Read(addr, sz)
+}
+
+func (r *ramTracer) Write(addr uint32, sz bus.Size, val uint32) {
+	r.inner.Write(addr, sz, val)
+	abs := r.base + addr
+	if !r.enabled || abs < watchLo || abs > watchHi {
+		return
+	}
+	// Mask val to the access size so a long write of 0x000192C8 is recorded
+	// as that exact value, not extended.
+	switch sz {
+	case bus.Byte:
+		val &= 0xFF
+	case bus.Word:
+		val &= 0xFFFF
+	}
+	ev := traceEvent{addr: abs, val: val, sz: sz}
+	if r.pcFn != nil {
+		ev.pc = r.pcFn()
+	}
+	r.seen[ev]++
+	if r.seen[ev] == 1 {
+		r.events = append(r.events, ev)
+	}
+}
+
 func main() {
-	cycles := 30_000_000
+	postCycles := 30_000_000
 	if len(os.Args) > 1 {
 		if n, err := strconv.Atoi(os.Args[1]); err == nil && n > 0 {
-			cycles = n
+			postCycles = n
 		}
 	}
 
@@ -39,63 +120,138 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	m, err := machine.New8593A(rom)
+
+	// Build the bus manually so we can swap in the tracing RAM in place of
+	// the standard RAM region. Everything else mirrors machine.New8593A.
+	b := &bus.Bus{}
+	b.OnFault = func(addr uint32, sz bus.Size, write bool) uint32 { return 0 }
+
+	calNVRAM := device.NewCalNVRAM()
+	calNVRAM.Synthesize()
+	mmio := device.NewHP8593AMMIO()
+
+	b.Map(0x000000, uint32(len(rom)), "ROM", bus.NewROM(rom))
+	b.Map(device.CalNVRAMBase, device.CalNVRAMSize, "CalNVRAM", calNVRAM)
+	b.Map(0x2FC000, 0x004000, "CalRAM", bus.NewRAM(0x004000))
+	b.Map(0xEF8000, 0x000100, "PIT", bus.NewRAM(0x000100))
+	b.Map(device.FrontPanelBase, device.FrontPanelSize, "FrontPanel", device.NewFrontPanel())
+	b.Map(0xFEC000, 0x004000, "TestRAM", bus.NewRAM(0x004000))
+
+	const ramBase = uint32(0xFF0000)
+	const ramSize = uint32(0x00F000)
+	tracer := newRAMTracer(bus.NewRAM(ramSize), ramBase)
+	b.Map(ramBase, ramSize, "RAM", tracer)
+	b.Map(device.MMIOBase, device.MMIOSize, "MMIO", mmio)
+
+	c, err := musashi.New(b)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	m.CPU.Reset()
-	m.BootToOperating(cycles)
+	tracer.setPCFunc(func() uint32 { return c.Reg(cpu.PC) })
 
-	read := func(addr uint32, sz bus.Size) uint32 { return m.Bus.Read(addr, sz) }
+	c.Reset()
 
-	// Sample once after boot, then drive a few sample windows.
-	dump := func(label string) {
-		bf03 := read(0xFFBF03, bus.Byte)
-		bf0a := read(0xFFBF0A, bus.Long)
-		bc67 := read(0xFFBC67, bus.Byte)
-		befb := read(0xFFBEFB, bus.Byte)
-		bf12 := read(0xFFBF12, bus.Long)
-		bf16 := read(0xFFBF16, bus.Long)
-		fmt.Printf("%-14s PC=%06X  bf03=%02X  bf0a=%08X  bc67=%02X  befb=%02X  bf12=%08X  bf16=%08X\n",
-			label, m.CPU.Reg(cpu.PC), bf03, bf0a, bc67, befb, bf12, bf16)
+	// Boot using the same parameters as machine.BootToOperating, but inline
+	// so we can keep the tracer attached and switch its enable flag on
+	// AFTER boot — boot writes are noisy and not what we're investigating.
+	const (
+		bootChunkCycles    = 2000
+		bootBreakThresh    = 50
+		bootIRQPeriod      = 5
+		bootIRQServiceCost = 400
+	)
+	lb := emutest.NewLoopBreaker(bootBreakThresh)
+	for done := 0; done < 30_000_000; done += bootChunkCycles {
+		c.Run(bootChunkCycles)
+		lb.Check(c.Reg(cpu.PC), c.SetReg)
+		if (done/bootChunkCycles)%bootIRQPeriod == 0 {
+			c.SetIRQ(5)
+			c.Run(bootIRQServiceCost)
+			c.SetIRQ(0)
+		}
 	}
 
-	fmt.Println("After BootToOperating:")
-	dump("post-boot")
+	fmt.Printf("Post boot: PC=%06X  bf03=%02X  bf0a=%08X  bc67=%02X\n",
+		c.Reg(cpu.PC),
+		b.Read(0xFFBF03, bus.Byte),
+		b.Read(0xFFBF0A, bus.Long),
+		b.Read(0xFFBC67, bus.Byte))
 
-	// Step the machine forward, injecting IRQ5 between chunks. The Rev L
-	// IRQ5 handler (ROM 0x3ECE) increments bf12 — the timer counter the
-	// operating loop's busy-poll at PC 0x7C7E/0x4824 is waiting on. Without
-	// these ticks bf12 stays at its boot value and the poll never returns.
+	// Enable tracing and run the operating loop with periodic IRQ5 + IRQ6.
+	// IRQ6 is the sweep-complete handler at ROM 0x4088 — without it the
+	// firmware never advances past the sweep service path.
+	tracer.enabled = true
+
 	const chunkCycles = 50_000
-	for i := 0; i < 80; i++ {
-		m.CPU.Run(chunkCycles)
-		m.CPU.SetIRQ(5)
-		m.CPU.Run(400)
-		m.CPU.SetIRQ(0)
+	loops := postCycles / chunkCycles
+	if loops < 1 {
+		loops = 1
+	}
+	injectIRQ3At := loops / 2
+
+	for i := 0; i < loops; i++ {
+		c.Run(chunkCycles)
+		c.SetIRQ(5)
+		c.Run(bootIRQServiceCost)
+		c.SetIRQ(0)
+		// Every 4th chunk also try IRQ6 (sweep complete).
 		if i%4 == 0 {
-			dump(fmt.Sprintf("t+%2dx50k", i+1))
+			c.SetIRQ(6)
+			c.Run(bootIRQServiceCost)
+			c.SetIRQ(0)
+		}
+		// Halfway through: inject a key press.
+		if i == injectIRQ3At {
+			var matrix [6]byte
+			matrix[0] = 0x01
+			// FrontPanel is at fixed addr; access it via the machine.Bus
+			// is tedious, so reach into the device list.
+			for _, m := range []bus.Device{} {
+				_ = m
+			}
+			// Use direct device methods via a separate handle — simpler
+			// to call SetIRQ(3) and let the IRQ3 handler latch bc67.
+			c.SetIRQ(3)
+			c.Run(bootIRQServiceCost)
+			c.SetIRQ(0)
+			fmt.Printf("\n>>> IRQ3 injected at i=%d (cycle ~%dM) <<<\n\n",
+				i, (i*chunkCycles)/1_000_000)
 		}
 	}
 
-	// Now inject a key (any matrix bit) and watch.
-	fmt.Println("\nInjecting IRQ3 + key matrix (bit set at row0/col0):")
-	var matrix [6]byte
-	matrix[0] = 0x01
-	m.FrontPanel.InjectMatrix(matrix)
-	m.CPU.SetIRQ(3)
-	m.CPU.Run(400)
-	m.CPU.SetIRQ(0)
-	dump("post-IRQ3")
+	fmt.Printf("\nFinal: PC=%06X  bf03=%02X  bf0a=%08X  bc67=%02X\n",
+		c.Reg(cpu.PC),
+		b.Read(0xFFBF03, bus.Byte),
+		b.Read(0xFFBF0A, bus.Long),
+		b.Read(0xFFBC67, bus.Byte))
 
-	for i := 0; i < 80; i++ {
-		m.CPU.Run(chunkCycles)
-		m.CPU.SetIRQ(5)
-		m.CPU.Run(400)
-		m.CPU.SetIRQ(0)
-		if i%4 == 0 {
-			dump(fmt.Sprintf("k+%2dx50k", i+1))
+	// Dump captured writes. Sort by addr, then PC.
+	sort.Slice(tracer.events, func(i, j int) bool {
+		a, b := tracer.events[i], tracer.events[j]
+		if a.addr != b.addr {
+			return a.addr < b.addr
 		}
+		return a.pc < b.pc
+	})
+
+	fmt.Printf("\n=== Watched-RAM write events (%d distinct, %d total writes seen) ===\n",
+		len(tracer.events), sumCounts(tracer.seen))
+	if len(tracer.events) == 0 {
+		fmt.Println("(no writes recorded in the watched range during operating loop)")
+		return
 	}
+	for _, e := range tracer.events {
+		cnt := tracer.seen[e]
+		fmt.Printf("  addr=%06X  size=%d  val=%-8X  at PC=%06X   ×%d\n",
+			e.addr, int(e.sz), e.val, e.pc, cnt)
+	}
+}
+
+func sumCounts(m map[traceEvent]int) int {
+	s := 0
+	for _, v := range m {
+		s += v
+	}
+	return s
 }
