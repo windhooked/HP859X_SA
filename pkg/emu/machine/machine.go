@@ -394,3 +394,38 @@ func (m *Machine) PressKeyMatrix(matrix [6]byte, maxCycles int) bool {
 	}
 	return m.FrontPanel.Consumed()
 }
+
+// PressKey injects a single matrix-bit press AND sets the two RAM gate
+// bits the operating tick checks before dispatching the key:
+//
+//	0xFFBC67 bit 0  ← IRQ3 sets this naturally ("key flag")
+//	0xFFBC67 bit 1  ← gate at PC 0x18F5E (`btst.b 0x1, 0xbc67.w`)
+//	0xFFB072 bit 14 ← gate at PC 0x18F66 (`btst.b 0xe, 0xb072.w`)
+//
+// The two gate bits are NEVER set anywhere in the Rev L firmware (zero
+// `bset` references). In real hardware they must be set by the front-
+// panel μC writing to RAM as a bus master after debouncing/validating
+// a key — our μC model is a passive MMIO target, so we model the
+// effect here.
+//
+// Empirically (cmd/keymatrix3), with both gate bits forced + any
+// matrix bit + IRQ3, the operating tick enters the matrix-dispatch
+// path at 0x18F66 and touches 2 of the 15 fcn.520-clear cells
+// (0xFFB20E + 0xFFBF01). Per-key differentiation isn't yet observed —
+// more downstream state is gated. PressKey is the canonical
+// experiment harness for finding that state.
+func (m *Machine) PressKey(byteIdx, bit int) {
+	m.FrontPanel.SetBit(byteIdx, bit)
+
+	// μC RAM-master side effects: set the gate bits the operating tick
+	// downstream tests.
+	v67 := byte(m.Bus.Read(0xFFBC67, bus.Byte)) | 0x02
+	m.Bus.Write(0xFFBC67, bus.Byte, uint32(v67))
+	v72 := uint32(m.Bus.Read(0xFFB072, bus.Word)) | 0x4000
+	m.Bus.Write(0xFFB072, bus.Word, v72)
+
+	// Fire IRQ3 so the handler sets bc67.0.
+	m.CPU.SetIRQ(3)
+	m.CPU.Run(bootIRQServiceCost)
+	m.CPU.SetIRQ(0)
+}
