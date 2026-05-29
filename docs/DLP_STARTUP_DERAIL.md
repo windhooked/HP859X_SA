@@ -90,24 +90,49 @@ reaching for one, and (after the address-misread correction above) the DLP
 source/tables are ROM-resident factory data, so NVRAM/CARD storage is not
 involved either. It is an internal **DLP-VM instruction-index** bug.
 
+## Where `idx` comes from — DLP name resolution (hash lookup)
+
+`idx` is **not** a sequential program counter — it is the **return value of a
+hash-table name lookup**. The menu/window executor (function around `0x35540`,
+caller of `execInstr` at `0x35802`) computes:
+
+```
+035566  pea     $a7da.w          ; key: source-text cursor ($a7da = 0x5f5f = "__")
+03556A  move.l  $a68.w, -(A7)    ; $a68 = ROM 0x8001E (name-string table)
+03556E  move.l  $a02.w, -(A7)    ; $a02 = ROM 0x727CA (hash-bucket table, 32 buckets)
+035572  move.w  A4, D0           ; A4 = $a896 (item count)
+035574  bsr     fcn.320fe        ; D0 = idx = lookup(name)
+035578  move.l  D0, (-$c,A6)     ; idx
+03557C  ble     $35f04           ; idx<=0 → "not found"; idx>0 → "found"
+```
+
+`fcn.320fe` hashes the name (sum of words, `& 0x1f` → 32 buckets, `*4`), indexes
+the bucket table at `$a02=0x727CA`, and walks the `$a68=0x8001E` string table.
+At the derail it returns **`idx=0x6787`** (treated as "found", since >0) for a
+`__`-prefixed DLP variable name. `recPtr = $a50 + word[$a02 + (idx-1)*2]` with
+`idx=0x6787` reads the offset word at `0x7F6D6` (inside the parser-table region
+`0x7C800–0x80000`) — clearly past the intended bucket table — giving a bogus
+offset → `recPtr` in filler → invalid token `0x2FF` → derail.
+
+So the derail is in **DLP `__`-variable name resolution**: the hash lookup
+returns a positive-but-wrong index. The `0x12F` opcode (identifier
+resolve/define, handler `0x3A13A`, uses `$bb54`) spins ~23× before `idx` moves,
+consistent with repeatedly resolving/defining the same name.
+
 ## Open questions / next steps
 
-1. **Why does `idx` advance out of range?** `recPtr = $a50 + word[$a02 +
-   (idx-1)*2]`; a valid `idx` gives offset `0x3EB` (`recPtr=0x71A6D`, token
-   `0x12F`), but `idx` then advances to a value whose offset (`0x681`) points
-   into filler past the records. Trace how `idx` (the `D0` arg to `fcn.331cc`)
-   is produced/advanced — it is the DLP VM's program counter into the factory
-   DLP's offset table at `$a02=0x727CA`. Either the table's valid length is
-   being exceeded (missing end-of-program terminator handling) or `idx` is
-   mis-incremented after the `0x12F` (resolve/define) opcode's ~23-iteration
-   spin.
-2. **Is the factory DLP at `$a50=0x71682` / table `$a02=0x727CA` the one that
-   *should* be running here?** Confirm the VM selected the right program (the
-   char-ring base `$a62c` also = `0x727CA`). If the wrong program/region was
-   selected, the index walks off a shorter-than-expected table.
-3. **What is the `0x12F` spin waiting on?** It re-dispatches ~23× before `idx`
-   moves; identify the condition (`fcn.36166`/`0x3A28A` symbol lookup against
-   `$bb54`) that finally lets it advance, and whether that advance is correct.
+1. **Is `idx=0x6787` a genuine match or a hash-lookup miss returning garbage?**
+   RE `fcn.320fe`'s no-match path: does it return the item count / a sentinel
+   that the caller wrongly treats as "found" (`idx>0`)? Capture `$a896` (count)
+   and the name at `$a7da` at the derail and compare.
+2. **Is the `$a02=0x727CA` hash table the right one for this name?** It's a ROM
+   static table; confirm the `__`-name being resolved is actually present in it
+   (hash the name by hand and check the bucket), vs the name being a *runtime*
+   `__WN_*` variable that should resolve via the RAM symbol table `$bb54`
+   instead (wrong table selected).
+3. **Does the resolution depend on RAM state** (`$bb54`, `$a896`, `$a7da`) that
+   our boot hasn't set up correctly — i.e. the startup DLP defines `__WN_*`
+   vars before referencing them, and our execution order/state diverges?
 
 ## Key addresses
 

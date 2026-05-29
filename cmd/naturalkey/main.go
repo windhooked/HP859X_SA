@@ -156,8 +156,9 @@ func runDerailScan(m *machine.Machine, maxCycles int) {
 	}
 	// Phase 2: single-step to catch the exact derailing instruction.
 	fmt.Printf("phase 2: single-stepping from ~%d cycles (PC=%#06x)\n", phase1, m.CPU.Reg(cpu.PC))
-	type disp struct{ recPtr, token, handler uint32 }
+	type disp struct{ idx, recPtr, token, handler uint32 }
 	var dtrail []disp
+	lastIdx := uint32(0)
 	prev := m.CPU.Reg(cpu.PC)
 	for i := 0; i < 4_000_000; i++ {
 		if err := m.CPU.Step(); err != nil {
@@ -165,24 +166,30 @@ func runDerailScan(m *machine.Machine, maxCycles int) {
 			return
 		}
 		pc := m.CPU.Reg(cpu.PC)
+		if pc == 0x331CC { // fcn.331cc entry: D0 = idx (DLP program counter)
+			lastIdx = m.CPU.Reg(cpu.D0)
+		}
 		if pc == 0x34C94 { // jsr (A1): record the DLP token dispatch
 			a6 := m.CPU.Reg(cpu.A6)
 			recPtr := m.Bus.Read(a6-0x1e, bus.Long)
-			dtrail = append(dtrail, disp{recPtr, m.Bus.Read(recPtr, bus.Word), m.CPU.Reg(cpu.A1)})
+			dtrail = append(dtrail, disp{lastIdx, recPtr, m.Bus.Read(recPtr, bus.Word), m.CPU.Reg(cpu.A1)})
 			if len(dtrail) > 24 {
 				dtrail = dtrail[1:]
 			}
 		}
 		if !sanePC(pc) {
 			fmt.Printf("\nDERAIL: %#06x -> %#08x\n", prev, pc)
-			fmt.Printf("DLP dispatch trail (recPtr, token, handler) — last %d:\n", len(dtrail))
+			fmt.Printf("DLP dispatch trail (idx, recPtr, token, handler) — last %d:\n", len(dtrail))
 			for _, d := range dtrail {
-				fmt.Printf("  recPtr=%#07x token=%#05x handler=%#08x\n", d.recPtr, d.token, d.handler)
+				fmt.Printf("  idx=%#x recPtr=%#07x token=%#05x handler=%#08x\n", d.idx, d.recPtr, d.token, d.handler)
 			}
+			a6 := m.CPU.Reg(cpu.A6)
 			fmt.Printf("regs: D0=%#x D1=%#x D6=%#x A0=%#x A1=%#x A4=%#x A6=%#x A7=%#x\n",
 				m.CPU.Reg(cpu.D0), m.CPU.Reg(cpu.D1), m.CPU.Reg(cpu.D6),
 				m.CPU.Reg(cpu.A0), m.CPU.Reg(cpu.A1), m.CPU.Reg(cpu.A4),
-				m.CPU.Reg(cpu.A6), m.CPU.Reg(cpu.A7))
+				a6, m.CPU.Reg(cpu.A7))
+			fmt.Printf("execInstr caller return (mem[A6+4]) = %#x; saved A6 (mem[A6]) = %#x\n",
+				m.Bus.Read(a6+4, bus.Long), m.Bus.Read(a6, bus.Long))
 			fmt.Println("DLP runtime state:")
 			fmt.Printf("  $bb54 (symbol table base) = %#x\n", m.Bus.Read(0xFFBB54, bus.Long))
 			fmt.Printf("  fg ring $a630=%#x $a632=%#x $a634=%#x\n",
