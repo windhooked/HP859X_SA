@@ -1,31 +1,45 @@
 package bus
 
-// beRead reads a big-endian value of width sz from b at offset addr.
+// beRead reads a big-endian value of width sz from b at offset addr. Bytes
+// past the end of b read as 0 — a multi-byte access that straddles the end of
+// a device region (e.g. a word read at the device's last byte) is treated the
+// same as an unmapped read for the overflow bytes, rather than panicking.
 func beRead(b []byte, addr uint32, sz Size) uint32 {
+	rd := func(i uint32) uint32 {
+		if i < uint32(len(b)) {
+			return uint32(b[i])
+		}
+		return 0
+	}
 	switch sz {
 	case Byte:
-		return uint32(b[addr])
+		return rd(addr)
 	case Word:
-		return uint32(b[addr])<<8 | uint32(b[addr+1])
+		return rd(addr)<<8 | rd(addr+1)
 	default:
-		return uint32(b[addr])<<24 | uint32(b[addr+1])<<16 |
-			uint32(b[addr+2])<<8 | uint32(b[addr+3])
+		return rd(addr)<<24 | rd(addr+1)<<16 | rd(addr+2)<<8 | rd(addr+3)
 	}
 }
 
 // beWrite stores val as a big-endian value of width sz into b at offset addr.
+// Bytes past the end of b are dropped (see beRead for the rationale).
 func beWrite(b []byte, addr uint32, sz Size, val uint32) {
+	wr := func(i uint32, v byte) {
+		if i < uint32(len(b)) {
+			b[i] = v
+		}
+	}
 	switch sz {
 	case Byte:
-		b[addr] = byte(val)
+		wr(addr, byte(val))
 	case Word:
-		b[addr] = byte(val >> 8)
-		b[addr+1] = byte(val)
+		wr(addr, byte(val>>8))
+		wr(addr+1, byte(val))
 	default:
-		b[addr] = byte(val >> 24)
-		b[addr+1] = byte(val >> 16)
-		b[addr+2] = byte(val >> 8)
-		b[addr+3] = byte(val)
+		wr(addr, byte(val>>24))
+		wr(addr+1, byte(val>>16))
+		wr(addr+2, byte(val>>8))
+		wr(addr+3, byte(val))
 	}
 }
 
@@ -38,7 +52,7 @@ func NewRAM(size uint32) *RAM { return &RAM{b: make([]byte, size)} }
 // Bytes exposes the backing store (e.g. for loading NVRAM contents or tests).
 func (r *RAM) Bytes() []byte { return r.b }
 
-func (r *RAM) Read(addr uint32, sz Size) uint32      { return beRead(r.b, addr, sz) }
+func (r *RAM) Read(addr uint32, sz Size) uint32       { return beRead(r.b, addr, sz) }
 func (r *RAM) Write(addr uint32, sz Size, val uint32) { beWrite(r.b, addr, sz, val) }
 
 // ROM is a read-only byte-backed region. Writes are dropped, but reported via
