@@ -57,6 +57,31 @@ skipping it.
 - The char-source ring (`$a62c=0x727CA`) is valid; only the `$a02`-based record
   pointer is garbage.
 
+## Storage-subsystem hypothesis — tested, NOT the cause
+
+The 8590 has a real mass-storage abstraction — **`MSI`** ("Mass Storage Is")
+toggling **`INT`** (battery SRAM) vs **`CARD`** (removable SRAM/PCMCIA memory
+card via the 08590-60396 reader board): ROM has `MSI CARD|INT`, `HAVE(CARD)`,
+`CAT *,CARD`, `NO CARD`, `SAVRCL … STATE/DLP`. We model none of it (only cal
+NVRAM). Natural hypothesis: a phantom card / unmapped storage probe makes the
+firmware queue a bogus DLP to run.
+
+**Tested with `cmd/naturalkey -faults`** (wraps `Bus.OnFault`, histograms
+unmapped accesses during boot). Result: the boot does **NOT** heavily probe any
+unmapped storage region — accesses are sparse and explained:
+- `0x320000` (32 reads, firstPC `0x4ab4`) + `0x310000` (9 writes, `0x491c`) —
+  from the **boot RAM-test/sizing** phase, not a card catalog.
+- `0xF00000`/`0xF80000`/`0xFB0000` (≤6 accesses each, firstPC `0x33xx`/`0x34xx`)
+  — from the DLP **partition allocator**; sparse, likely garbage-pointer
+  artifacts of the bad `$a02` state (extending RAM/DLPRAM down to `0xF00000`
+  left the derail byte-identical).
+
+**Conclusion:** the derail is **not** a missing storage device — the boot
+isn't reaching for one. `$a02 = -1` is an internal DLP control-flow bug:
+the firmware executes a DLP record despite the directory being empty. (Caveat:
+a card-present check via a *mapped* status register wouldn't show as a fault;
+but there is no evidence of a storage-region probe driving the derail.)
+
 ## Open questions / next steps
 
 1. **Where is `$a02` set to `-1`?** No *absolute* write to `0xFFA02` appears in

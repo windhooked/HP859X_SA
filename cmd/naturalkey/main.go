@@ -208,12 +208,72 @@ func runDerailScan(m *machine.Machine, maxCycles int) {
 	fmt.Printf("no derail; final PC=%#06x\n", m.CPU.Reg(cpu.PC))
 }
 
+// runFaultScan wraps the bus OnFault handler to histogram unmapped accesses
+// (by 64 KB region) during a chunked boot, revealing storage/card-probe
+// regions the firmware reads that we don't map.
+func runFaultScan(m *machine.Machine, maxCycles int) {
+	type fc struct {
+		reads, writes int
+		pc            uint32 // sample PC of first access to this region
+	}
+	hist := map[uint32]*fc{}
+	prevFault := m.Bus.OnFault
+	m.Bus.OnFault = func(addr uint32, sz bus.Size, write bool) uint32 {
+		reg := addr &^ 0xFFFF // 64 KB buckets
+		e := hist[reg]
+		if e == nil {
+			e = &fc{pc: m.CPU.Reg(cpu.PC)}
+			hist[reg] = e
+		}
+		if write {
+			e.writes++
+		} else {
+			e.reads++
+		}
+		if prevFault != nil {
+			return prevFault(addr, sz, write)
+		}
+		return 0
+	}
+
+	m.CPU.Reset()
+	lb := emutest.NewLoopBreaker(50)
+	for done := 0; done < maxCycles; done += chunkCycles {
+		m.CPU.Run(chunkCycles)
+		lb.Check(m.CPU.Reg(cpu.PC), m.CPU.SetReg)
+		if (done/chunkCycles)%irq5EveryNChunks == 0 {
+			m.CPU.SetIRQ(5)
+			m.CPU.Run(irqServiceCost)
+			m.CPU.SetIRQ(0)
+		}
+	}
+
+	type kv struct {
+		reg uint32
+		e   *fc
+	}
+	var sorted []kv
+	for r, e := range hist {
+		sorted = append(sorted, kv{r, e})
+	}
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].e.reads+sorted[i].e.writes > sorted[j].e.reads+sorted[j].e.writes
+	})
+	fmt.Printf("=== unmapped (OnFault) access regions during %dM-cycle boot (top 25) ===\n", maxCycles/1_000_000)
+	fmt.Printf("final PC = %#06x\n", m.CPU.Reg(cpu.PC))
+	for i := 0; i < len(sorted) && i < 25; i++ {
+		fmt.Printf("  %#08x..%#08x  reads=%-8d writes=%-8d  firstPC=%#06x\n",
+			sorted[i].reg, sorted[i].reg+0xFFFF, sorted[i].e.reads, sorted[i].e.writes, sorted[i].e.pc)
+	}
+}
+
 func main() {
 	bootCycles := flag.Int("boot", 60_000_000, "cycles to boot to operating")
 	runCycles := flag.Int("run", 300_000_000, "cycles to run the natural operating loop")
 	noKey := flag.Bool("nokey", false, "do not inject a key (isolate the boot stall)")
 	trace := flag.Int("trace", 0, "if >0: single-step N instructions from post-boot, tracing the analog poll instead of the bulk run")
 	derail := flag.Bool("derail", false, "boot in chunks and report the last sane PC before a wild jump")
+	faults := flag.Bool("faults", false, "histogram unmapped (OnFault) accesses during boot to find storage/card probes")
 	flag.Parse()
 
 	img, err := romloader.LoadDir("hp8593a_eeproms")
@@ -223,6 +283,11 @@ func main() {
 	m, err := machine.New8593A(img)
 	if err != nil {
 		panic(err)
+	}
+
+	if *faults {
+		runFaultScan(m, *bootCycles)
+		return
 	}
 
 	if *derail {
