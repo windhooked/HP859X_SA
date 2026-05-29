@@ -177,6 +177,41 @@ the lookup is off by the 3-byte header.
    the lookup is *meant* to skip the header), or does our VM state corrupt the
    buffer? The incrementing `X/Y/Z` shows the loop itself runs.
 
+## RESOLVED MECHANISM (tracer, `cmd/naturalkey -dlptrace`)
+
+The DLP tracer (per-step log of tokenizer name + source cursor + lookup idx +
+dispatch token) made the bug unambiguous:
+
+1. The startup DLP runs a fixed ROM source list at **`0x5FB0E`**:
+   `VRD __A;VRD __B; … ;VRD __Z;NV` — it declares **all 26 vars `__A`–`__Z`**,
+   correctly, one per loop iteration (`VRD __X` → `VARDEF` → dispatch token
+   `0x12F`). Source `tail = 0xd0` points at the **`NV`** routine-terminator.
+2. After `__Z`, the source buffer empties (`head == tail == 0xd0`). The
+   char-reader `fcn.427C` issues **`TRAP #1`** (source-empty → refill).
+3. The TRAP #1 handler (`0x286C`) routes the **foreground** ring (`$a61c`) to
+   `0x2912`, which is just **`bsr fcn.1B40; rte`** — `fcn.1B40` is the DLP
+   **dispatcher** (the same one from the original operating-loop blocker). It is
+   supposed to advance the DLP to the next statement and refill the source.
+4. **In our state `fcn.1B40` does not refill** — the source base stays at the
+   `VRD` list (`0x5FB0E`), so the parser re-reads **past `tail`/`NV`** into the
+   trailing bytecode (`3f3c 00d0 41fa…` = `"?<..A."`), tokenizes a garbage 76th
+   name, the hash returns a bad idx → `recPtr` in filler → token `0x2FF` →
+   dispatch past the table → **derail**.
+
+**So the DLP-startup derail and the original key-dispatch blocker share a root
+cause: `fcn.1B40` / the DLP scheduler not advancing.** Fixing the scheduler's
+ring/dispatch state (bf03/bf0a/the foreground+alt rings — see
+[DRIVETICK_BLOCKER.md](DRIVETICK_BLOCKER.md) and the
+`rev-l-key-consumer-chain` memory) is likely to unblock **both** the startup
+DLP and front-panel/HP-IB key dispatch.
+
+**Fix locus:** the TRAP #1 → `fcn.1B40` path (`0x2912`) and the DLP scheduler
+state it reads. Next: trace `fcn.1B40` when entered from TRAP #1 with the
+foreground source empty — determine what ring/queue state it needs to advance
+to the next DLP statement (and why it currently falls through without
+refilling). The `-dlptrace` probe + a breakpoint at `0x2912`/`0x1B40` is the
+tool.
+
 ## Tokenizer detail (fcn.33940) — names are length-prefixed
 
 The name tokenizer is `fcn.33940`: it reads source chars (`fcn.4258`), tracks

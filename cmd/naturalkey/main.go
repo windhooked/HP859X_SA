@@ -347,6 +347,86 @@ func runWatchA02(m *machine.Machine, maxCycles int) {
 	}
 }
 
+// runDLPTrace boots to near the DLP-startup derail, then single-steps and logs
+// the full DLP name-extraction → lookup → dispatch sequence, tied to the source
+// cursor, so the FIRST mis-tokenized name (where ";A" first appears) is visible.
+func runDLPTrace(m *machine.Machine, maxCycles int) {
+	// Phase 1: fast-run to a margin before the ~49M derail.
+	m.CPU.Reset()
+	lb := emutest.NewLoopBreaker(50)
+	const margin = 4_000_000
+	phase1 := maxCycles - margin
+	if phase1 < 0 {
+		phase1 = 0
+	}
+	for done := 0; done < phase1; done += chunkCycles {
+		m.CPU.Run(chunkCycles)
+		lb.Check(m.CPU.Reg(cpu.PC), m.CPU.SetReg)
+		if (done/chunkCycles)%irq5EveryNChunks == 0 {
+			m.CPU.SetIRQ(5)
+			m.CPU.Run(irqServiceCost)
+			m.CPU.SetIRQ(0)
+		}
+	}
+	fmt.Printf("phase 2: tracing DLP from ~%d cycles (PC=%#06x)\n", phase1, m.CPU.Reg(cpu.PC))
+
+	readName := func() (string, int) {
+		var b [12]byte
+		for k := uint32(0); k < 12; k++ {
+			c := byte(m.Bus.Read(0xFFA7DA+k, bus.Byte))
+			if c >= 0x20 && c < 0x7f {
+				b[k] = c
+			} else {
+				b[k] = '.'
+			}
+		}
+		return string(b[:]), int(m.Bus.Read(0xFFA896, bus.Word))
+	}
+	seq := 0
+	prev := m.CPU.Reg(cpu.PC)
+	for i := 0; i < 6_000_000; i++ {
+		if err := m.CPU.Step(); err != nil {
+			fmt.Printf("step error at %#06x: %v\n", prev, err)
+			return
+		}
+		pc := m.CPU.Reg(cpu.PC)
+		switch pc {
+		case 0x320FE: // name-lookup entry
+			name, _ := readName()
+			n := m.CPU.Reg(cpu.D0) & 0xFFFF
+			head := m.Bus.Read(0xFFA630, bus.Word)
+			base := m.Bus.Read(0xFFA62C, bus.Long)
+			var src [8]byte
+			for k := uint32(0); k < 8; k++ {
+				c := byte(m.Bus.Read(base+head+k, bus.Byte))
+				if c >= 0x20 && c < 0x7f {
+					src[k] = c
+				} else {
+					src[k] = '.'
+				}
+			}
+			seq++
+			fmt.Printf("#%-4d lookup len=%-2d name=%q  base=%#x head=%#x tail=%#x src=%q\n",
+				seq, n, name, base, head, m.Bus.Read(0xFFA632, bus.Word), string(src[:]))
+		case 0x34C94: // dispatch
+			a6 := m.CPU.Reg(cpu.A6)
+			recPtr := m.Bus.Read(a6-0x1e, bus.Long)
+			fmt.Printf("       dispatch recPtr=%#07x token=%#05x\n", recPtr, m.Bus.Read(recPtr, bus.Word))
+		}
+		if !sanePC(pc) {
+			fmt.Printf("\nDERAIL: %#06x -> %#08x (after %d lookups)\n", prev, pc, seq)
+			return
+		}
+		prev = pc
+		if i%4000 == 0 {
+			m.CPU.SetIRQ(5)
+			m.CPU.Run(irqServiceCost)
+			m.CPU.SetIRQ(0)
+		}
+	}
+	fmt.Printf("no derail in trace window (%d lookups)\n", seq)
+}
+
 func main() {
 	bootCycles := flag.Int("boot", 60_000_000, "cycles to boot to operating")
 	runCycles := flag.Int("run", 300_000_000, "cycles to run the natural operating loop")
@@ -355,6 +435,7 @@ func main() {
 	derail := flag.Bool("derail", false, "boot in chunks and report the last sane PC before a wild jump")
 	faults := flag.Bool("faults", false, "histogram unmapped (OnFault) accesses during boot to find storage/card probes")
 	wa02 := flag.Bool("wa02", false, "find the boot write that sets $a02 (0xFFA02) to -1, and its PC")
+	dlptrace := flag.Bool("dlptrace", false, "trace the DLP name-extraction/lookup/dispatch sequence up to the derail")
 	flag.Parse()
 
 	img, err := romloader.LoadDir("hp8593a_eeproms")
@@ -368,6 +449,11 @@ func main() {
 
 	if *faults {
 		runFaultScan(m, *bootCycles)
+		return
+	}
+
+	if *dlptrace {
+		runDLPTrace(m, *bootCycles)
 		return
 	}
 
