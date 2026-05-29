@@ -240,7 +240,32 @@ This is the textbook M68K layout — no surprises.
    positions to handler IDs is built in RAM at boot from data we
    haven't located. Likely in the `0x06xxxx` DLP region or in helper
    tables interleaved with code.
-3. **The 5.8 KB unknown region at `0x05C000..0x05D700`** — manual
-   inspection shows code-like patterns but high data density too;
-   might be a hand-assembled state machine or interleaved jump
-   targets.
+3. ~~**The 5.8 KB unknown region at `0x05C000..0x05D700`**~~ — **RESOLVED**:
+   this region is actually code; `cmd/romscan` missed it because the
+   functions there are large and dense, with `movem.l` multi-register
+   moves rather than many `link.w a6` entries per 256-byte window.
+   The region contains the **DLP typed-variable store + arithmetic
+   dispatch** subsystem:
+
+   - `fcn.5C608` parses HP-IB/DLP arguments looking for `(`, `)`, space
+     (`0x28, 0x29, 0x20`) — an expression tokenizer for compound forms
+     like `CF (MKF/2)+1MZ;` or `TRDEF 1,2,(5E6+0.01),%`
+   - `fcn.5C8DA` stores typed 8-byte values (likely 64-bit doubles),
+     checks parameter count, calls `fcn.6090` for double-to-int
+     conversion
+   - `fcn.5C9E0` dispatches on a type code at `0x14(a6)` to a family
+     of arithmetic helpers — `fcn.6090`, `fcn.60A2`, `fcn.5F6C`,
+     `fcn.5F2E`, `fcn.5CDE` — each handling a different type/operation
+   - Slot `0x934` jumps to `fcn.5CC0E` (one public entry); called from
+     CAL (`0x29948C`), RECALL (`0x342AA`), TRACE (`0x36600`), and
+     SWEEP (`0x39FAC`) subsystems — confirming this is a SHARED typed-
+     value store used wherever HP-IB parameters get parsed and stored
+
+   This subsystem is the runtime support for **DLP variables** (`__A`,
+   `__B`, etc. in the DLP source we found in `0x60000..0x70000`) and
+   for **compound HP-IB argument expressions**. It's effectively the
+   "math library + variable dictionary" the DLP interpreter sits on
+   top of.
+
+   Hypothesized source file: `dlp_vars.c` or `expr_eval.c`, ROM range
+   `0x05C000..0x05D700`. Add to the module map in `SOURCE_RECOVERY.md`.
