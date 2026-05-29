@@ -192,6 +192,10 @@ func runDerailScan(m *machine.Machine, maxCycles int) {
 				fmt.Printf("%#x ", m.Bus.Read(0xFFA61C+k*2, bus.Word))
 			}
 			fmt.Printf("\n  $a7da=%#x\n", m.Bus.Read(0xFFA7DA, bus.Word))
+			fmt.Printf("  $a02 (DLP record base) = %#x\n", m.Bus.Read(0xFFA02, bus.Long))
+			fmt.Printf("  char-ring: base$a62c=%#x size$a62a=%#x head$a630=%#x tail$a632=%#x\n",
+				m.Bus.Read(0xFFA62C, bus.Long), m.Bus.Read(0xFFA62A, bus.Word),
+				m.Bus.Read(0xFFA630, bus.Word), m.Bus.Read(0xFFA632, bus.Word))
 			return
 		}
 		prev = pc
