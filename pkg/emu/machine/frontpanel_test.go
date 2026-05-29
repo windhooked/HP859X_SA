@@ -104,11 +104,15 @@ func TestForceOperatingTickRunsAndExits(t *testing.T) {
 // flow (which the path-A 0x1E60 obstruction blocks; see
 // docs/rom_annotations.md and the rev-l-key-consumer-chain memory).
 func TestDriveOperatingTickClearsKeyAndSweepFlags(t *testing.T) {
-	t.Skip("REGRESSED by SystemID-strap change (8595 → 8593): the firmware " +
-		"now takes a different boot path (end-PC 0x4832 vs prior 0x456A), " +
-		"and DriveOperatingTick's LoopBreaker / IRQ5 cadence is tuned for " +
-		"the 8595 path. Needs re-tuning for IDNUM=8593 — see " +
-		"pkg/emu/device/systemid.go NEEDS-FURTHER-INVESTIGATION notes.")
+	t.Skip("STRUCTURAL BLOCKER under Rev L — full empirical evidence " +
+		"and three realistic fix paths in docs/DRIVETICK_BLOCKER.md. " +
+		"Short version: 1B cycles of bulk Run() never reach PC 0x18F42 " +
+		"because fcn.568F6 → fcn.11DF4 (reached via jsr 0x68E at " +
+		"PC 0x18E76) enters a 31+ deep nested annunciator/display " +
+		"chain that doesn't unwind. Even pre-arming b1e4 = 0x34 fails " +
+		"because fcn.11750 writes b1e4 = (input arg) at PC 0x11798, " +
+		"overwriting it. Machine.DriveOperatingTickUntil predicate API " +
+		"is ready for any future fix.")
 
 	m := newMachine(t)
 	m.CPU.Reset()
@@ -129,17 +133,28 @@ func TestDriveOperatingTickClearsKeyAndSweepFlags(t *testing.T) {
 	befaBefore := uint32(m.Bus.Read(0xFFBEFA, bus.Word)) | (1 << 13)
 	m.Bus.Write(0xFFBEFA, bus.Word, befaBefore)
 
-	endPC := m.DriveOperatingTick(20_000_000)
+	// On Rev L the foreground DLP ring at 0xFFA61C accumulates work
+	// during boot (see docs/DLP_RUNTIME.md). The operating loop drains
+	// it over many ticks before reaching the deep-block bclrs. Wait
+	// until BOTH flags are cleared rather than burning a fixed budget.
+	endPC, cycles := m.DriveOperatingTickUntil(func() bool {
+		key := byte(m.Bus.Read(keyFlagRAM, bus.Byte))
+		befa := m.Bus.Read(0xFFBEFA, bus.Word)
+		return key&0x01 == 0 && befa&(1<<13) == 0
+	}, 200_000_000)
 
 	keyAfter := byte(m.Bus.Read(keyFlagRAM, bus.Byte))
 	befaAfter := m.Bus.Read(0xFFBEFA, bus.Word)
 
 	if keyAfter&0x01 != 0 {
-		t.Errorf("DriveOperatingTick did not clear bc67 bit 0: before=%#02x after=%#02x final PC=%#06x",
-			keyBefore, keyAfter, endPC)
+		t.Errorf("DriveOperatingTick did not clear bc67 bit 0 in %d cycles: before=%#02x after=%#02x final PC=%#06x",
+			cycles, keyBefore, keyAfter, endPC)
 	}
 	if befaAfter&(1<<13) != 0 {
-		t.Errorf("DriveOperatingTick did not clear befa bit 13: before=%04X after=%04X",
-			befaBefore, befaAfter)
+		t.Errorf("DriveOperatingTick did not clear befa bit 13 in %d cycles: before=%04X after=%04X",
+			cycles, befaBefore, befaAfter)
+	}
+	if keyAfter&0x01 == 0 && befaAfter&(1<<13) == 0 {
+		t.Logf("both bclrs fired in %d cycles (final PC=%#06x)", cycles, endPC)
 	}
 }

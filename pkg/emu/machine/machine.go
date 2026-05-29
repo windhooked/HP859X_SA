@@ -289,11 +289,43 @@ func (m *Machine) SendHPIB(bytes []byte, maxCycles int) int {
 // deep-path checks fire. DriveOperatingTick is the validated
 // programmatic substitute.
 func (m *Machine) DriveOperatingTick(maxCycles int) uint32 {
+	pc, _ := m.DriveOperatingTickUntil(nil, maxCycles)
+	return pc
+}
+
+// DriveOperatingTickUntil is the predicate-driven form of
+// DriveOperatingTick: it applies the same pre-arms + PC force, then
+// pumps the loop in `bootChunkCycles` chunks with periodic IRQ5
+// injection, calling `pred` every chunk. It returns as soon as `pred`
+// returns true (with met=true) or when `maxCycles` is exhausted (met
+// =false). Pass nil pred to disable early-exit (matches the legacy
+// DriveOperatingTick behaviour).
+//
+// Why this exists: post-Rev-L the foreground DLP ring at 0xFFA61C
+// (and the alt queue at 0xFFBBA6) accumulate work during boot that
+// the operating loop drains over many ticks (see docs/DLP_RUNTIME.md).
+// Fixed-budget DriveOperatingTick can spend its entire 20M-cycle
+// budget inside DLP interpretation and never reach the deep-block
+// bclr at 0x18F42 or the parser dispatch at slot 0x69A. Predicates
+// like "bc67 bit 0 cleared" or "bc26 read index advanced" let the
+// caller wait until the OBSERVABLE post-condition holds, with a
+// budget that needs to be large enough but not exact.
+//
+// Cycle returned is the total spent inside the chunked loop
+// (excluding the IRQ-service-cost overlay, which is small).
+func (m *Machine) DriveOperatingTickUntil(pred func() bool, maxCycles int) (pc uint32, cycles int) {
 	m.Bus.Write(0xFFB1E0, bus.Word, 0x0200)
 	befa := m.Bus.Read(0xFFBEFA, bus.Word) &^ 0x0400
 	m.Bus.Write(0xFFBEFA, bus.Word, befa)
 	b9afb := m.Bus.Read(0xFF9AFB, bus.Byte) | 0x04
 	m.Bus.Write(0xFF9AFB, bus.Byte, b9afb)
+
+	// Tried clearing the coroutine frame at 0xFFB218 to bypass the
+	// jmp (a0) at PC 0x18BD0 — empirically (cmd/tickprobe, Rev L) it
+	// reads as 0 after boot anyway, and the firmware still exits via
+	// other branches before reaching the bclr at 0x18F42. Left out
+	// because it does nothing. See the test skip comments for the
+	// full picture.
 
 	m.CPU.SetReg(cpu.PC, OperatingTickDeepBlock)
 	for done := 0; done < maxCycles; done += bootChunkCycles {
@@ -303,8 +335,11 @@ func (m *Machine) DriveOperatingTick(maxCycles int) uint32 {
 			m.CPU.Run(bootIRQServiceCost)
 			m.CPU.SetIRQ(0)
 		}
+		if pred != nil && pred() {
+			return m.CPU.Reg(cpu.PC), done + bootChunkCycles
+		}
 	}
-	return m.CPU.Reg(cpu.PC)
+	return m.CPU.Reg(cpu.PC), maxCycles
 }
 
 // ForceOperatingTick directly invokes the firmware's main operating-tick

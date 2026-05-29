@@ -166,12 +166,12 @@ func TestSendHPIBDrivesIRQ4Path(t *testing.T) {
 // documented. This test validates the chain UP TO the parser
 // consuming the bytes; per-command execution is future work.
 func TestSendHPIBPlusDriveOperatingTickDrainsParserFIFO(t *testing.T) {
-	t.Skip("REGRESSED by SystemID-strap change (8595 → 8593): the firmware " +
-		"now takes a different boot path (end-PC 0x4832 vs prior 0x456A) " +
-		"and DriveOperatingTick doesn't reach the parser slot 0x69A — the " +
-		"PS/2 scancodes land in bc12 but aren't consumed. Needs " +
-		"DriveOperatingTick re-tuning for IDNUM=8593's boot path — see " +
-		"pkg/emu/device/systemid.go NEEDS-FURTHER-INVESTIGATION notes.")
+	t.Skip("STRUCTURAL BLOCKER under Rev L — same root cause as " +
+		"TestDriveOperatingTickClearsKeyAndSweepFlags. " +
+		"Full analysis: docs/DRIVETICK_BLOCKER.md. " +
+		"Short: 1B cycles of bulk Run() never reach PC 0x18F3E " +
+		"(parser jsr). DriveOperatingTickUntil API is ready when " +
+		"someone re-frames the verification (the doc lists 3 options).")
 
 	m := newMachine(t)
 	m.CPU.Reset()
@@ -188,16 +188,22 @@ func TestSendHPIBPlusDriveOperatingTickDrainsParserFIFO(t *testing.T) {
 	t.Logf("after SendHPIB: bc26=%#04X (read idx) bc28=%#04X (write idx) — FIFO has %d bytes",
 		bc26Before, bc28After, bc28After-bc26Before)
 
-	// Drive the operating tick — slot 0x69A should pop bytes from $bc12.
-	endPC := m.DriveOperatingTick(20_000_000)
+	// Drive the operating tick — slot 0x69A should pop bytes from
+	// $bc12. The wait is predicate-driven because, on Rev L, the
+	// operating loop drains the DLP foreground ring (0xFFA61C) for
+	// many ticks before reaching the parser dispatch — see
+	// docs/DLP_RUNTIME.md. 200M cycles is comfortably enough.
+	endPC, cycles := m.DriveOperatingTickUntil(func() bool {
+		return m.Bus.Read(0xFFBC26, bus.Word) != bc26Before
+	}, 200_000_000)
 
 	bc26After := m.Bus.Read(0xFFBC26, bus.Word)
 	if bc26After == bc26Before {
-		t.Errorf("after DriveOperatingTick, bc26 read index did not advance — parser fcn.58C2E was NOT reached (end PC=%#06x)",
-			endPC)
+		t.Errorf("after %d cycles, bc26 read index did not advance — parser fcn.58C2E was NOT reached (end PC=%#06x)",
+			cycles, endPC)
 	} else {
-		t.Logf("bc26 read index advanced %#04X → %#04X (+%d bytes consumed) — parser ran end-to-end!",
-			bc26Before, bc26After, bc26After-bc26Before)
+		t.Logf("bc26 read index advanced %#04X → %#04X (+%d bytes consumed) in %d cycles — parser ran end-to-end (end PC=%#06x)",
+			bc26Before, bc26After, bc26After-bc26Before, cycles, endPC)
 	}
 }
 
