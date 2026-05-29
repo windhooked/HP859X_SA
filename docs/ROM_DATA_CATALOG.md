@@ -232,14 +232,75 @@ This is the textbook M68K layout — no surprises.
 
 ## Open items
 
-1. **Decode the parser-name table's type-dependent handler encoding** —
-   only 6 of 242 entries fully decoded. Each first-byte value (0x80,
-   0x83, 0x96, 0x98) likely indicates a different encoding scheme.
-2. **Per-menu position → handler-ID table** — the softkey label table
-   gives us label storage, but the per-menu assignment of softkey
-   positions to handler IDs is built in RAM at boot from data we
-   haven't located. Likely in the `0x06xxxx` DLP region or in helper
-   tables interleaved with code.
+1. ~~**Decode the parser-name table's type-dependent handler encoding**~~
+   — **RESOLVED**: bytes 2-3 (or 1-2 for 3-byte handlers) of every
+   parser-table handler are a **slot INDEX into the 1128-entry master
+   dispatch table**. Slot PC = `0xC4 + slot_index * 6`. Encoding:
+   - **3-byte form** `TYPE SlotIdxHi SlotIdxLo` for types `0x80, 0x82,
+     0x83, 0x96, 0x98, 0x99, 0x9D` (the high bit signals 3-byte)
+   - **4-byte form** `0x00 ARG SlotIdxHi SlotIdxLo` where `ARG` is
+     passed to the slot's handler in `d0`
+   - **Special prefixes** `0xE1, 0xE2, 0xE3, 0xD8` for compound
+     mnemonics like `TVSTNDdk`, `COUPLEmD`, `LIMIDISPlR` (last letter
+     is an attribute selector packed with the type byte)
+
+   `cmd/jumptable` now resolves **85 of 113 public HP-IB commands**
+   (75%) to their dispatch-table slot + JMP target. Examples:
+   - `IDNUM` → slot index 0x1B6 → slot PC 0x27A → `jmp 0x0101A4`
+   - `IP` is NOT in the parser-name table (short mnemonics go through
+     `fcn.1B7BE`'s inline switch instead)
+   - `DONE` → slot 0x736 → `jmp 0x59D2A` (matrix read — DONE reads
+     front-panel state)
+   - `REFF` → slot 0x72A → `jmp 0x34EE8` (ring consumer — REFF
+     recalls reference state via the ring)
+
+   The remaining 28 unresolved public commands are all **Option 027
+   extensions** (FFT, ACP, OBW, CHP, ACPE — all 22 of them) plus
+   **6 compound mnemonics with attribute selectors** (TVSTNDdk,
+   COUPLEmD, etc.). These dispatch through a **separate DLP runtime
+   dispatch table** indexed by `slot_idx >= 1128`, which lives in the
+   `0x070000..0x07C000` DLP-runtime region we haven't yet fully
+   mapped.
+
+   The 298 `__`-prefixed DLP-internal entries (all `slot_idx > 1128`)
+   are all DLP procedures — they use the same separate DLP runtime
+   table.
+
+2. ~~**Per-menu position → handler-ID table**~~ — **PARTIALLY
+   RESOLVED**:
+
+   **Found**: the runtime menu-change function `fcn.5AA1C` (PC
+   `0x5AA1C`) takes a menu ID in `d0` and updates the active vtable.
+   It calls `fcn.5A918` which writes the resolved per-menu handler-
+   table base to RAM `0xFF9566` (the pointer `fcn.E7A2` then reads
+   to look up labels):
+
+   ```
+   0x5A930  moveq 0x38, d6              # 56 entries/menu
+   0x5A932  muls.w -0x2(a6), d6         # d6 = menu_id * 56
+   0x5A936  lsl.l 0x2, d6               # d6 *= 4 (4-byte entries)
+   0x5A938  movea.w d6, a4              # a4 = menu_id * 224 bytes
+   0x5A93A  lea.l -0x6A6C(a4), a4       # a4 = 0xFF9594 + menu_id*0xE0
+   0x5A93E  move.l a4, 0x9566           # store at RAM 0xFF9566
+   ```
+
+   So **each menu owns a 224-byte (0xE0) slab of 56 handler-table
+   entries** in RAM, and the menu collection lives at RAM
+   `0xFF9594 + N * 0xE0`. The vtable pointer at `0xFF9566` selects
+   the active menu's slab.
+
+   **Still open**: where in ROM the per-menu handler-ID arrays are
+   stored, and how boot code loads them into RAM. The `fcn.5AA1C`
+   function operates on already-loaded RAM tables — it doesn't show
+   us the ROM source. Finding the boot-time loader (probably in the
+   `0x002000..0x004000` boot range) would close the loop, but
+   requires another investigation pass following the chain through
+   `fcn.5A4D4` and the helper layer beneath.
+
+   The "menu data" in ROM likely lives somewhere in the
+   `0x070000..0x07C000` DLP runtime region or in tables interleaved
+   with `0x05B000..0x05F000` softkey-dispatch code, but the specific
+   address hasn't been pinned down.
 3. ~~**The 5.8 KB unknown region at `0x05C000..0x05D700`**~~ — **RESOLVED**:
    this region is actually code; `cmd/romscan` missed it because the
    functions there are large and dense, with `movem.l` multi-register

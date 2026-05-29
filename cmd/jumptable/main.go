@@ -16,6 +16,7 @@ package main
 import (
 	"encoding/binary"
 	"fmt"
+	"strings"
 
 	"github.com/windhooked/HP859X_SA/pkg/emu/romloader"
 )
@@ -94,21 +95,37 @@ func main() {
 		if !ok {
 			continue
 		}
-		// Handler bytes after NUL — read 4 bytes.
+		// Handler bytes after NUL — variable length: 3 bytes if first
+		// byte has the high bit set (type code 0x80..0xFF); 4 bytes
+		// otherwise (leading 0x00 indicates a typed value with arg byte
+		// before the slot-index pair).
 		hStart := nameEnd + 1
 		if hStart+4 > uint32(len(rom)) {
 			continue
 		}
-		handler := rom[hStart : hStart+4]
-		// Decode: bytes 2-3 = slot offset from 0xC4.
-		slotOffset := binary.BigEndian.Uint16(handler[2:4])
-		slotPC := uint32(dispatchTableBase) + uint32(slotOffset)
+		var handler []byte
+		var slotIdx uint16
+		first := rom[hStart]
+		if first >= 0x80 {
+			// 3-byte form: TYPE  SlotIdxHi  SlotIdxLo
+			handler = rom[hStart : hStart+3]
+			slotIdx = binary.BigEndian.Uint16(handler[1:3])
+		} else if first == 0x00 {
+			// 4-byte form: 00  ARG  SlotIdxHi  SlotIdxLo
+			handler = rom[hStart : hStart+4]
+			slotIdx = binary.BigEndian.Uint16(handler[2:4])
+		} else {
+			// Other forms (TYPE byte 0x01..0x7F) — assume 4-byte.
+			handler = rom[hStart : hStart+4]
+			slotIdx = binary.BigEndian.Uint16(handler[2:4])
+		}
+		slotPC := uint32(dispatchTableBase) + uint32(slotIdx)*6
 		e := entry{
 			off:     off,
 			name:    name,
 			handler: append([]byte{}, handler...),
 		}
-		if slotPC >= dispatchTableBase && slotPC < dispatchTableEnd+6 && (slotOffset%6 == 0) {
+		if slotPC >= dispatchTableBase && slotPC < dispatchTableEnd+6 {
 			if target, ok := slots[slotPC]; ok {
 				e.slotPC = slotPC
 				e.jumpTarget = target
@@ -116,7 +133,7 @@ func main() {
 			}
 		}
 		entries = append(entries, e)
-		off = nameEnd + 4 // skip past handler bytes
+		off = nameEnd + uint32(len(handler))
 	}
 
 	// Dedupe by name.
@@ -134,7 +151,11 @@ func main() {
 	fmt.Println("name (hex handler) → slot PC → JMP target")
 	validCount := 0
 	for _, e := range unique {
-		hex := fmt.Sprintf("%02X %02X %02X %02X", e.handler[0], e.handler[1], e.handler[2], e.handler[3])
+		var hexParts []string
+		for _, b := range e.handler {
+			hexParts = append(hexParts, fmt.Sprintf("%02X", b))
+		}
+		hex := strings.Join(hexParts, " ")
 		if e.valid {
 			fmt.Printf("  %-15s (%s)  slot 0x%04X → jmp 0x%06X\n",
 				e.name, hex, e.slotPC, e.jumpTarget)
