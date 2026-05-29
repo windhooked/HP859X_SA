@@ -119,20 +119,41 @@ returns a positive-but-wrong index. The `0x12F` opcode (identifier
 resolve/define, handler `0x3A13A`, uses `$bb54`) spins ~23× before `idx` moves,
 consistent with repeatedly resolving/defining the same name.
 
+## Lookup mechanism works — the bug is upstream in name extraction
+
+`fcn.320fe` is sound: it returns **`-1` on no-match**, or **`D6/2`** (positive)
+on a real length+string match. The name-table entries it resolves are valid ROM
+records of the form `[len][offset][0x3006][name-chars…]`, e.g.:
+
+- `0x7F6D4`: offset `0x3EB`, name `"SR"` → `recPtr 0x71A6D` → token `0x12F` (OK).
+- `0x7EDF4`: offset `0x681`, name `"__"` → `recPtr 0x71D03` → token `0x2FF`.
+
+Capturing the lookup **inputs** (`D0`=name length, `$a7da`=key) over the run
+shows the lookup is mostly fed **valid DLP names** — `"VARD"` (len 6), `"__PK"`
+(len 6), etc. — so the mechanism is fine. But the derail-causing calls are fed
+a **malformed key**: `$a7da = 0x3b41035f = ";A._"` (len 3) — it contains a `;`
+(DLP statement separator) and a `0x03` control byte. The name extraction
+**overran a statement boundary**, capturing `;`+garbage as a "name", which then
+hash-resolves to a bad idx → bad `recPtr` → token `0x2FF` → derail.
+
+So the root is **upstream of `fcn.320fe`**: the routine that copies the next
+token/name from the DLP source (the char-ring at `0x727CA`, parsed by
+`fcn.34EE8`) into `$a7da` produces a malformed name at the point of the derail.
+
 ## Open questions / next steps
 
-1. **Is `idx=0x6787` a genuine match or a hash-lookup miss returning garbage?**
-   RE `fcn.320fe`'s no-match path: does it return the item count / a sentinel
-   that the caller wrongly treats as "found" (`idx>0`)? Capture `$a896` (count)
-   and the name at `$a7da` at the derail and compare.
-2. **Is the `$a02=0x727CA` hash table the right one for this name?** It's a ROM
-   static table; confirm the `__`-name being resolved is actually present in it
-   (hash the name by hand and check the bucket), vs the name being a *runtime*
-   `__WN_*` variable that should resolve via the RAM symbol table `$bb54`
-   instead (wrong table selected).
-3. **Does the resolution depend on RAM state** (`$bb54`, `$a896`, `$a7da`) that
-   our boot hasn't set up correctly — i.e. the startup DLP defines `__WN_*`
-   vars before referencing them, and our execution order/state diverges?
+1. **Why is the extracted name malformed (`";A._"`)?** Trace the name-copy that
+   fills `$a7da` (and sets the length `$a896`) from the char-ring source — find
+   where it should stop at the `;` separator but doesn't, or where the source
+   cursor is mis-positioned. The char-ring (base `$a62c=0x727CA`, head `0xd`,
+   tail `0x4d`) is the input; check whether the cursor/length diverges from a
+   correct parse of the startup-DLP statement stream.
+2. **Does our DLP execution reach this statement in the wrong state?** The
+   malformed extraction may be a symptom of an earlier divergence (the startup
+   DLP define/reference order, or the `0x12F` resolve/define opcode's ~23×
+   spin not advancing the source cursor as it should).
+3. Compare the char-ring contents (`0x727D7..0x72817`) against the expected
+   startup-DLP statement to see exactly which token boundary is mis-parsed.
 
 ## Key addresses
 

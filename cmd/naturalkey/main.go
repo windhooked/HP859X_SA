@@ -166,6 +166,11 @@ func runDerailScan(m *machine.Machine, maxCycles int) {
 			return
 		}
 		pc := m.CPU.Reg(cpu.PC)
+		if pc == 0x320FE { // fcn.320fe entry: D0 = name length / count (lookup input)
+			n := m.CPU.Reg(cpu.D0) & 0xFFFF
+			key := m.Bus.Read(0xFFA7DA, bus.Long)
+			fmt.Printf("  lookup fcn.320fe: len(D0)=%#x key($a7da)=%#x\n", n, key)
+		}
 		if pc == 0x331CC { // fcn.331cc entry: D0 = idx (DLP program counter)
 			lastIdx = m.CPU.Reg(cpu.D0)
 		}
@@ -198,7 +203,8 @@ func runDerailScan(m *machine.Machine, maxCycles int) {
 			for k := uint32(0); k < 8; k++ {
 				fmt.Printf("%#x ", m.Bus.Read(0xFFA61C+k*2, bus.Word))
 			}
-			fmt.Printf("\n  $a7da=%#x\n", m.Bus.Read(0xFFA7DA, bus.Word))
+			fmt.Printf("\n  $a7da=%#x (lookup key bytes) $a896=%#x (name length / item count) $a895=%#x\n",
+				m.Bus.Read(0xFFA7DA, bus.Word), m.Bus.Read(0xFFA896, bus.Word), m.Bus.Read(0xFFA895, bus.Byte))
 			// $a02/$a50/$a74 are absolute-SHORT 0x0Axx → ROM 0x00000Axx
 			// (dispatch-table slot longwords reused as pointers), NOT RAM.
 			fmt.Printf("  $a02=%#x $a50=%#x $a74=%#x (ROM constants)\n",
