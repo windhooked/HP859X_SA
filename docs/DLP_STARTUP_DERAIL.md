@@ -177,6 +177,29 @@ the lookup is off by the 3-byte header.
    the lookup is *meant* to skip the header), or does our VM state corrupt the
    buffer? The incrementing `X/Y/Z` shows the loop itself runs.
 
+## Attempted fix: `fcn.331cc`/`$a50` global-base — NEGATIVE (it's flow/state, not the base)
+
+Verified `fcn.331cc`'s base: `movea.l $a50.w` is `2478 0a50` → absolute-short
+`0x0A50` → **ROM constant `0x71682`** (not RAM, not type-selected — the symbol
+type `D6` is only *returned* to the caller; the base is always `$a50`). So:
+
+- `$a50` (`0x71682`), `__PKIP`'s name-table offset (`0x681`), the name table,
+  and the dispatch table are **all ROM constants** — byte-identical on real
+  hardware. The firmware on a real 8593A computes the **same** `recPtr =
+  0x71d03` / token `0x2FF` → it would derail identically.
+- A real unit does **not** crash here, so the divergence is **not** in
+  `fcn.331cc`/`$a50`. It must be that our emulated **flow/state** reaches
+  "resolve `__PKIP` and execute its record" where real hardware's flow does
+  not — `__PKIP` should be *declared* (not executed), or the scheduler should
+  have branched elsewhere after `__WN_VARDEF`.
+
+**Conclusion:** no base-swap fix exists; that would be a blind hack (cf. the
+reverted rotating-status attempt). The genuine fix is the upstream flow/state
+divergence — the shared `fcn.1B40` scheduler root (define-vs-execute ordering /
+ring state). Pinning *which* state differs almost certainly needs the
+real-hardware RAM oracle (a `pkg/859x/dump.py` snapshot at this boot point, once
+the GPIB cable is available) to compare our DLP-scheduler RAM against correct.
+
 ## FINAL MECHANISM (resolved-idx capture)
 
 Logging each lookup's *result* idx (`fcn.320fe` return) vs the idx the dispatch
