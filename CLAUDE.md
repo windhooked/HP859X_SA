@@ -9,6 +9,9 @@ A reverse-engineering and emulation project for the **HP/Agilent 859X series spe
 ## Commands
 
 ```bash
+make build                                 # go build ./... (libraries + cgo Musashi)
+make tools                                 # build every cmd/<name> into bin/ (see below)
+make test                                  # all tests with the macOS DYLD path set
 go build ./...                             # build everything (includes cgo Musashi)
 DYLD_FALLBACK_LIBRARY_PATH=/usr/local/lib go test ./...   # all tests (macOS: libunicorn rpath)
 go run ./cmd/dumprom/ /tmp/rom_gold.bin    # write the 1 MB Rev L ROM image from the four .HEX dumps
@@ -16,6 +19,13 @@ go test -v ./internal/emutest/             # Phase-0 DiffCores gate (Musashi == 
 go test -v ./pkg/emu/cpu/musashi/          # Musashi adapter tests (no DYLD needed — pure cgo)
 go test -v ./pkg/emu/cpu/unicorn/          # Unicorn adapter tests (needs DYLD on macOS)
 ```
+
+**`cmd/` tool binaries go in `bin/` (git-ignored).** Build them with `make
+tools` (runs `go build -o bin/ ./cmd/...`), then run e.g. `./bin/naturalkey
+-trace 2000000`. Do **not** `go build ./cmd/x` from the repo root — that drops
+a stray binary in the working dir; use `make tools` or `go build -o bin/
+./cmd/x` instead. For one-off invocations `go run ./cmd/x` is still fine (it
+builds to a temp dir, not the root).
 
 Two cgo dependencies:
 - **Musashi** (vendored in `third_party/musashi/`) — built by `go build` via unity build in `pkg/emu/cpu/musashi/musashi_core.c`; no separate install needed.
