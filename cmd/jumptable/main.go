@@ -26,6 +26,14 @@ const (
 	dispatchTableEnd  = 0x01B34 // 1128 entries × 6 bytes = 0x1A70 from 0xC4
 	parserTableStart  = 0x07C800
 	parserTableEnd    = 0x080000
+
+	// Secondary DLP runtime dispatch table — covers slot indices
+	// 0x47D..0x6E9 (beyond the master table's 1128 entries). 4-byte
+	// longword absolute ROM pointers, contiguous.
+	//   handler_PC = ROM[dlpTableBase + (slot_idx − dlpSlotBase) * 4]
+	dlpTableBase = 0x71E02
+	dlpSlotBase  = 0x47D
+	dlpSlotEnd   = 0x6E9 // inclusive
 )
 
 func main() {
@@ -130,6 +138,17 @@ func main() {
 				e.slotPC = slotPC
 				e.jumpTarget = target
 				e.valid = true
+			}
+		} else if uint32(slotIdx) >= dlpSlotBase && uint32(slotIdx) <= dlpSlotEnd {
+			// Secondary DLP runtime dispatch table lookup.
+			tblOff := uint32(dlpTableBase) + (uint32(slotIdx)-dlpSlotBase)*4
+			if tblOff+4 <= uint32(len(rom)) {
+				target := binary.BigEndian.Uint32(rom[tblOff : tblOff+4])
+				if target >= 0x1000 && target < uint32(len(rom)) {
+					e.slotPC = tblOff
+					e.jumpTarget = target
+					e.valid = true
+				}
 			}
 		}
 		entries = append(entries, e)

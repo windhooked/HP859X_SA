@@ -1009,3 +1009,41 @@ The PAL produces chip-selects from the M68K address bus:
 
 This is what told us 0x200000 is CalNVRAM (not RF/IF) and that the cal SRAM
 is 64 KB-wide despite the firmware doing 4082-byte structured reads at boot.
+
+---
+
+## Boot-time menu RAM initializer (resolved)
+
+Chain reached from `reset_pc`:
+
+```
+reset_pc → fcn.358C   (RAM partitioner: stamps menu heap bases into RAM 0x9590/0x9578/0x99F4/0x99F8)
+        ↓
+reset_pc → fcn.5ACB2  (boot-time menu-system init, called at PC 0x3A02)
+            ↓
+            fcn.5AA88 (allocates + templates 5 menus × 56 entries)
+                       ├─ writes 280 entry-pointers to vtable at 0xFF9594..0xFF99F4
+                       ├─ writes 5 per-menu state pointers to 0xFF957C..0xFF9590
+                       └─ clones ROM 0x25FD2 (165 words = default state template) into each menu state block
+            ↓
+            fcn.5A552 (per-entry zero-init)
+            ↓
+            fcn.5A4D4 + fcn.5A918  (derive + install active-vtable pointer at 0xFF9566)
+            ↓
+            fcn.5AB74 (d0=0xFF: clear per-entry bit flags across all menus)
+```
+
+ROM source tables used:
+
+| ROM addr   | Role                                                          |
+|------------|---------------------------------------------------------------|
+| `0x000CD0` | Dispatch slot; JMP target longword (at `0x0CD2`) = `0x2611C`  |
+| `0x0002E6` | Dispatch slot; JMP target longword (at `0x002E8`) = `0x25FD2` |
+| `0x025FD2` | 165-word (330-byte) per-menu state default template           |
+| `0x02611C` | 56 × 4-byte per-slot initializer pointers (consumed by 0x6A2E)|
+
+All 5 menus boot with identical default state — per-menu handler-ID
+differentiation happens at menu-select time via the softkey-bind path
+(`fcn.6A2E` and the dispatch family it covers), not from a per-menu ROM
+array. See `docs/ROM_DATA_CATALOG.md` "Per-menu position → handler-ID
+table" for the full breakdown.
