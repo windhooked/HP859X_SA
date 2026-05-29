@@ -81,6 +81,52 @@ focused tool. None fires the IP-witness cells (the 15 RAM cells
 | Any single PS/2 scancode 0x01-0xFF | `cmd/keysweep` | No single scancode fires IP-witness cells. Top hits (`0x77` = 88 cells, `0x5A` = 86 cells) are scancode-specific state init, not IP. |
 | Any single matrix bit (48 positions) | `cmd/keymatrix` | All bits produce identical 25-cell common change. No per-key dispatch fires. |
 
+## Master Dispatch Jump Table at ROM 0xC4..0x1B2E
+
+User's instinct was right: ALL handler functions ARE in a comprehensive
+jump table.
+
+**1128 contiguous slots** at PC `0x000C4` through `0x01B2E`, each
+exactly 6 bytes (`4EF9 hhhh llll` = JMP absolute long). Every reachable
+handler in the firmware is here, indexed by its slot PC:
+
+```
+PC 0x00C4 → jmp 0x0434E6
+PC 0x00CA → jmp 0x05ECB6
+PC 0x00D0 → jmp 0x00ABDE
+PC 0x00D6 → jmp 0x00C470
+...
+PC 0x0520 → jmp 0x04DF72   ← Initial Preset (fcn.520)
+...
+PC 0x069A → jmp 0x058C2E   ← HP-IB parser (fcn.69A → fcn.58C2E)
+PC 0x0736 → jmp 0x059D2A   ← matrix read (fcn.736 → fcn.59D2A)
+...
+PC 0x1B2E → jmp 0x008696   (last slot)
+```
+
+The firmware addresses slots via `JSR $XXX.w` short addressing —
+e.g., `jsr $0520.w` reaches IP.
+
+**Use `cmd/jumptable` to dump or look up any slot.** The tool also
+walks the parser-name table at ROM `0x07E780+` and decodes the handler
+bytes for each entry. Only ~6 of the 242 long mnemonics encode their
+dispatch as "bytes 2-3 = slot offset"; the rest use type-dependent
+encodings whose format is not yet fully decoded.
+
+Short mnemonics (`IP`, `CF`, `SP`, `RB`, `VB`, etc.) are NOT in the
+parser-name table at all — those dispatch through `fcn.1B7BE`'s big
+inline switch instead.
+
+So the dispatch hierarchy is:
+
+| Layer | Handles | Mechanism |
+|---|---|---|
+| 1 | All handlers globally | Master jump table at PC 0xC4..0x1B2E (1128 slots) |
+| 2 | Long mnemonics (ID, REV, PRINT, IDNUM, ...) | Parser-name table at ROM 0x07E780+ → handler-byte-decoded slot call |
+| 3 | Short mnemonics (IP, CF, SP, ...) | fcn.1B7BE inline switch dispatching to slots like 0x520 (IP), etc. |
+| 4 | Single PS/2 bytes (Enter, F-keys, Arrows, prefixes) | fcn.57278 byte cascade + fcn.56d1a/fcn.6862 nested inline jump tables |
+| 5 | Front-panel matrix bits | (gated dead path at PC 0x18F66 — see ruled-out table) |
+
 ## Recall Mechanism (the Up/Down Arrow side of the ring)
 
 The Service Guide documents (lines 8264, 8460) that `⇑` and `⇓` arrows
