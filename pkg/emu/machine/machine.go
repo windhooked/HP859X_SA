@@ -9,6 +9,7 @@
 //	0xEF4000–0xEF401F  FrontPanel (front-panel μP; PAL LRTC select)
 //	0xEF8000–0xEF80FF  PITStub (256 B; MC68230 PIT — PAL LKBD select; IRQ4
 //	                    handler accesses 0xEF8000/0xEF8002)
+//	0xFC0000–0xFEBFFF  DLPRAM (176 KB; DLP / working-memory heap — $bb4e/$bb54)
 //	0xFEC000–0xFEFFFF  TestRAM (16 KB; march-test target; see note below)
 //	0xFF0000–0xFFEFFF  RAM (60 KB; stack + firmware variables)
 //	0xFFF000–0xFFFFFF  MMIO (4 KB; 82C55A PPI, SCI display controller,
@@ -74,6 +75,18 @@ const (
 	CalRAMBase = uint32(0x2FC000)
 	CalRAMSize = uint32(0x004000) // 16 KB
 
+	// DLPRAM: the firmware's DLP / working-memory heap. fcn.358C + the
+	// allocator at fcn.0x3380 partition this region: empirically (cmd/naturalkey)
+	// the DLP heap pointer $bb4e settles at 0xFC9C12 and the DLP symbol-table
+	// base $bb54 at 0xFD8DEC — both BELOW the old RAM map (which started at
+	// 0xFEC000), so without this mapping every DLP symbol-table access went to
+	// the OnFault void (returning 0) and the startup-DLP interpreter could not
+	// run. Mapping 0xFC0000–0xFEBFFF makes the heap real. (The exact lower
+	// bound is approximate — 0xFC0000 covers all observed accesses with
+	// headroom; the real A16 SRAM is a contiguous block 0xFC0000–0xFFFFFF.)
+	DLPRAMBase = uint32(0xFC0000)
+	DLPRAMSize = uint32(0x02C000) // 0xFC0000–0xFEBFFF (176 KB)
+
 	TestRAMBase = uint32(0xFEC000)
 	TestRAMSize = uint32(0x004000) // 16 KB (0xFEC000–0xFEFFFF)
 
@@ -125,6 +138,7 @@ func New8593A(romImage []byte) (*Machine, error) {
 	b.Map(CalRAMBase, CalRAMSize, "CalRAM", calRAM)
 	b.Map(PITBase, PITSize, "PIT", pit)
 	b.Map(device.FrontPanelBase, device.FrontPanelSize, "FrontPanel", fp)
+	b.Map(DLPRAMBase, DLPRAMSize, "DLPRAM", bus.NewRAM(DLPRAMSize))
 	b.Map(TestRAMBase, TestRAMSize, "TestRAM", testRAM)
 	b.Map(RAMBase, RAMSize, "RAM", ram)
 	b.Map(MMIOBase, MMIOSize, "MMIO", mmio)

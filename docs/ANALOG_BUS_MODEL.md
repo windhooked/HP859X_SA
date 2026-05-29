@@ -279,6 +279,33 @@ the DLP record/opcode format, opcode `0x12F`'s multi-iteration semantics
 [DLP_RUNTIME.md](DLP_RUNTIME.md). Tool: `cmd/naturalkey -derail` (single-steps
 the approach and dumps the DLP dispatch trail).
 
+### 12a. DLP-derail follow-up (2026-05-29, cont.)
+
+Two findings from chasing the DLP symbol table:
+
+1. **DLP heap RAM was unmapped — now fixed.** The firmware partitions its DLP
+   working-memory heap (`fcn.358C` + the allocator at `0x3380`) into RAM at
+   **`0xFC0000`+**: empirically the heap pointer `$bb4e` settles at `0xFC9C12`
+   and the symbol-table base `$bb54` at `0xFD8DEC` — both *below* the old RAM
+   map (which started at `0xFEC000`), so every DLP symbol-table access hit the
+   `OnFault` void. Added a `DLPRAM` region `0xFC0000–0xFEBFFF` in
+   [machine.go](../pkg/emu/machine/machine.go) (faithful: the A16 SRAM is a
+   contiguous block to `0xFFFFFF`; suite stays green).
+
+2. **But that is NOT the derail cause.** Mapping the heap RAM left the derail
+   byte-identical: the DLP VM still spins on token `0x12F` at `recPtr=0x71A6D`
+   then advances `recPtr` to garbage `0x71D03`. Token `0x12F`'s handler
+   (`0x3A13A`) is the DLP **identifier resolve/define** opcode — it classifies
+   the name (`fcn.36166`: digit/`_` check), looks it up in `$bb54`, and on the
+   `0x3A28A` path calls a define routine (pointer near the `DLPINIT` strings at
+   `0x3D0Fx`). So the derail is in the **DLP bytecode interpreter's PC
+   advancement** while executing the factory startup DLP — a layer below the
+   symbol table. Next: trace how the persistent DLP PC (in the foreground ring
+   state `0xFFA61C`/`$a630`) is updated between `slot 0x72A` steps, and why it
+   lands on `0x71D03` (non-opcode-aligned, just before the dispatch table at
+   `0x71D76`) instead of the next valid token. `cmd/naturalkey -derail` dumps
+   the dispatch trail + DLP ring state.
+
 **Test impact (unresolved):** `TestMachineBootScreen` (200M) and
 `TestCalNVRAMBootAccessPattern` (100M faithful) now fail — their budgets run
 *past* the 49M derail, so they capture post-derail state; the old goldens

@@ -183,6 +183,15 @@ func runDerailScan(m *machine.Machine, maxCycles int) {
 				m.CPU.Reg(cpu.D0), m.CPU.Reg(cpu.D1), m.CPU.Reg(cpu.D6),
 				m.CPU.Reg(cpu.A0), m.CPU.Reg(cpu.A1), m.CPU.Reg(cpu.A4),
 				m.CPU.Reg(cpu.A6), m.CPU.Reg(cpu.A7))
+			fmt.Println("DLP runtime state:")
+			fmt.Printf("  $bb54 (symbol table base) = %#x\n", m.Bus.Read(0xFFBB54, bus.Long))
+			fmt.Printf("  fg ring $a630=%#x $a632=%#x $a634=%#x\n",
+				m.Bus.Read(0xFFA630, bus.Word), m.Bus.Read(0xFFA632, bus.Word), m.Bus.Read(0xFFA634, bus.Word))
+			fmt.Printf("  fg DLP state block $a61c[0..7] = ")
+			for k := uint32(0); k < 8; k++ {
+				fmt.Printf("%#x ", m.Bus.Read(0xFFA61C+k*2, bus.Word))
+			}
+			fmt.Printf("\n  $a7da=%#x\n", m.Bus.Read(0xFFA7DA, bus.Word))
 			return
 		}
 		prev = pc
@@ -223,6 +232,8 @@ func main() {
 	postBootPC := m.CPU.Reg(cpu.PC)
 	fmt.Printf("post-boot PC = %#06x\n", postBootPC)
 	fmt.Printf("post-boot bc67 = %#02x  (bit0=key-flag)\n", byte(m.Bus.Read(0xFFBC67, bus.Byte)))
+	fmt.Printf("post-boot $bb54 (DLP symtab) = %#x  $bb4e (heap ptr) = %#x  $bff1 = %#x\n",
+		m.Bus.Read(0xFFBB54, bus.Long), m.Bus.Read(0xFFBB4E, bus.Long), m.Bus.Read(0xFFBFF1, bus.Byte))
 
 	// Inject a real key matrix. Bit (byte 0, bit 0) — any single key; we only
 	// care whether the firmware's natural chain reads + dispatches it.
