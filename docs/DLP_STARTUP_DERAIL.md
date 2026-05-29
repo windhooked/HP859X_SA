@@ -177,6 +177,36 @@ the lookup is off by the 3-byte header.
    the lookup is *meant* to skip the header), or does our VM state corrupt the
    buffer? The incrementing `X/Y/Z` shows the loop itself runs.
 
+## FINAL MECHANISM (resolved-idx capture)
+
+Logging each lookup's *result* idx (`fcn.320fe` return) vs the idx the dispatch
+uses pinned it exactly:
+
+- After `__Z`, `__WN_VARDEF` finishes and the source context switches back to the
+  outer global list (`base 0x727ca`, `__PKIP`). The `";A.__Z"` define-context
+  lookups correctly resolve to **idx = -1 (not found)** — handled fine.
+- `"__PKIP"` then resolves (correctly!) to its real name-table entry, **idx
+  `0x6317`** (the entry at `0x7EDF0`: name `…PKIP`, **offset `0x0681`**, type
+  `0x3006`). So the hash lookup is right.
+- But `recPtr = $a50(0x71682) + 0x681 = 0x71d03`, which is in the **`ff 02`
+  filler past the valid record region** (cf. `"SR"` offset `0x3eb` → `0x71a6d`,
+  a valid record). So **`__PKIP`'s record at `$a50+offset` is unpopulated** when
+  it is dispatched → token `0x2FF` → past the dispatch table → derail.
+
+`__VCOM;__PKIP;__SOONIP;…__WN_VARDEF` are the startup DLP's **global routines**
+(the `WININIT`/window scripts). Each must have its record (its DLP code/value)
+associated *before* it is executed. In our state `__PKIP`'s record offset
+(`0x681`) points past the populated records into filler — i.e. either the
+record region for outer globals isn't built yet (a define-before-execute /
+scheduler-ordering problem, back to `fcn.1B40`), or `$a50=0x71682` is the wrong
+record base for global (vs local `VRD __X`) symbols and a different base should
+be selected by the entry's type (`0x3006`).
+
+**Fix locus:** in `fcn.331cc`, how `recPtr` is computed for a global symbol —
+specifically whether `$a50` should differ by symbol type, and/or whether the
+global records (`__VCOM…`) are populated before execution. The `-dlptrace`
+probe (now logging resolved idx + dispatch idx) is the tool.
+
 ## RESOLVED MECHANISM (tracer, `cmd/naturalkey -dlptrace`)
 
 The DLP tracer (per-step log of tokenizer name + source cursor + lookup idx +

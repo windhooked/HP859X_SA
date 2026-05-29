@@ -408,10 +408,21 @@ func runDLPTrace(m *machine.Machine, maxCycles int) {
 			seq++
 			fmt.Printf("#%-4d lookup len=%-2d name=%q  base=%#x head=%#x tail=%#x src=%q\n",
 				seq, n, name, base, head, m.Bus.Read(0xFFA632, bus.Word), string(src[:]))
+		case 0x321B4: // fcn.320fe return: D0 = resolved idx for the just-looked-up name
+			fmt.Printf("        -> resolved idx=%#x\n", m.CPU.Reg(cpu.D0))
+		case 0x331CC: // fcn.331cc entry: D0 = idx actually used to compute recPtr
+			fmt.Printf("        (recPtr from idx=%#x)\n", m.CPU.Reg(cpu.D0))
 		case 0x34C94: // dispatch
 			a6 := m.CPU.Reg(cpu.A6)
 			recPtr := m.Bus.Read(a6-0x1e, bus.Long)
 			fmt.Printf("       dispatch recPtr=%#07x token=%#05x\n", recPtr, m.Bus.Read(recPtr, bus.Word))
+		case 0x42A2: // char-reader TRAP #1 (head==tail, source empty)
+			fmt.Printf("       >> char-reader TRAP#1 (source empty) A0=%#x\n", m.CPU.Reg(cpu.A0))
+		case 0x286C: // TRAP #1 handler entry
+			fmt.Printf("       >> TRAP#1 handler A0=%#x\n", m.CPU.Reg(cpu.A0))
+		case 0x1B40: // DLP dispatcher (refill/yield)
+			fmt.Printf("       >> fcn.1B40 dispatcher: bf03=%#x bf0a=%#x $9b20=%#x\n",
+				m.Bus.Read(0xFFBF03, bus.Byte), m.Bus.Read(0xFFBF0A, bus.Long), m.Bus.Read(0xFF9B20, bus.Byte))
 		}
 		if !sanePC(pc) {
 			fmt.Printf("\nDERAIL: %#06x -> %#08x (after %d lookups)\n", prev, pc, seq)
