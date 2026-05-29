@@ -140,20 +140,50 @@ So the root is **upstream of `fcn.320fe`**: the routine that copies the next
 token/name from the DLP source (the char-ring at `0x727CA`, parsed by
 `fcn.34EE8`) into `$a7da` produces a malformed name at the point of the derail.
 
+## Deepest finding: `__WN_VARDEF` variable-definition loop, malformed name prefix
+
+The char-ring source (base `0x727CA`) is a list of startup-DLP global decls:
+`__VCOM;__PKIP;__SOONIP;__PZREMCMDS;__FFTONIP;__ACPPWRUP;__GTGDRVT;__WN_VARDEF; …`
+then code `MIF(HN+1);IF(…`. The derail is inside **`__WN_VARDEF`** — a DLP
+routine that **defines window variables in a loop**. Dumping the lookup-name
+buffer `$a7da` per call shows the loop (note the incrementing `X/Y/Z`):
+
+```
+len=3 ";A.__X"   len=3 "VRD  X"   len=6 "VARDEF"
+len=3 ";A.__Y"   len=3 "VRD  Y"   len=6 "VARDEF"
+len=3 ";A.__Z"   len=3 "VRD  Z"   len=6 "VARDEF"   …
+```
+
+The constant/clean names (`"VARDEF"`, `"__PKIP"`) sit at buffer offset 0 and
+resolve fine. But the loop-defined names carry a malformed **`";A" + 0x03`
+prefix** (bytes `3b 41 03`) before the real `__X`. With `len=3` the hash in
+`fcn.320fe` digests the garbage prefix (`";A" 0x03`) instead of `"__X"`,
+returning a bad idx → bad `recPtr` (filler `0x71D03`) → token `0x2FF` → derail.
+
+So the real fault is in how `__WN_VARDEF` builds the per-iteration name into
+`$a7da`: it prepends a `;`/type/length record header (`; A 0x03`) that the
+lookup should skip but hashes verbatim — or the name pointer/length passed to
+the lookup is off by the 3-byte header.
+
 ## Open questions / next steps
 
-1. **Why is the extracted name malformed (`";A._"`)?** Trace the name-copy that
-   fills `$a7da` (and sets the length `$a896`) from the char-ring source — find
-   where it should stop at the `;` separator but doesn't, or where the source
-   cursor is mis-positioned. The char-ring (base `$a62c=0x727CA`, head `0xd`,
-   tail `0x4d`) is the input; check whether the cursor/length diverges from a
-   correct parse of the startup-DLP statement stream.
-2. **Does our DLP execution reach this statement in the wrong state?** The
-   malformed extraction may be a symptom of an earlier divergence (the startup
-   DLP define/reference order, or the `0x12F` resolve/define opcode's ~23×
-   spin not advancing the source cursor as it should).
-3. Compare the char-ring contents (`0x727D7..0x72817`) against the expected
-   startup-DLP statement to see exactly which token boundary is mis-parsed.
+1. **Decode the `";A" + 0x03 + name` record format** that `__WN_VARDEF` builds,
+   and find where the name pointer/length handed to `fcn.320fe` should skip the
+   3-byte `; type len` header but doesn't (or where our VM state makes it
+   diverge). The working lookups pass the bare name; the loop ones pass the
+   header — that delta is the bug.
+2. **Confirm whether this is our-emulation divergence or faithful-but-unhandled:**
+   does real hardware's `__WN_VARDEF` produce the same `";A.__X"` buffer (then
+   the lookup is *meant* to skip the header), or does our VM state corrupt the
+   buffer? The incrementing `X/Y/Z` shows the loop itself runs.
+
+## Strategic note
+
+This is ~8 layers into the DLP bytecode VM. The chain from the analog gate to
+here is fully mapped, but fixing it is a focused RE of `__WN_VARDEF`'s record
+format + the lookup's header handling — a deep, self-contained task. The analog
+model (which got the boot *into* the startup DLP) was the session's large win;
+this DLP-startup execution is a separate multi-step subsystem.
 
 ## Key addresses
 

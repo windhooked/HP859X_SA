@@ -168,8 +168,21 @@ func runDerailScan(m *machine.Machine, maxCycles int) {
 		pc := m.CPU.Reg(cpu.PC)
 		if pc == 0x320FE { // fcn.320fe entry: D0 = name length / count (lookup input)
 			n := m.CPU.Reg(cpu.D0) & 0xFFFF
-			key := m.Bus.Read(0xFFA7DA, bus.Long)
-			fmt.Printf("  lookup fcn.320fe: len(D0)=%#x key($a7da)=%#x\n", n, key)
+			// key pointer is arg ($10,A6 of fcn.320fe) — but at entry it's the
+			// caller's pushed &$a7da; dump $a7da buffer bytes as ASCII.
+			var b [10]byte
+			for k := uint32(0); k < 10; k++ {
+				b[k] = byte(m.Bus.Read(0xFFA7DA+k, bus.Byte))
+			}
+			asc := make([]byte, 10)
+			for k, c := range b {
+				if c >= 0x20 && c < 0x7f {
+					asc[k] = c
+				} else {
+					asc[k] = '.'
+				}
+			}
+			fmt.Printf("  lookup fcn.320fe: len(D0)=%#x $a7da=% x  %q\n", n, b, string(asc))
 		}
 		if pc == 0x331CC { // fcn.331cc entry: D0 = idx (DLP program counter)
 			lastIdx = m.CPU.Reg(cpu.D0)
