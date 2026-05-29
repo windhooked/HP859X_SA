@@ -192,7 +192,10 @@ func runDerailScan(m *machine.Machine, maxCycles int) {
 				fmt.Printf("%#x ", m.Bus.Read(0xFFA61C+k*2, bus.Word))
 			}
 			fmt.Printf("\n  $a7da=%#x\n", m.Bus.Read(0xFFA7DA, bus.Word))
-			fmt.Printf("  $a02 (DLP record base) = %#x\n", m.Bus.Read(0xFFA02, bus.Long))
+			// $a02/$a50/$a74 are absolute-SHORT 0x0Axx → ROM 0x00000Axx
+			// (dispatch-table slot longwords reused as pointers), NOT RAM.
+			fmt.Printf("  $a02=%#x $a50=%#x $a74=%#x (ROM constants)\n",
+				m.Bus.Read(0x0A02, bus.Long), m.Bus.Read(0x0A50, bus.Long), m.Bus.Read(0x0A74, bus.Long))
 			fmt.Printf("  char-ring: base$a62c=%#x size$a62a=%#x head$a630=%#x tail$a632=%#x\n",
 				m.Bus.Read(0xFFA62C, bus.Long), m.Bus.Read(0xFFA62A, bus.Word),
 				m.Bus.Read(0xFFA630, bus.Word), m.Bus.Read(0xFFA632, bus.Word))
@@ -267,6 +270,38 @@ func runFaultScan(m *machine.Machine, maxCycles int) {
 	}
 }
 
+// runWatchA02 finds the boot instruction that first sets $a02 (0xFFA02) to
+// 0xFFFFFFFF (the empty-DLP sentinel). Phase 1 chunk-polls to locate the cycle;
+// phase 2 single-steps the window before it and reports the writing PC + the
+// value, so we can tell whether $a02 is NVRAM-driven or a RAM-only default.
+func runWatchA02(m *machine.Machine, maxCycles int) {
+	// $a02 is set within the first ~2000 cycles (before any delay loops), so
+	// single-step a fresh machine from reset and report every write to it.
+	m.CPU.Reset()
+	fmt.Printf("at reset: PC=%#x SP=%#x $a02=%#x $a04=%#x\n",
+		m.CPU.Reg(cpu.PC), m.CPU.Reg(cpu.A7), m.Bus.Read(0xFFA02, bus.Long), m.Bus.Read(0xFFA04, bus.Word))
+	prevVal := uint32(m.Bus.Read(0xFFA02, bus.Long))
+	prevPC := m.CPU.Reg(cpu.PC)
+	writes := 0
+	for i := 0; i < 2_000_000 && writes < 6; i++ {
+		if err := m.CPU.Step(); err != nil {
+			fmt.Printf("step error at %#06x: %v\n", prevPC, err)
+			return
+		}
+		v := uint32(m.Bus.Read(0xFFA02, bus.Long))
+		if v != prevVal {
+			text, _ := m.CPU.Disasm(prevPC)
+			fmt.Printf("$a02: %#010x -> %#010x  @PC=%#06x  %s\n", prevVal, v, prevPC, text)
+			prevVal = v
+			writes++
+		}
+		prevPC = m.CPU.Reg(cpu.PC)
+	}
+	if writes == 0 {
+		fmt.Printf("no write to $a02 in the stepped window (final=%#x)\n", m.Bus.Read(0xFFA02, bus.Long))
+	}
+}
+
 func main() {
 	bootCycles := flag.Int("boot", 60_000_000, "cycles to boot to operating")
 	runCycles := flag.Int("run", 300_000_000, "cycles to run the natural operating loop")
@@ -274,6 +309,7 @@ func main() {
 	trace := flag.Int("trace", 0, "if >0: single-step N instructions from post-boot, tracing the analog poll instead of the bulk run")
 	derail := flag.Bool("derail", false, "boot in chunks and report the last sane PC before a wild jump")
 	faults := flag.Bool("faults", false, "histogram unmapped (OnFault) accesses during boot to find storage/card probes")
+	wa02 := flag.Bool("wa02", false, "find the boot write that sets $a02 (0xFFA02) to -1, and its PC")
 	flag.Parse()
 
 	img, err := romloader.LoadDir("hp8593a_eeproms")
@@ -287,6 +323,11 @@ func main() {
 
 	if *faults {
 		runFaultScan(m, *bootCycles)
+		return
+	}
+
+	if *wa02 {
+		runWatchA02(m, *bootCycles)
 		return
 	}
 

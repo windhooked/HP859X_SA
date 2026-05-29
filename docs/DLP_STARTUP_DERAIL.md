@@ -1,61 +1,70 @@
-# DLP startup-execution derail — root cause: `$a02 = -1` (empty DLP) executed
+# DLP startup-execution derail — DLP-VM instruction index runs out of range
 
-**Status:** root cause isolated; fix pending. This is the blocker *after* the
+**Status:** mechanism isolated; fix pending. This is the blocker *after* the
 A16 analog gate ([ANALOG_BUS_MODEL.md](ANALOG_BUS_MODEL.md)). With the analog
 conversion model in place the 8593 boot advances ~10× — into the **startup-DLP
 execution** — and derails at ~49M cycles. Probe: `cmd/naturalkey -derail`.
 
-## Root cause (one line)
+> **Correction (supersedes an earlier draft of this doc):** an earlier version
+> claimed the root cause was `$a02 = 0xFFFFFFFF` ("empty DLP" sentinel). That was
+> a **misread address**: the firmware's `$a02`/`$a50`/`$a74` are absolute-SHORT
+> `0x0Axx` operands → **ROM `0x00000Axx`** (dispatch-table slot longwords reused
+> as data pointers), not RAM `0xFFAxx`. Reading RAM `0xFFA02` returned the ROM's
+> own *unprogrammed* tail byte `0xFF` (`0xFFA02` as a Go literal is ROM offset
+> `0xFFA02`, near the 1 MB ROM end). The real values are valid ROM constants:
+> `$a02=0x727CA`, `$a50=0x71682`, `$a74=0x71D76`. So this is **not** an empty-DLP
+> / NVRAM problem — the DLP source/tables are ROM-resident factory data.
 
-**`$a02` (RAM `0xFFA02`, the DLP record-table base) = `0xFFFFFFFF`** — the
-firmware's "empty DLP memory" sentinel — and the DLP interpreter uses it as a
-table base anyway, computing a garbage record pointer that walks off into ROM
-data. This is the **"EMPTY DLP MEM"** state the user observed: the analyzer has
-no downloaded programs, yet our boot reaches DLP-record *execution* instead of
-skipping it.
+## Mechanism (one line)
+
+The DLP interpreter executes a **ROM-resident factory DLP** via
+`recPtr = $a50 + offsetTable[$a02 + idx*2]`, dispatching `token = word[recPtr]`
+through the table at `$a74=0x71D76`. The VM's **instruction index `idx` advances
+out of range** of the factory DLP's offset table/records, so `recPtr` lands in
+the `ff 02` filler before the dispatch table (`0x71D03`), the token there
+(`0x2FF`) indexes *past* the dispatch table into DLP source text
+(`ROM[0x72972]="IF;S"=0x49463B53`), and `jsr (garbage)` derails.
 
 ## The chain (all PCs from docs/rom.asm, Rev L)
 
 1. **Operating loop** `fcn.18568` drains the foreground DLP ring each iteration
-   via `slot 0x72A → fcn.34EE8` (see [DLP_RUNTIME.md](DLP_RUNTIME.md)). The ring
-   (state block at `0xFFA61C`) has head `$a630=0xd` ≠ tail `$a632=0x4d`, so it
-   thinks there is work to run. Its source-char ring is valid: base
-   `$a62c=0x727CA`, size `$a62a=0x4e`.
+   via `slot 0x72A → fcn.34EE8` (see [DLP_RUNTIME.md](DLP_RUNTIME.md)). State
+   block `0xFFA61C`: char-source ring base `$a62c=0x727CA` (= `$a02`), size
+   `$a62a=0x4e`, head `$a630=0xd`, tail `$a632=0x4d`.
 
-2. **Instruction exec** `fcn.34B44` (call it `execInstr`) runs one DLP record.
-   At `0x34B6C` it computes the record pointer via
-   `fcn.331cc(index, &recPtr, $a02)` and stores it in `-0x1e(A6)`.
+2. **Instruction exec** `fcn.34B44` (`execInstr`) runs one DLP record. At
+   `0x34B6C` it computes the record pointer via `fcn.331cc(idx, &recPtr, $a02)`
+   and stores it in `-0x1e(A6)`.
 
-3. **`fcn.331cc`** computes `recPtr = $a50 + word[ $a02 + (index-1)*2 ]`:
+3. **`fcn.331cc`** computes `recPtr = $a50 + word[ $a02 + (idx-1)*2 ]`:
    ```
-   0331D8  movea.l ($8,A6), A4        ; A4 = $a02  ← the empty sentinel 0xFFFFFFFF
-   0331DC  move.w  (A4,D0.l), …        ; read offset from $a02 table → GARBAGE (wraps to ROM)
-   0331FE  movea.l $a50.w, A2          ; A2 = $a50 (record-data base)
-   033202  adda.l  A1, A2              ; A2 = $a50 + garbage offset
-   033208  move.l  A2, (A3)            ; recPtr = garbage
+   0331D8  movea.l ($8,A6), A4        ; A4 = $a02 = 0x727CA  (offset table base, ROM)
+   0331DC  move.w  (A4,D0.l), …        ; offset = word[0x727CA + (idx-1)*2]
+   0331FE  movea.l $a50.w, A2          ; A2 = $a50 = 0x71682  (record-data base, ROM)
+   033202  adda.l  A1, A2              ; A2 = 0x71682 + offset
+   033208  move.l  A2, (A3)            ; recPtr
    ```
-   With `$a02 = 0xFFFFFFFF`, `(A4,D0.l)` reads `ROM[0xFFFFFFFF + D0 & 0xFFFFFF]`
-   = arbitrary ROM, so `recPtr` is garbage (observed `0x71A6D`, then `0x71D03`).
+   Observed: a valid `idx` → offset `0x3EB` → `recPtr=0x71A6D` (token `0x12F`).
+   Then `idx` advances → offset `0x681` → `recPtr=0x71D03` (token `0x2FF`,
+   invalid). `0x681` is past the real records, into the `ff 02` filler region.
 
-4. **Token dispatch** `0x34C7C–0x34C94`: reads a 16-bit token (byte-assembled)
-   from `recPtr`, indexes the DLP dispatch table at `ROM[0xA74]=0x71D76`
-   (`A1 = ROM[0x71D76 + token*4]`), and `jsr (A1)`. `recPtr=0x71A6D` gives token
-   `0x12F` → handler `0x3A13A` (the DLP **identifier resolve/define** opcode:
-   classifier `fcn.36166` checks digit/`_`; define path `0x3A28A`). The VM spins
-   here ~23 operating-loop iterations, then `recPtr` becomes `0x71D03` (in
-   `ff 02` filler before the dispatch table) → token `0x2FF` → indexes past the
-   table into DLP source text (`ROM[0x72972]="IF;S"=0x49463B53`) → `jsr` to
-   garbage → **derail**.
+4. **Token dispatch** `0x34C7C–0x34C94`: reads the 16-bit token (byte-assembled)
+   from `recPtr`, indexes the dispatch table `$a74=0x71D76` (`A1 = ROM[0x71D76 +
+   token*4]`), and `jsr (A1)`. `token 0x12F` → handler `0x3A13A` (the DLP
+   **identifier resolve/define** opcode: classifier `fcn.36166` digit/`_`; define
+   path `0x3A28A`). The VM spins on `0x12F` ~23 operating-loop iterations, then
+   `idx` advances to the out-of-range value → `token 0x2FF` → `ROM[0x72972]`
+   (ASCII `"IF;S"`) → `jsr` garbage → **derail**.
 
-## Evidence it is `$a02`, not the analog model or RAM map
+## Evidence
 
-- `$a02 = 0xFFFFFFFF` is stable from early boot (20M cycles on), not corruption.
-- Mapping the DLP heap RAM (`DLPRAM 0xFC0000–0xFEBFFF`, where `$bb4e=0xFC9C12` /
-  `$bb54=0xFD8DEC` live — a real missing region, now fixed) left the derail
-  byte-identical.
-- Making the ADC return DAC-varying values left the derail byte-identical.
-- The char-source ring (`$a62c=0x727CA`) is valid; only the `$a02`-based record
-  pointer is garbage.
+- `$a02/$a50/$a74 = 0x727CA / 0x71682 / 0x71D76` are stable ROM constants (the
+  jmp-target longwords of dispatch slots `0xA00`/`0xA4E`/`0x71D76`'s slot), read
+  correctly at `0x0A02`/`0x0A50`/`0x0A74`.
+- Mapping the DLP heap RAM (`DLPRAM`, where `$bb4e=0xFC9C12`/`$bb54=0xFD8DEC`
+  live) left the derail byte-identical — necessary but not the cause.
+- DAC-varying ADC values left the derail byte-identical.
+- The storage subsystem is not involved (see below) — the DLP is ROM-resident.
 
 ## Storage-subsystem hypothesis — tested, NOT the cause
 
@@ -76,33 +85,36 @@ unmapped storage region — accesses are sparse and explained:
   artifacts of the bad `$a02` state (extending RAM/DLPRAM down to `0xF00000`
   left the derail byte-identical).
 
-**Conclusion:** the derail is **not** a missing storage device — the boot
-isn't reaching for one. `$a02 = -1` is an internal DLP control-flow bug:
-the firmware executes a DLP record despite the directory being empty. (Caveat:
-a card-present check via a *mapped* status register wouldn't show as a fault;
-but there is no evidence of a storage-region probe driving the derail.)
+**Conclusion:** the derail is **not** a missing storage device — the boot isn't
+reaching for one, and (after the address-misread correction above) the DLP
+source/tables are ROM-resident factory data, so NVRAM/CARD storage is not
+involved either. It is an internal **DLP-VM instruction-index** bug.
 
 ## Open questions / next steps
 
-1. **Where is `$a02` set to `-1`?** No *absolute* write to `0xFFA02` appears in
-   rom.asm, so it is written via a register-indirect path (likely a bulk
-   "clear DLP directory to -1" during DLP init). Find it and the matching
-   **empty-guard**: the consumer (`execInstr`/the scheduler) presumably should
-   test `$a02 == -1` and skip record execution when the DLP is empty.
-2. **Why is the foreground ring non-empty** (`$a630≠$a632`) with an entry that
-   triggers record execution, given the DLP is empty? Trace what queued it
-   (the DLP scheduler `fcn.349B6` / `slot 0xD18`) — the bogus queued step is
-   what drives `execInstr` with `$a02=-1`.
-3. Candidate fixes once understood: (a) ensure the empty-DLP guard fires, or
-   (b) initialize `$a02` to a valid empty record table — but (a) is more likely
-   correct since the firmware deliberately uses `-1` as "empty".
+1. **Why does `idx` advance out of range?** `recPtr = $a50 + word[$a02 +
+   (idx-1)*2]`; a valid `idx` gives offset `0x3EB` (`recPtr=0x71A6D`, token
+   `0x12F`), but `idx` then advances to a value whose offset (`0x681`) points
+   into filler past the records. Trace how `idx` (the `D0` arg to `fcn.331cc`)
+   is produced/advanced — it is the DLP VM's program counter into the factory
+   DLP's offset table at `$a02=0x727CA`. Either the table's valid length is
+   being exceeded (missing end-of-program terminator handling) or `idx` is
+   mis-incremented after the `0x12F` (resolve/define) opcode's ~23-iteration
+   spin.
+2. **Is the factory DLP at `$a50=0x71682` / table `$a02=0x727CA` the one that
+   *should* be running here?** Confirm the VM selected the right program (the
+   char-ring base `$a62c` also = `0x727CA`). If the wrong program/region was
+   selected, the index walks off a shorter-than-expected table.
+3. **What is the `0x12F` spin waiting on?** It re-dispatches ~23× before `idx`
+   moves; identify the condition (`fcn.36166`/`0x3A28A` symbol lookup against
+   `$bb54`) that finally lets it advance, and whether that advance is correct.
 
 ## Key addresses
 
 | Symbol | Addr | Meaning |
 |---|---|---|
-| `$a02` | `0xFFA02` | DLP record-table base — **`0xFFFFFFFF` = empty (the bug)** |
-| `$a50` | `0xFFA50` | DLP record-data base (recPtr = `$a50` + offset) |
+| `$a02` | ROM `0x0A02` = **`0x727CA`** | DLP offset-table base (idx → record offset) |
+| `$a50` | ROM `0x0A50` = **`0x71682`** | DLP record-data base (recPtr = `$a50` + offset) |
 | `$a61c` | `0xFFA61C` | foreground DLP ring state block (head `+0x14`, tail `+0x16`, src base `+0x10`) |
 | `fcn.34EE8` | `0x34EE8` | DLP step (slot `0x72A`); char-ring parser |
 | `fcn.34B44` | `0x34B44` | execInstr — runs one DLP record |
