@@ -6,7 +6,7 @@ package device
 //
 //   - U47   12-bit ADC (the digitiser at the heart of every measurement)
 //   - U64 + U201   8-channel analog mux (selects the ADC input channel:
-//                  CRD_ANLG_2 / VIDEO_IF / +2VREF / ACOM and four others)
+//     CRD_ANLG_2 / VIDEO_IF / +2VREF / ACOM and four others)
 //   - one or more DACs that drive YIG-tune, LO-trim, and similar analog
 //     control inputs; the firmware programs them via the 24-bit byte
 //     stream split across selects 0x95 / 0x96 / 0x97
@@ -20,37 +20,38 @@ package device
 // see docs/rom_annotations.md "A16 analog-bus select map" for the full
 // table. The ones with semantic effect in our model are:
 //
-//   0x9A — ADC-ready / status register (READ).
-//          Bit-mapped flags polled by fcn.5E5DE wait_for_adc_match. The
-//          firmware tests `(mask & low_byte) == target` with several
-//          (mask, target) pairs; returning 0x0006 periodically satisfies
-//          the dominant operating-loop poll (mask=0x12, target=0x02 ⇒
-//          0x12 & 0x06 = 0x02) and the init/cal stage at 0x5E708 that
-//          wants `low_byte == 0x06`. We keep the periodic-match cadence
-//          rather than always-match so the firmware's background work
-//          (annunciator redraw, etc.) gets cycles between ready events.
+//	0x9A — ADC status register (READ). Driven by a conversion state machine
+//	       (see the convState fields + readData, and docs/ANALOG_BUS_MODEL.md).
+//	       Low-byte bits: bit0 EOC/data-ready, bit1 ready, bit2 settled ⇒ 0x06
+//	       idle, 0x07 data-ready. The firmware's polls have CONFLICTING
+//	       contracts — the init poll wants exactly 0x06 (EOC clear) while the
+//	       conversion-done polls want bit0 set — so no single constant works;
+//	       the EOC bit sets after a triggered conversion and clears on the
+//	       result read. Status is presented only every statusReadyEveryNReads
+//	       reads ("busy" between) to keep the operating loop's background
+//	       redraw alive.
 //
-//   0x9F — 12-bit signed ADC result register (READ).
-//          Range-checked at PC 0x5EF96 against [-0x200, +0x1FF]. Not read
-//          in our current operating loop (the cal-sweep code at fcn.5EFAE
-//          that would use it never executes). Modelled as a stored value
-//          so a future model can correlate it with DAC writes.
+//	0x9F / 0x9D — ADC result (READ). 0x9F is the 12-bit signed result
+//	       (range-checked at PC 0x5EF96 against [-0x200, +0x1FF]); 0x9D is the
+//	       coarse/sign byte fcn.5E6BC sign-extends into the high word. The
+//	       result is latched when a conversion is triggered (the 0x97 DAC-low
+//	       write) and a read consumes it (clears EOC → idle).
 //
-//   0x95 / 0x96 / 0x97 — 24-bit DAC bytes (WRITE-only).
-//          The firmware composes a 24-bit DAC word by writing
-//          sel=0x95 ⇒ bits[23:16] (high)
-//          sel=0x96 ⇒ bits[15:8]  (mid)
-//          sel=0x97 ⇒ bits[7:0]   (low)
-//          via fcn.5E384. We store each byte in a 24-bit register so
-//          subsequent ADC reads can be correlated with the DAC value.
+//	0x95 / 0x96 / 0x97 — 24-bit DAC bytes (WRITE-only).
+//	       The firmware composes a 24-bit DAC word by writing
+//	       sel=0x95 ⇒ bits[23:16] (high)
+//	       sel=0x96 ⇒ bits[15:8]  (mid)
+//	       sel=0x97 ⇒ bits[7:0]   (low)
+//	       via fcn.5E384. We store each byte in a 24-bit register so
+//	       subsequent ADC reads can be correlated with the DAC value.
 //
-//   0x90 / 0x91 / 0x93 — control registers (WRITE). Observed initial
-//          values (0x00 / 0x12 / 0x0F) suggest channel-select bits +
-//          mode/enable flags but we don't decode them per-bit yet —
-//          stored as a flat register file.
+//	0x90 / 0x91 / 0x93 — control registers (WRITE). Observed initial
+//	       values (0x00 / 0x12 / 0x0F) suggest channel-select bits +
+//	       mode/enable flags but we don't decode them per-bit yet —
+//	       stored as a flat register file.
 //
-//   0x20             — one-shot init pulse (WRITE), exact function
-//                       unknown; stored.
+//	0x20             — one-shot init pulse (WRITE), exact function
+//	                    unknown; stored.
 //
 // Any select not listed gets register-file behaviour: writes store the
 // value, reads return what was last stored. That gives consistent state
@@ -73,20 +74,34 @@ type analogBus struct {
 	// three bytes as a single signed quantity).
 	dac uint32
 
-	// 12-bit signed ADC sample returned for sel=0x9F. Initialised to 0
-	// (mid-scale; well within the firmware's ±0x200 sanity band). A
-	// physical-fidelity follow-up can derive this from the DAC value or
-	// from the current mux channel selected by the control-register
-	// writes.
-	adcResult int16
+	// U47 ADC conversion state machine (drives the sel=0x9A status register
+	// and the sel=0x9F/0x9D result reads). See docs/ANALOG_BUS_MODEL.md.
+	// The firmware's read sequence is: program the channel/DAC (the
+	// send_dac_word writes to selects 0x95/0x96/0x97) to TRIGGER a
+	// conversion, poll 0x9A until the EOC ("data ready") status bit sets,
+	// then read the result from 0x9F (which consumes it). One constant
+	// cannot satisfy the firmware's conflicting 0x9A poll contracts (the
+	// init poll wants 0x06 with EOC clear; the conversion-done polls want
+	// EOC set) — hence this state machine.
+	convState     convPhase // idle → converting → done → (result read) → idle
+	convReadCount int       // sel=0x9A status reads since the last trigger
+	latchedADC    int16     // ADC sample taken at trigger; returned on 0x9F/0x9D
+	donePresented bool      // EOC was shown on a pulse; decays to idle if unread
 
-	// Status-register cadence for sel=0x9A. We arm a "ready" return
-	// (0x0006) every statusMatchEveryNReads reads to mimic the
-	// occasionally-ready behaviour of a real ADC + sample-and-hold,
-	// preserving the firmware's existing background-work cadence.
+	// statusReadCount is the running count of sel=0x9A status reads; it
+	// drives the "ready pulse" cadence (see statusReadyEveryNReads) that
+	// keeps the operating loop's background-redraw work alive.
 	statusReadCount uint64
-	statusPending   bool
 }
+
+// convPhase is the U47 ADC conversion lifecycle.
+type convPhase uint8
+
+const (
+	convIdle       convPhase = iota // no conversion pending; status = 0x06
+	convConverting                  // triggered, not yet complete; status = 0x06
+	convDone                        // complete, result unread; status = 0x07 on pulse
+)
 
 // Symbolic select IDs. Names follow the CLIP 5963-2591 register naming
 // where possible; otherwise they describe the observed firmware usage.
@@ -98,15 +113,34 @@ const (
 	abSelDACHi     = 0x95 // DAC byte [23:16]
 	abSelDACMid    = 0x96 // DAC byte [15:8]
 	abSelDACLo     = 0x97 // DAC byte [7:0]
-	abSelStatus    = 0x9A // ADC-ready status — read-only
-	abSelADC       = 0x9F // 12-bit signed ADC result — read-only
+	abSelStatus    = 0x9A // ADC status register — read-only (see status bits below)
+	abSelADCHi     = 0x9D // ADC result coarse/sign byte — read-only (consumes result)
+	abSelADC       = 0x9F // 12-bit signed ADC result — read-only (consumes result)
 )
 
-// statusMatchEveryNReads sets how often a sel=0x9A read returns the
-// match value (0x0006). 256 is the calibration that keeps the firmware's
-// annunciator-redraw work visible — see indirectMatchEveryNReads (now
-// removed) for the original derivation.
-const statusMatchEveryNReads = 256
+// sel=0x9A status low-byte bits. No datasheet defines these; they are
+// derived from the firmware's poll contracts (docs/ANALOG_BUS_MODEL.md §5):
+// the init poll waits for exactly 0x06 (EOC clear), the conversion-done
+// polls wait for (mask & x) with bit 0 set.
+const (
+	adcStatusEOC     = 0x01                              // conversion complete / data ready
+	adcStatusReady   = 0x02                              // hybrid powered/ready
+	adcStatusSettled = 0x04                              // settled / not mid-conversion
+	adcStatusIdle    = adcStatusReady | adcStatusSettled // 0x06 — ready, no pending data
+)
+
+// statusReadyEveryNReads: a sel=0x9A read presents the status value only
+// every Nth read; between pulses it reads 0x00 ("busy"). This preserves the
+// firmware's background-redraw cadence in the operating loop — returning
+// "ready" on EVERY read collapses the render (see CLAUDE.md). 256 carries
+// over the previous calibration.
+const statusReadyEveryNReads = 256
+
+// convReadsToEOC: a triggered conversion completes after this many sel=0x9A
+// status reads (models the U47 conversion time). Kept well below the pulse
+// period so a conversion is always finished by the time the next ready pulse
+// can present its EOC bit.
+const convReadsToEOC = 8
 
 // writeSelect captures the select value written to 0xFFF75C.
 func (a *analogBus) writeSelect(sel uint16) { a.sel = sel }
@@ -124,6 +158,44 @@ func (a *analogBus) writeData(val uint16) {
 		a.dac = (a.dac &^ 0xFF00) | (uint32(val)&0xFF)<<8
 	case abSelDACLo:
 		a.dac = (a.dac &^ 0xFF) | (uint32(val) & 0xFF)
+		// Writing the low DAC byte completes a send_dac_word (fcn.5E384) and
+		// triggers an ADC conversion on the currently-selected mux channel.
+		a.triggerConversion()
+	}
+}
+
+// triggerConversion latches an ADC sample for the current mux channel and
+// starts the conversion timer. It also clears any stale EOC (a new
+// conversion supersedes an unread result).
+func (a *analogBus) triggerConversion() {
+	a.latchedADC = a.sampleADC()
+	a.convState = convConverting
+	a.convReadCount = 0
+	a.donePresented = false
+}
+
+// sampleADC returns the 12-bit signed ADC reading for the current mux channel
+// (selected via control reg 0x91 low bits) and DAC value. Per the service
+// guide the ADC maps 0–2 V to bottom→top graticule; we return per-channel
+// values inside the firmware's ±0x200 sanity band (range-checked at ROM
+// 0x5EF96/0x5EFA6). See docs/ANALOG_BUS_MODEL.md §6.
+func (a *analogBus) sampleADC() int16 {
+	ch := a.regs[abSelCtrlB] & 0x07
+	switch ch {
+	case 0: // CRD_ANLG_2 — card-cage analog (centred)
+		return 0
+	case 1: // VIDEO_IF — small positive noise floor
+		return 32
+	case 2: // +2VREF — near top of scale
+		return 0x100
+	default:
+		// Linear from DAC LSBs, sign-extended from 9 bits, so a cal sweep
+		// that programs the DAC and reads back sees a coherent response.
+		v := int16(a.dac & 0x1FF)
+		if v&0x100 != 0 {
+			v |= ^int16(0x1FF)
+		}
+		return v
 	}
 }
 
@@ -131,54 +203,50 @@ func (a *analogBus) writeData(val uint16) {
 func (a *analogBus) readData() uint16 {
 	switch a.sel & 0xFF {
 	case abSelStatus:
-		// Periodic "ready" pulse: 0x0006 every statusMatchEveryNReads reads.
-		// 0x0006 satisfies both observed firmware tests against the low byte
-		// (`(0x12 & x) == 0x02` and `x == 0x06`).
-		a.statusReadCount++
-		arm := a.statusReadCount%statusMatchEveryNReads == 0
-		if arm || a.statusPending {
-			a.statusPending = false
-			return 0x0006
-		}
-		return 0
-	case abSelADC:
-		// 12-bit signed ADC result. Derived from the current state of the
-		// chip's input mux (selected via control-reg writes 0x90/0x91/0x93)
-		// and the most-recent DAC value, so the firmware's cal sweeps see
-		// a coherent response curve rather than a flat zero.
-		//
-		// Approximation, calibrated to firmware expectations:
-		//   - mux channel inferred from regs[0x91] bits [2:0] (per the
-		//     observed init value 0x0012 the firmware seems to write
-		//     channel-id + enable here; if a real CLIP page proves a
-		//     different bit-layout, this is the place to fix it).
-		//   - channel 0 = CRD_ANLG_2: returns 0 (centred analog ground)
-		//   - channel 1 = VIDEO_IF: returns a small positive noise-floor
-		//     reading (~+32, well below the 0x1FF clamp)
-		//   - channel 2 = +2VREF: returns ~+0x100 (the firmware's "+2V"
-		//     reference, scaled into ADC counts)
-		//   - other channels: track the DAC value (lower 9 bits) so a
-		//     cal sweep that programs the DAC and reads back sees a
-		//     linear response — enough to pass `bgt 0x1FF` / `blt -0x200`
-		//     bounds checks but not so high it pegs the ADC.
-		ch := a.regs[abSelCtrlB] & 0x07
-		var adc int16
-		switch ch {
-		case 0:
-			adc = 0
-		case 1:
-			adc = 32
-		case 2:
-			adc = 0x100
-		default:
-			// Linear from DAC LSBs, sign-extended from 9 bits.
-			v := int16(a.dac & 0x1FF)
-			if v&0x100 != 0 {
-				v |= ^int16(0x1FF)
+		// Advance the conversion timer on each status read; a converting
+		// sample becomes "done" after convReadsToEOC reads.
+		if a.convState == convConverting {
+			a.convReadCount++
+			if a.convReadCount >= convReadsToEOC {
+				a.convState = convDone
 			}
-			adc = v
 		}
-		return uint16(adc) & 0x1FFF
+		// Ready-pulse cadence: present the status only every Nth read, "busy"
+		// (0x00) otherwise, so the firmware keeps doing background work
+		// between ready events.
+		a.statusReadCount++
+		if a.statusReadCount%statusReadyEveryNReads != 0 {
+			return 0x0000
+		}
+		// On a ready pulse: present 0x06 (idle) or 0x07 (data ready). EOC is a
+		// transient — it is shown on exactly one pulse; if the firmware does
+		// not read the result before the next pulse, the converter returns to
+		// idle and EOC self-clears (so the init poll that waits for *exactly*
+		// 0x06 is not blocked by a stale, unlatched conversion). An actively
+		// waiting conversion-done poll catches that single 0x07 pulse and
+		// reads the result (clearing EOC) well before the next pulse.
+		s := uint16(adcStatusIdle) // 0x06: ready + settled
+		if a.convState == convDone {
+			if a.donePresented {
+				a.convState = convIdle
+				a.donePresented = false
+			} else {
+				a.donePresented = true
+				s |= adcStatusEOC // 0x07: data ready
+			}
+		}
+		return s
+	case abSelADC, abSelADCHi:
+		// Reading a result register returns the latched sample and consumes
+		// the conversion (clears EOC → idle). 0x9D is the coarse/sign byte
+		// that fcn.5E6BC sign-extends into the high word of a 32-bit reading;
+		// returning 0 keeps the combined value equal to the 0x9F word.
+		a.convState = convIdle
+		a.donePresented = false
+		if a.sel&0xFF == abSelADCHi {
+			return 0x0000
+		}
+		return uint16(a.latchedADC) & 0x1FFF
 	default:
 		// Register-file passthrough for every other select: read what was
 		// last written. Defaults to 0 for any select the firmware reads

@@ -66,40 +66,28 @@ func regionBucket(pc uint32) uint32 { return pc &^ 0x3FF } // 1 KB buckets
 // few read values + compare results, and reports whether/when the poll matches.
 func runTrace(m *machine.Machine, steps int) {
 	const (
-		pollTop  = 0x05E5FA // write select 0x9A
-		readDone = 0x05E600 // just read 0xFFF75E into $9492
-		cmpPC    = 0x05E60E // cmp.b (9,A6), D6
-		setMatch = 0x05E614 // result = -1 (match)
-		pollExit = 0x05E630 // poll returns
-		caller   = 0x05E64C // back in fcn.5E63C after first poll
+		eqPollTop = 0x05E6FC // write select 0x9A (==0x06 init poll top)
+		eqCmp     = 0x05E708 // cmpi.b #6, $9493
+		eqExit    = 0x05E71E // matched ==0x06, fall through
 	)
-	var topHits, exitHits, callerHits, matchSet, logged int
+	var topHits, exitHits, logged int
+	valdist := map[uint16]int{}
 	for i := 0; i < steps; i++ {
 		pc := m.CPU.Reg(cpu.PC)
 		switch pc {
-		case pollTop:
+		case eqPollTop:
 			topHits++
-		case pollExit:
+		case eqExit:
 			exitHits++
-		case setMatch:
-			matchSet++
-		case caller:
-			callerHits++
 		}
-		if pc == cmpPC {
-			d6 := m.CPU.Reg(cpu.D6) & 0xFF
-			a6 := m.CPU.Reg(cpu.A6)
-			expected := m.Bus.Read(a6+9, bus.Byte) & 0xFF
-			testByte := m.Bus.Read(a6-1, bus.Byte) & 0xFF // (-1,A6) pre-mask test byte
-			readLow := m.Bus.Read(0xFF9493, bus.Byte) & 0xFF
-			rawRead := m.Bus.Read(0xFF9492, bus.Word) & 0xFFFF
-			match := d6 == expected
-			// Log the first 8 and any time the read is non-zero (periodic 0x0006).
-			if logged < 8 || rawRead != 0 {
-				fmt.Printf("  cmp#%-3d read(f75e)=%#04x test(-1,A6)=%#02x mask&read_low=%#02x D6=%#02x expected=%#02x %s\n",
-					logged, rawRead, testByte, readLow, d6, expected, map[bool]string{true: "MATCH", false: "no"}[match])
+		if pc == eqCmp {
+			lowByte := uint16(m.Bus.Read(0xFF9493, bus.Byte) & 0xFF)
+			valdist[lowByte]++
+			if logged < 12 {
+				fmt.Printf("  eqcmp#%-2d $9493=%#02x %s\n", logged, lowByte,
+					map[bool]string{true: "==0x06 MATCH", false: "no"}[lowByte == 0x06])
+				logged++
 			}
-			logged++
 		}
 		if err := m.CPU.Step(); err != nil {
 			fmt.Printf("step error at %#06x: %v\n", pc, err)
@@ -113,11 +101,98 @@ func runTrace(m *machine.Machine, steps int) {
 		}
 	}
 	fmt.Printf("\n=== trace summary (%d steps) ===\n", steps)
-	fmt.Printf("poll-top  0x5E5FA hits : %d\n", topHits)
-	fmt.Printf("match-set 0x5E614 hits : %d  (read satisfied (mask&x)==expected)\n", matchSet)
-	fmt.Printf("poll-exit 0x5E630 hits : %d\n", exitHits)
-	fmt.Printf("caller    0x5E64C hits : %d  (progressed past the first poll)\n", callerHits)
+	fmt.Printf("==0x06 poll-top 0x5E6FC hits : %d\n", topHits)
+	fmt.Printf("==0x06 poll-exit 0x5E71E hits : %d  (matched, progressed)\n", exitHits)
+	fmt.Printf("$9493 value distribution at the ==0x06 cmp: %v\n", valdist)
 	fmt.Printf("final PC = %#06x\n", m.CPU.Reg(cpu.PC))
+}
+
+// saneePC reports whether pc is in a region the firmware legitimately
+// executes from: ROM (0..0xFFFFF) or RAM/MMIO (0xFF0000..0xFFFFFF).
+func sanePC(pc uint32) bool {
+	return pc < 0x100000 || (pc >= 0xFF0000 && pc <= 0xFFFFFF)
+}
+
+// runDerailScan boots in chunks (mirroring Machine.BootToOperating's cadence)
+// while watching for the PC to jump to a wild address. It keeps a ring of the
+// recent distinct PCs so the last sane location before the derail is visible.
+func runDerailScan(m *machine.Machine, maxCycles int) {
+	m.CPU.Reset()
+	lb := emutest.NewLoopBreaker(50)
+	const ringN = 32
+	ring := make([]uint32, 0, ringN)
+	push := func(pc uint32) {
+		if len(ring) > 0 && ring[len(ring)-1] == pc {
+			return // collapse runs of the same PC
+		}
+		if len(ring) == ringN {
+			ring = ring[1:]
+		}
+		ring = append(ring, pc)
+	}
+	// Phase 1: chunked run up to a margin before the known derail.
+	const stepMargin = 3_000_000
+	phase1 := maxCycles - stepMargin
+	if phase1 < 0 {
+		phase1 = 0
+	}
+	for done := 0; done < phase1; done += chunkCycles {
+		m.CPU.Run(chunkCycles)
+		pc := m.CPU.Reg(cpu.PC)
+		push(pc)
+		if !sanePC(pc) {
+			fmt.Printf("DERAIL (chunk) at ~%d cycles: PC=%#08x\n", done, pc)
+			for _, p := range ring {
+				fmt.Printf("  %#08x\n", p)
+			}
+			return
+		}
+		lb.Check(pc, m.CPU.SetReg)
+		if (done/chunkCycles)%irq5EveryNChunks == 0 {
+			m.CPU.SetIRQ(5)
+			m.CPU.Run(irqServiceCost)
+			m.CPU.SetIRQ(0)
+		}
+	}
+	// Phase 2: single-step to catch the exact derailing instruction.
+	fmt.Printf("phase 2: single-stepping from ~%d cycles (PC=%#06x)\n", phase1, m.CPU.Reg(cpu.PC))
+	type disp struct{ recPtr, token, handler uint32 }
+	var dtrail []disp
+	prev := m.CPU.Reg(cpu.PC)
+	for i := 0; i < 4_000_000; i++ {
+		if err := m.CPU.Step(); err != nil {
+			fmt.Printf("step error at %#06x: %v\n", prev, err)
+			return
+		}
+		pc := m.CPU.Reg(cpu.PC)
+		if pc == 0x34C94 { // jsr (A1): record the DLP token dispatch
+			a6 := m.CPU.Reg(cpu.A6)
+			recPtr := m.Bus.Read(a6-0x1e, bus.Long)
+			dtrail = append(dtrail, disp{recPtr, m.Bus.Read(recPtr, bus.Word), m.CPU.Reg(cpu.A1)})
+			if len(dtrail) > 24 {
+				dtrail = dtrail[1:]
+			}
+		}
+		if !sanePC(pc) {
+			fmt.Printf("\nDERAIL: %#06x -> %#08x\n", prev, pc)
+			fmt.Printf("DLP dispatch trail (recPtr, token, handler) — last %d:\n", len(dtrail))
+			for _, d := range dtrail {
+				fmt.Printf("  recPtr=%#07x token=%#05x handler=%#08x\n", d.recPtr, d.token, d.handler)
+			}
+			fmt.Printf("regs: D0=%#x D1=%#x D6=%#x A0=%#x A1=%#x A4=%#x A6=%#x A7=%#x\n",
+				m.CPU.Reg(cpu.D0), m.CPU.Reg(cpu.D1), m.CPU.Reg(cpu.D6),
+				m.CPU.Reg(cpu.A0), m.CPU.Reg(cpu.A1), m.CPU.Reg(cpu.A4),
+				m.CPU.Reg(cpu.A6), m.CPU.Reg(cpu.A7))
+			return
+		}
+		prev = pc
+		if i%4000 == 0 {
+			m.CPU.SetIRQ(5)
+			m.CPU.Run(irqServiceCost)
+			m.CPU.SetIRQ(0)
+		}
+	}
+	fmt.Printf("no derail; final PC=%#06x\n", m.CPU.Reg(cpu.PC))
 }
 
 func main() {
@@ -125,6 +200,7 @@ func main() {
 	runCycles := flag.Int("run", 300_000_000, "cycles to run the natural operating loop")
 	noKey := flag.Bool("nokey", false, "do not inject a key (isolate the boot stall)")
 	trace := flag.Int("trace", 0, "if >0: single-step N instructions from post-boot, tracing the analog poll instead of the bulk run")
+	derail := flag.Bool("derail", false, "boot in chunks and report the last sane PC before a wild jump")
 	flag.Parse()
 
 	img, err := romloader.LoadDir("hp8593a_eeproms")
@@ -135,6 +211,12 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+
+	if *derail {
+		runDerailScan(m, *bootCycles)
+		return
+	}
+
 	m.CPU.Reset()
 	m.BootToOperating(*bootCycles)
 
