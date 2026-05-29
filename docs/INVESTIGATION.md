@@ -81,6 +81,65 @@ focused tool. None fires the IP-witness cells (the 15 RAM cells
 | Any single PS/2 scancode 0x01-0xFF | `cmd/keysweep` | No single scancode fires IP-witness cells. Top hits (`0x77` = 88 cells, `0x5A` = 86 cells) are scancode-specific state init, not IP. |
 | Any single matrix bit (48 positions) | `cmd/keymatrix` | All bits produce identical 25-cell common change. No per-key dispatch fires. |
 
+## Recall Mechanism (the Up/Down Arrow side of the ring)
+
+The Service Guide documents (lines 8264, 8460) that `⇑` and `⇓` arrows
+edit/view previous data. In PS/2 Set 2 these are **extended scancodes**:
+
+| Key | PS/2 Set 2 sequence |
+|---|---|
+| Up Arrow (recall previous) | `0xE0 0x75` |
+| Down Arrow (recall next) | `0xE0 0x72` |
+| Left Arrow | `0xE0 0x6B` |
+| Right Arrow | `0xE0 0x74` |
+
+`fcn.57278` handles `0xE0` by setting `bc65.3` (extended prefix mode).
+The next byte enters the bit-3-SET path at PC `0x57374`:
+
+- Bytes `0x69..0x75` dispatch via inline jump table at `0x574B2` →
+  for **0x75 (Up)** the offset at `0x57496 = 0xFFB6 = -0x4A` resolves
+  to handler at PC **`0x5746C`**:
+
+  ```
+  0x5746C  btst.b 0xD, 0xbc64.w     ; mode flag
+  0x57472  bne.b 0x57484            ; if set → parser code 0x9900
+  ... fcn.057A helper test ...
+  0x57484  -6(a6) = 0x9900          ; emit binary dispatch code 0x9900
+  ```
+
+- Parser code `0x9900` → `fcn.56d1a` binary dispatcher → inline jump
+  table at PC `0x57144` → index `(0x99 & 0x3F) - 0x10 = 9` → offset
+  `0xFF92 = -0x6E` → handler at PC **`0x570DA`**:
+
+  ```
+  0x570DA  d6 = bc38                 ; recall history POSITION counter
+  0x570DE  d6 -= 1
+  0x570E0  ble.b 0x570F2             ; at top of history → skip
+  0x570E2  tst.w bc2e                ; check recall buffer ready
+  0x570E6  ble.b 0x570F2
+  0x570E8  d0 = bc38 - 1
+  0x570EE  bsr fcn.56780             ; ← THE RECALL HANDLER
+  ```
+
+So the chain is:
+
+1. User types `IP;` + Enter (PS/2 scancodes `0x43, 0x4D, 0x4C, 0x5A`)
+2. `fcn.56cd2` saves the buffer-control struct to ring slot at `0xFFA62A`
+3. `bc38` (recall position) stays at top
+4. User presses Up Arrow (`0xE0 0x75`)
+5. Parser emits code `0x9800` → dispatcher → PC `0x570DA`
+6. `bc38` decremented to walk one step back through history
+7. `fcn.56780` redisplays the saved entry from the ring slot
+
+Empirical verification with a focused step-trace probe (developed
+in-session, not landed as a `cmd/` tool) confirms `fcn.34EE8` (the
+ring consumer) fires twice after the Up Arrow injection — but the
+specific dispatch into `fcn.56780` requires the parser's bit-3
+extended-prefix mode to be sticky across the two-byte `E0/75`
+sequence, which our forced-PC stepper doesn't reliably preserve.
+The chain is in the firmware; verifying the recall handler fires
+end-to-end would need a longer natural-loop run.
+
 ## Open Hypotheses for the Next Round
 
 After the systematic ruling-out above, here are the remaining real
