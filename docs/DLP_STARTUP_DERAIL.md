@@ -177,6 +177,32 @@ the lookup is off by the 3-byte header.
    the lookup is *meant* to skip the header), or does our VM state corrupt the
    buffer? The incrementing `X/Y/Z` shows the loop itself runs.
 
+## Tokenizer detail (fcn.33940) — names are length-prefixed
+
+The name tokenizer is `fcn.33940`: it reads source chars (`fcn.4258`), tracks
+`[] () ,` and space/`?` delimiters with bracket/paren depth, and at `0x33A52`
+writes a **length byte** (`D6 = $a898 - $a896`, the token length) ahead of the
+token chars. So DLP names are stored **length-prefixed: `[len][chars]`**. The
+`0x03` byte I earlier called "garbage" is in fact the **length** for `"__X"`
+(3 chars) — not corruption.
+
+The genuine anomaly: the `__WN_VARDEF` loop-variable tokens are preceded by an
+extra `";A"` (`0x3b 0x41`) *before* the length byte, which the simple-name path
+(`"VARDEF"`, `"__PKIP"`, stored bare at offset 0) does not have. `fcn.320fe`
+hashes the key from `$a7da[0]` in both cases, so for the loop names it hashes
+`";A"+len+"__X"` instead of `"__X"` → wrong bucket → wrong idx → derail.
+
+(Correction to an earlier note: in `fcn.320fe` the args are `($8,A6)=$a02`
+string table, `($c,A6)=$a68=0x8001E` hash buckets, `($10,A6)=&$a7da` key — the
+`$a02`/`$a68` roles were stated swapped earlier; the chain conclusion is
+unchanged.)
+
+**Precise next step:** determine where the `";A"` prefix comes from — is it a
+2-byte scope/type record header that `__WN_VARDEF` legitimately emits and the
+lookup is *meant* to skip (so our bug is the key pointer not being advanced past
+it), or is it stale adjacent-buffer data from a prior token that a correct parse
+would have overwritten? Decode the `__WN_VARDEF` record layout to decide.
+
 ## Strategic note
 
 This is ~8 layers into the DLP bytecode VM. The chain from the analog gate to

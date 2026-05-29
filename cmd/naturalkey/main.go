@@ -159,6 +159,13 @@ func runDerailScan(m *machine.Machine, maxCycles int) {
 	type disp struct{ idx, recPtr, token, handler uint32 }
 	var dtrail []disp
 	lastIdx := uint32(0)
+	// Track writes to the $a7da name buffer to catch the malformed-header fill.
+	type wr struct {
+		pc  uint32
+		val uint32
+	}
+	var a7daWrites []wr
+	prevA7da := uint32(m.Bus.Read(0xFFA7DA, bus.Long))
 	prev := m.CPU.Reg(cpu.PC)
 	for i := 0; i < 4_000_000; i++ {
 		if err := m.CPU.Step(); err != nil {
@@ -187,6 +194,13 @@ func runDerailScan(m *machine.Machine, maxCycles int) {
 		if pc == 0x331CC { // fcn.331cc entry: D0 = idx (DLP program counter)
 			lastIdx = m.CPU.Reg(cpu.D0)
 		}
+		if v := uint32(m.Bus.Read(0xFFA7DA, bus.Long)); v != prevA7da {
+			a7daWrites = append(a7daWrites, wr{prev, v})
+			if len(a7daWrites) > 16 {
+				a7daWrites = a7daWrites[1:]
+			}
+			prevA7da = v
+		}
 		if pc == 0x34C94 { // jsr (A1): record the DLP token dispatch
 			a6 := m.CPU.Reg(cpu.A6)
 			recPtr := m.Bus.Read(a6-0x1e, bus.Long)
@@ -208,6 +222,11 @@ func runDerailScan(m *machine.Machine, maxCycles int) {
 				a6, m.CPU.Reg(cpu.A7))
 			fmt.Printf("execInstr caller return (mem[A6+4]) = %#x; saved A6 (mem[A6]) = %#x\n",
 				m.Bus.Read(a6+4, bus.Long), m.Bus.Read(a6, bus.Long))
+			fmt.Printf("$a7da buffer writes (PC, value) — last %d:\n", len(a7daWrites))
+			for _, w := range a7daWrites {
+				text, _ := m.CPU.Disasm(w.pc)
+				fmt.Printf("  @PC=%#06x val=%#010x  %s\n", w.pc, w.val, text)
+			}
 			fmt.Println("DLP runtime state:")
 			fmt.Printf("  $bb54 (symbol table base) = %#x\n", m.Bus.Read(0xFFBB54, bus.Long))
 			fmt.Printf("  fg ring $a630=%#x $a632=%#x $a634=%#x\n",
