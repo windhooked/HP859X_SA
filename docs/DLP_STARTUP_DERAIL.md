@@ -1,9 +1,32 @@
-# DLP startup-execution derail — DLP-VM instruction index runs out of range
+# DLP startup-execution derail — RESOLVED (68000 address-error emulation)
 
-**Status:** mechanism isolated; fix pending. This is the blocker *after* the
-A16 analog gate ([ANALOG_BUS_MODEL.md](ANALOG_BUS_MODEL.md)). With the analog
-conversion model in place the 8593 boot advances ~10× — into the **startup-DLP
-execution** — and derails at ~49M cycles. Probe: `cmd/naturalkey -derail`.
+> ## ✅ RESOLVED (2026-05-30) — `M68K_EMULATE_ADDRESS_ERROR` was OFF
+>
+> **Root cause:** the DLP interpreter dispatches token-handlers via `jsr (A1)`
+> with NO bounds check (`0x34C90`), *deliberately relying on the 68000
+> address-error exception* to catch a malformed token. When the startup DLP
+> resolves a global routine (`__PKIP`) whose record offset points past the
+> populated records, the token (`0x2FF`) indexes past the dispatch table and
+> `A1` becomes a garbage **odd** address (`0x49463b53`). On real hardware
+> `jsr (odd)` faults → address-error vector 3 (ROM `0x3B16`, a full
+> exception-dispatch table) → the firmware aborts the bad DLP step and
+> continues. Our Musashi build had `M68K_EMULATE_ADDRESS_ERROR M68K_OPT_OFF`
+> (an early-bring-up simplification), so the bad `jsr` executed garbage →
+> "derail". *That* is why every ROM constant matched real hardware yet only we
+> crashed (the long contradiction documented below).
+>
+> **Fix:** `third_party/musashi/m68kconf.h` → `M68K_EMULATE_ADDRESS_ERROR
+> M68K_OPT_ON`. The boot no longer derails; it runs the full startup DLP and
+> **renders the operating UI** (status annunciators, ref-level/atten fields,
+> graticule — see `screens/boot_operating_ui.png`) and processes the
+> front-panel key flag (`bc67` set+cleared). Full suite green incl. the
+> Musashi↔Unicorn DiffCores gate. `TestMachineBootScreen` revived with a new
+> golden. The chain below is kept as the (correct) RE record that led here.
+
+**Original status (superseded):** mechanism isolated; fix pending. The blocker
+*after* the A16 analog gate ([ANALOG_BUS_MODEL.md](ANALOG_BUS_MODEL.md)) — the
+boot advances into the **startup-DLP execution** and derailed at ~49M cycles.
+Probe: `cmd/naturalkey -derail`/`-dlptrace`.
 
 > **Correction (supersedes an earlier draft of this doc):** an earlier version
 > claimed the root cause was `$a02 = 0xFFFFFFFF` ("empty DLP" sentinel). That was

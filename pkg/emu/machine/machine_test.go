@@ -12,7 +12,6 @@ import (
 	"github.com/windhooked/HP859X_SA/pkg/emu/romloader"
 )
 
-
 // eepromDir returns the absolute path to hp8593a_eeproms/ regardless of where
 // the test binary is run from.
 func eepromDir(t *testing.T) string {
@@ -173,14 +172,13 @@ func TestMachineBootBulk(t *testing.T) {
 // stall point that causes the firmware to re-enter the checksum, or a stray
 // MMIO read that escapes into the cal region) is flagged immediately.
 func TestCalNVRAMBootAccessPattern(t *testing.T) {
-	t.Skip("Re-baseline pending: the A16 analog-bus conversion model " +
-		"(docs/ANALOG_BUS_MODEL.md) lets the 100M faithful boot advance past " +
-		"the ROM-checksum/march phase into cal usage + startup DLP, which " +
-		"re-reads cal-NVRAM offsets (the 'each offset read exactly once' " +
-		"invariant was an artefact of the firmware freezing at the analog " +
-		"gate). The boot then derails on a DLP-interpreter dispatch at ~49M " +
-		"(see ANALOG_BUS_MODEL.md §12). Re-derive the access pattern once the " +
-		"startup DLP completes.")
+	t.Skip("Obsolete invariant — re-derive: with the A16 analog-bus model " +
+		"(docs/ANALOG_BUS_MODEL.md) + M68K_EMULATE_ADDRESS_ERROR " +
+		"(docs/DLP_STARTUP_DERAIL.md) the boot now runs the full startup DLP " +
+		"and renders the operating UI, reading cal-NVRAM many times for cal/" +
+		"display setup. The 'each offset read exactly once' pattern was an " +
+		"artefact of the firmware freezing at the ROM checksum; re-derive the " +
+		"new (richer) cal-NVRAM access pattern from the booted instrument.")
 	m := newMachine(t)
 
 	type counts struct{ reads, writes int }
