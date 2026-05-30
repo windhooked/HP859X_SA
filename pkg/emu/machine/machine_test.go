@@ -159,6 +159,49 @@ func TestMachineBootBulk(t *testing.T) {
 		finalPC, totalCycles, targetPC)
 }
 
+// TestMachineOperatingLoopNoReboot — regression guard for the corrupt-dump
+// reboot loop. The bad Opt-027 EEPROM dump left the __PKIP power-up DLP routine
+// blank, which derailed into a 68000 address error → the firmware rebooted and
+// re-ran POST (destructive march RAM test) over live RAM, in an infinite loop
+// (see docs/DLP_STARTUP_DERAIL.md). On the complete Rev L 98.06.15 image the
+// firmware must boot ONCE and stay in its operating loop. This test boots, then
+// runs additional cycles asserting the firmware never re-enters the boot
+// prologue / POST ROM-checksum, and that the sweep state in live RAM is never
+// clobbered by the 0x5555/0xAAAA march pattern.
+func TestMachineOperatingLoopNoReboot(t *testing.T) {
+	if testing.Short() {
+		t.Skip("boots to the operating loop then runs ~30M more cycles")
+	}
+	m := newMachine(t)
+	m.BootToOperating(60_000_000) // reach the operating loop
+
+	const chunk = 2000
+	for i := 0; i < 15000; i++ { // ~30M cycles past boot
+		m.CPU.Run(chunk)
+		pc := m.CPU.Reg(cpu.PC)
+		// The POST ROM-checksum inner loop is long, so a reboot is reliably
+		// caught here even with chunk-granularity sampling.
+		if pc >= 0x454A && pc <= 0x456A {
+			t.Fatalf("firmware re-entered POST ROM-checksum at PC=%#06X after %d post-boot cycles "+
+				"— reboot loop (is the firmware dump complete?)", pc, i*chunk)
+		}
+		if pc >= 0x3998 && pc <= 0x39D0 {
+			t.Fatalf("firmware re-entered boot prologue at PC=%#06X after %d post-boot cycles — reboot loop",
+				pc, i*chunk)
+		}
+		if i%5 == 0 {
+			m.CPU.SetIRQ(5)
+			m.CPU.Run(400)
+			m.CPU.SetIRQ(0)
+		}
+	}
+	// The sweep-handler pointer $bf34 lives in the march-test range; if POST ran
+	// over live RAM it would be clobbered to the 0x5555/0xAAAA fill pattern.
+	if v := m.Bus.Read(0xFFBF34, bus.Long); v == 0x55555555 || v == 0xAAAAAAAA {
+		t.Fatalf("sweep state $bf34 = %#08X (march fill pattern) — POST ran over live RAM (reboot loop)", v)
+	}
+}
+
 // TestCalNVRAMBootAccessPattern — Rev L regression test for what the firmware
 // actually does with the cal NVRAM during the boot to operating loop. Measured
 // via cmd/caltrace (faithful 100M-cycle boot): the firmware reads every byte of
