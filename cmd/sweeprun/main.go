@@ -162,7 +162,14 @@ func main() {
 			fmt.Printf("sweep armed at chunk %d (~%d cycles); bf30=%08X bf34=%08X\n",
 				chunk, chunk*chunkCycles, rd(0xFFBF30), rdBF34())
 		}
-		if armed && chunk%irq6PeriodArmed == 0 {
+		// Only capture while the trace buffer isn't full (A5 < bf30). The IRQ6
+		// capture handler does NOT stop itself at end-of-sweep — it sets the
+		// sweep-done flag (befa bit13) but leaves bf34=0x40B8, so firing IRQ6
+		// past A5>=bf30 overruns the buffer. Gating on A5<bf30 lets the sweep
+		// complete cleanly so the firmware processes sweep-done (draws the trace
+		// + re-arms with A5 reset).
+		bufNotFull := m.CPU.Reg(cpu.A5) < rd(0xFFBF30)
+		if armed && bufNotFull && chunk%irq6PeriodArmed == 0 {
 			// Synthetic ADC sample: noise floor + peak at sample position 200.
 			v := uint32(0x0140)
 			d := samplePos - 200
