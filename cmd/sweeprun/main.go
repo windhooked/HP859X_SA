@@ -35,7 +35,11 @@ func main() {
 		out = os.Args[2]
 	}
 
-	rom, err := romloader.LoadDir("hp8593a_eeproms")
+	romDir := "hp8593a_eeproms"
+	if v := os.Getenv("ROM_DIR"); v != "" {
+		romDir = v
+	}
+	rom, err := romloader.LoadDir(romDir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

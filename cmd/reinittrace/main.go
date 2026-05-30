@@ -36,7 +36,11 @@ func main() {
 		}
 	}
 
-	rom, err := romloader.LoadDir("hp8593a_eeproms")
+	romDir := "hp8593a_eeproms"
+	if v := os.Getenv("ROM_DIR"); v != "" {
+		romDir = v
+	}
+	rom, err := romloader.LoadDir(romDir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -129,7 +133,7 @@ func main() {
 		tok := m.Bus.Read(recPtr, bus.Word)
 		off := (recPtr - m.Bus.Read(0x0A50, bus.Long)) & 0xFFFF
 		traj = append(traj, disp{lastIdx, off, tok, m.Bus.Read(0xFFA630, bus.Word), m.Bus.Read(0xFFA632, bus.Word)})
-		return tok >= 0x200 // out-of-range token ⇒ derail dispatch
+		return tok >= 0x290 // past the dispatch-table limit ⇒ real derail (0x2FF)
 	}
 
 	// Inject IRQ5 every ~irq5Steps single-steps to keep the timer advancing

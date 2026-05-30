@@ -1,4 +1,35 @@
-# DLP startup-execution derail — STILL OPEN (causes a reboot loop)
+# DLP startup-execution derail — RESOLVED: corrupt Opt-027 firmware dump
+
+> ## ✅ ROOT CAUSE (2026-05-30, final) — the Opt-027 EEPROM dump is incomplete
+>
+> After fully reverse-engineering the DLP VM (see
+> [DLP_VM_ARCHITECTURE.md](DLP_VM_ARCHITECTURE.md)), the derail traced to one
+> undefined routine, `__PKIP`, whose record body is `0x02FF` padding. Comparing
+> the archived firmware revisions (`cmd/reinittrace` + a HEX diff) showed the
+> record region `0x71682–0x71D76` differs by 443 bytes between our **Opt-027**
+> dump and **plain Rev L 98.06.15** — and in Opt-027 the **U24 (MSB) chip is
+> ~half unprogrammed (`0xFF`): 385/768 bytes** in `0x71700+`. Plain Rev L has
+> real data there (1/768 `0xFF`). So our **Opt-027 image is a bad/incomplete
+> EEPROM dump**, not a firmware that genuinely lacks `__PKIP`.
+>
+> **Proof:** booting **plain Rev L 98.06.15** (`ROM_DIR=…/Rev. L 98.06.15`):
+> `cmd/reinittrace` runs 40M single-steps with **no derail** (final PC `0x2281A`,
+> operating code); `cmd/sweeprun` 200M cycles shows **no reboot loop** —
+> `corruptAt=-1`, `marchHitsPostArm=0`, `checksumHits=0`, the sweep state stays
+> valid (`bf30=0x2FD82A bf34=0x40B8`), `A5=0x301FF2` is a valid trace-buffer
+> pointer, and the top PC pages are the real operating loop (`0x22x/0x32x`), not
+> the POST/boot churn. Opt-027 derails at `0x34C90` as before.
+>
+> **So the entire "reboot loop" / sweep-keys-UI blocker was a corrupt firmware
+> dump.** Fix: use a complete image — plain Rev L 98.06.15 (in the tree), or
+> re-dump the Opt-027 U24 chip from the real instrument. The address-error
+> emulation (`M68K_EMULATE_ADDRESS_ERROR`) is correct and stays; with a good
+> image there is no derail to recover from. The VM/derail analysis below remains
+> the (correct) RE record that led here.
+
+---
+
+# (historical) DLP startup-execution derail — reboot loop on the bad dump
 
 > ## ⚠️ CORRECTION (2026-05-30, later) — the derail is NOT resolved; it reboots
 >
