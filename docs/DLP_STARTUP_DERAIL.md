@@ -99,12 +99,32 @@ a raw pointer bug:
   name lookup (`fcn.320fe`) falls back to the ROM name table → the filler record
   → token `0x2FF` → derail → reboot. `__VCOM` works only because its record
   happens to live in the populated part of the ROM table.
-- **Next step (fresh investigation):** find where boot is supposed to populate
-  the RAM DLP symbol table / compile the factory `__` routines into records, and
-  why it doesn't (a missed/mis-modelled step that leaves "EMPTY DLP MEM"). That
-  is the fix. (The earlier `M68K_EMULATE_ADDRESS_ERROR` change only changed the
-  *outcome* of the unresolved-global `jsr` from "execute garbage" to
-  "address-error → reboot loop"; see the correction banner at the top.)
+- **Refinement (`fcn.320fe` lookup instrumentation):** the name lookup uses two
+  tables — a RAM symbol table at `0xFFBF66` (user vars `__A..__Z`, count grows as
+  they declare) and a ROM built-in table at `0x08001E`. `__PKIP` is looked up in
+  the **ROM built-in table and IS found** (`fcn.320fe` returns `-1` only on
+  miss; we get `idx=0x6317`, not `-1`). Its record offset `0x681` is programmed
+  in ROM (at `0x7EDF6`) but points into the **intentional `0x02FF` padding** that
+  fills the record region's tail up to the dispatch table `0x71D76`. So
+  `__PKIP`'s *name + offset* are in ROM, but its *body* is **not** in the ROM
+  record region (base `$a50=0x71682`) — only `__VCOM`'s (and the earlier
+  routines') bodies are.
+- **Ironclad conclusion:** this is all fixed ROM, so real hardware resolves
+  `__PKIP` to the same blank record and would take the same address error — and
+  the recovery reboot is deterministic (`0x2B3A` returns `ROM[0xB8]=0x7FFF0000`,
+  always `≥0` → `bra 0x3998`). Therefore **real HW does not reach this `__PKIP`
+  dispatch with the blank record.** Either (a) the factory routine *bodies* are
+  loaded/compiled into the record region (or a RAM shadow of `$a50`) by a boot
+  step we don't model — leaving ours blank; or (b) execution diverges before
+  `__PKIP` (e.g. `__VCOM` does more than declare vars). The `$a50`/`$a02` bases
+  are ROM constants in *our* run, so (a) implies a RAM-relocated base on real HW.
+- **Next step (needs fresh trace or the real-HW oracle):** trace `__VCOM`'s body
+  (handlers `0x5FBDE`/`0x5FC9A`) to see whether it compiles/loads the following
+  routines, and check whether `$a50` is meant to be RAM-relocated for built-ins.
+  The GPIB oracle (`pkg/859x/dump.py`, cable ~3 weeks out) would settle it by
+  dumping the live record region. (The earlier `M68K_EMULATE_ADDRESS_ERROR`
+  change only changed the *outcome* of the blank-routine `jsr` from "execute
+  garbage" to "address-error → reboot loop"; see the correction banner.)
 
 ## The chain (all PCs from docs/rom.asm, Rev L)
 

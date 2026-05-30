@@ -98,9 +98,28 @@ func main() {
 	type disp struct{ idx, off, tok, head, tail uint32 }
 	var traj []disp
 	var lastIdx uint32 // D0 (idx) captured at fcn.331cc entry 0x331CC
+	type lookup struct {
+		table, count uint32
+		name         string
+	}
+	var lookups []lookup // fcn.320fe (name lookup) table + name searched
 	isTrigger := func(pc uint32) bool {
 		if pc == 0x331CC {
 			lastIdx = m.CPU.Reg(cpu.D0)
+			return false
+		}
+		if pc == 0x3212C { // A4=table, A2=name string ptr both loaded
+			a4 := m.CPU.Reg(cpu.A4)
+			a2 := m.CPU.Reg(cpu.A2)
+			nm := ""
+			for k := uint32(0); k < 10; k++ {
+				b := byte(m.Bus.Read(a2+k, bus.Byte))
+				if b == 0 || b == ';' || b < 0x20 || b > 0x7e {
+					break
+				}
+				nm += string(b)
+			}
+			lookups = append(lookups, lookup{a4, m.Bus.Read(a4+0x80, bus.Long), nm})
 			return false
 		}
 		if pc != 0x34C90 {
@@ -190,6 +209,19 @@ func main() {
 				c := changes[k]
 				fmt.Printf("    pc=%06X  head %04X→%04X  tail %04X→%04X\n",
 					c.pc, c.oldH, c.newH, c.oldT, c.newT)
+			}
+			fmt.Printf("  --- last 8 name lookups fcn.320fe (table, count@+0x80, D0in) ---\n")
+			ls := 0
+			if len(lookups) > 8 {
+				ls = len(lookups) - 8
+			}
+			for k := ls; k < len(lookups); k++ {
+				l := lookups[k]
+				kind := "ROM"
+				if l.table >= 0xF00000 || (l.table >= 0xFC0000 && l.table < 0xFF0000) {
+					kind = "RAM"
+				}
+				fmt.Printf("    table=%06X(%s) count@+80=%08X name=%q\n", l.table, kind, l.count, l.name)
 			}
 			dumpRing(ring)
 			return
