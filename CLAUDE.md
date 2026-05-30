@@ -33,7 +33,26 @@ Two cgo dependencies:
 
 ## Firmware
 
-**Canonical image: Rev L 98.06.15 Opt-027** (1 MB, 4 × 27C020 EEPROMs). Sourced from `hp8593a_eeproms/*.HEX` (Intel HEX format, parsed on the fly by [pkg/emu/romloader/](pkg/emu/romloader/)). Y2K-compliant; ships in the 08590-60422 firmware kit.
+**Canonical image: Rev L 98.06.15** (1 MB, 4 × 27C020 EEPROMs). Sourced from `hp8593a_eeproms/*.HEX` (Intel HEX format, parsed on the fly by [pkg/emu/romloader/](pkg/emu/romloader/)). Reset vector SP=`0xFF948A`, PC=`0x1B34`.
+
+> **Firmware-dump note (2026-05-30):** the canonical files were switched FROM the
+> **Opt-027** dump TO **plain Rev L 98.06.15** because the **Opt-027 EEPROM dump is
+> corrupt** — its U24 (MSB) chip is ~half unprogrammed (`0xFF`) in the DLP record
+> region `0x70100–0x71FFE` (2039 bytes, all in that range; reset vector + the rest
+> of the image are byte-identical to plain Rev L). The corruption blanked the
+> compiled body of the factory power-up DLP routine `__PKIP` → out-of-range
+> dispatch token `0x2FF` → 68000 address error → the firmware's own recovery
+> **rebooted the instrument** → POST's destructive RAM test wiped live state → an
+> infinite **boot/reboot loop** that masqueraded for many sessions as a "DLP
+> derail / DriveOperatingTick blocker." Plain Rev L has `__PKIP` intact and boots
+> straight to the operating loop with no derail. The bad Opt-027 dump is archived
+> under `hp8593a_eeproms/Firmwares/extracted/Rev. L 98.06.15-Opt. 027/`; re-dump
+> the U24 chip from the real instrument to restore Y2K Opt-027. Tools take a
+> `ROM_DIR` env override to load any revision. Full forensics:
+> [docs/DLP_STARTUP_DERAIL.md](docs/DLP_STARTUP_DERAIL.md) +
+> [docs/DLP_VM_ARCHITECTURE.md](docs/DLP_VM_ARCHITECTURE.md). **Lesson: check a
+> firmware dump for unprogrammed `0xFF` runs in code/data regions before deep-RE'ing
+> an apparent firmware bug.**
 
 The earlier **17.12.90** development build (4 × 27C010 = 512 KB raw .bin) is archived under [hp8593a_eeproms/legacy_17.12.90/](hp8593a_eeproms/legacy_17.12.90/). All Rev L-specific firmware facts (PCs, IRQ handler addresses) differ from 17.12.90 — see the "Stale 17.12.90 PCs" notes below.
 
