@@ -81,15 +81,30 @@ a raw pointer bug:
   outer source. The outer source's next token then resolves the global
   **`__PKIP`** to record `idx=0x6317` → offset `0x681` → `recPtr=0x71D03` (ROM
   filler) → token `0x2FF` → garbage `jsr`.
-- So `__PKIP` is **referenced but never declared** — only `__A..__Z` were. The
-  name→record resolution (`fcn.320fe` hash lookup) returns an out-of-range
-  record index for the missing symbol. **Open question / next step:** is
-  `__PKIP` a *built-in* global that should already be in a predefined ROM symbol
-  table our lookup isn't finding, or should an earlier boot step have declared
-  it? That is the remaining gap to close. (The earlier `M68K_EMULATE_ADDRESS_ERROR`
-  change only changed the *outcome* of this unresolved-global `jsr` from
-  "execute garbage" to "address-error → reboot loop"; see the correction banner
-  at the top.)
+- So `__PKIP` is **referenced but its record body is empty**. Comparing the ROM
+  records confirms it:
+  - `__VCOM` (name @`0x7F044`) → record-offset `0x479` → `recPtr=0x71AFB`, whose
+    words are real tokens `01 57 / 01 58 / 01 59 / 01 ff` → handlers
+    `0x158→0x5FBDE`, `0x159→0x5FC9A` (valid; `__VCOM` executes).
+  - `__PKIP` (name @`0x7EDEE`) → record-offset `0x681` → `recPtr=0x71D03`, which
+    is inside a **`0x02FF` filler gap** (`ff 02 ff 02 …`, i.e. MSB chip `0xFF`
+    unprogrammed / LSB chip `0x02`) that pads up to the dispatch table at
+    `$a74=0x71D76`. Token `0x2FF` → `dispatch[0x71D76 + 0x2FF*4]=0x72972` →
+    `0x49463B53` (off the table, into source text).
+- **Confirmed root:** the factory power-up routines listed in the outer startup
+  source (`__PKIP;__SOONIP;__PZREMCMDS;__FFTONIP;__ACPPWRUP;__GTGDRV;__WN_VARDEF;…`)
+  have **names in the ROM table but empty (filler) record bodies**. They are
+  meant to resolve through a **RAM DLP symbol table populated during boot**; the
+  screen literally shows **"EMPTY DLP MEM"**, so that table is empty and the
+  name lookup (`fcn.320fe`) falls back to the ROM name table → the filler record
+  → token `0x2FF` → derail → reboot. `__VCOM` works only because its record
+  happens to live in the populated part of the ROM table.
+- **Next step (fresh investigation):** find where boot is supposed to populate
+  the RAM DLP symbol table / compile the factory `__` routines into records, and
+  why it doesn't (a missed/mis-modelled step that leaves "EMPTY DLP MEM"). That
+  is the fix. (The earlier `M68K_EMULATE_ADDRESS_ERROR` change only changed the
+  *outcome* of the unresolved-global `jsr` from "execute garbage" to
+  "address-error → reboot loop"; see the correction banner at the top.)
 
 ## The chain (all PCs from docs/rom.asm, Rev L)
 
