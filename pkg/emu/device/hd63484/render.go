@@ -23,12 +23,20 @@ func (c *Chip) RenderFrame() *image.RGBA {
 		dstBase := y * stride
 		for x := 0; x < DisplayWidth; x++ {
 			off := dstBase + x*4
-			b := c.vram[rowBase+(x>>3)]
-			if b&(1<<uint(x&7)) != 0 {
+			mask := byte(1 << uint(x&7))
+			idx := rowBase + (x >> 3)
+			switch {
+			case c.vram[idx]&mask != 0:
+				// Bright foreground: graticule, trace, glyphs, dots.
 				pix[off] = fgColor.R
 				pix[off+1] = fgColor.G
 				pix[off+2] = fgColor.B
-			} else {
+			case c.bgVram[idx]&mask != 0:
+				// Dim background: the firmware's faint dot texture.
+				pix[off] = bgPaintColor.R
+				pix[off+1] = bgPaintColor.G
+				pix[off+2] = bgPaintColor.B
+			default:
 				pix[off] = 0
 				pix[off+1] = 0
 				pix[off+2] = 0

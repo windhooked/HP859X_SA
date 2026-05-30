@@ -171,8 +171,13 @@ func TestRasterModeTrigger(t *testing.T) {
 		t.Errorf("Paints=%d, want 1", c.Paints)
 	}
 	// vram[0..1] should hold 0x4400 little-endian.
-	if c.vram[0] != 0x00 || c.vram[1] != 0x44 {
-		t.Errorf("vram[0..1] = %02X %02X, want 00 44", c.vram[0], c.vram[1])
+	// Raster bursts are the firmware's faint background dot texture, so they
+	// land in the BACKGROUND plane (bgVram), not the bright foreground vram.
+	if c.bgVram[0] != 0x00 || c.bgVram[1] != 0x44 {
+		t.Errorf("bgVram[0..1] = %02X %02X, want 00 44", c.bgVram[0], c.bgVram[1])
+	}
+	if c.vram[0] != 0x00 || c.vram[1] != 0x00 {
+		t.Errorf("vram[0..1] = %02X %02X, want 00 00 (raster must not touch foreground)", c.vram[0], c.vram[1])
 	}
 }
 

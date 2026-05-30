@@ -117,10 +117,12 @@ func (dec *decoder) feedRaster(c *Chip, w uint16) {
 		return
 	}
 	// VRAM raster-write path. Little-endian within the word — bit 0 = leftmost
-	// pixel of the 16-pixel run.
-	if c.memPos+1 < len(c.vram) {
-		c.vram[c.memPos] = byte(w & 0xFF)
-		c.vram[c.memPos+1] = byte(w >> 8)
+	// pixel of the 16-pixel run. Bulk raster bursts are the firmware's faint
+	// background dot texture (the 0x4400 fill), so they land in the BACKGROUND
+	// plane (bgVram), rendered dim under the bright foreground (see render.go).
+	if c.memPos+1 < len(c.bgVram) {
+		c.bgVram[c.memPos] = byte(w & 0xFF)
+		c.bgVram[c.memPos+1] = byte(w >> 8)
 	}
 	c.memPos += 2
 	c.PaintWords++

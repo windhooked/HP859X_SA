@@ -86,8 +86,17 @@ type Chip struct {
 
 	// External video RAM, 64 KB, treated as a packed 1bpp framebuffer of
 	// PaintRowPixels × PaintHeight. See setVRAMPixel / clearVRAMPixel for
-	// the bit-addressing convention.
+	// the bit-addressing convention. This is the FOREGROUND plane: vector
+	// draws (graticule, trace), glyph blits, and dots all land here.
 	vram [VRAMSize]byte
+
+	// bgVram is the BACKGROUND plane: the firmware paints a faint full-screen
+	// dot texture via bulk raster bursts (the 0x4400 fill). Routing it to a
+	// separate plane lets RenderFrame draw it at a dim intensity (bgPaintColor)
+	// UNDER the bright foreground, instead of letting the uniform 0x4400 word
+	// swamp the screen with full-brightness vertical stripes. Same bit-packing
+	// and geometry as vram.
+	bgVram [VRAMSize]byte
 
 	// Memory-access pointer for raster bursts (advances after each data-
 	// port write in raster mode). BYTE offset into vram.
