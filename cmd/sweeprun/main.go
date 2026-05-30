@@ -205,8 +205,17 @@ func main() {
 		fmt.Printf(" %04X:%d", pages[i].page, pages[i].count)
 	}
 	fmt.Println()
-	fmt.Printf("  draw counts: moves=%d glyphs=%d lines=%d rects=%d dots=%d\n",
-		d.Moves, d.Glyphs, d.Lines, d.Rects, d.Dots)
+	fmt.Printf("  draw counts: moves=%d glyphs=%d lines=%d rects=%d dots=%d paints=%d paintWords=%d\n",
+		d.Moves, d.Glyphs, d.Lines, d.Rects, d.Dots, d.Paints, d.PaintWords)
+	// VRAM pattern check: dump 24 bytes of two adjacent rows. If identical →
+	// uniform background fill renders as vertical stripes; if they differ → a
+	// row-varying (dot) pattern.
+	vram := d.Chip.VRAM()
+	const rb = 128
+	for _, y := range []int{120, 121, 122} {
+		base := y * rb
+		fmt.Printf("  vram row %d: % 02x\n", y, vram[base:base+24])
+	}
 
 	if err := os.MkdirAll("screens", 0o755); err != nil {
 		fmt.Fprintln(os.Stderr, err)
