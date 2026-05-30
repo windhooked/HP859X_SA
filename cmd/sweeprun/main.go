@@ -82,6 +82,10 @@ func main() {
 	// real HW, which runs the test with interrupts masked).
 	protectSelfTest := os.Getenv("SWEEP_PROTECT_SELFTEST") == "1"
 	inSelfTest := func(pc uint32) bool { return pc >= 0x4490 && pc <= 0x47F6 }
+	// fireIRQ1: also inject IRQ1 (sweep-step) paired with IRQ6 (capture) — the
+	// real sweep fires them together. Experiment to see whether the firmware
+	// then bounds A5 to the buffer and draws the trace.
+	fireIRQ1 := os.Getenv("SWEEP_IRQ1") == "1"
 
 	sweepArmedAt := -1
 	samplePos := 0
@@ -170,6 +174,13 @@ func main() {
 			}
 			m.Bus.Write(0xFFF200, bus.Word, v)
 			samplePos = (samplePos + 1) % 401
+			// IRQ1 (sweep-step) first, then IRQ6 (sample capture) — the real
+			// sweep fires them as a coordinated pair. SWEEP_IRQ1=1 enables it.
+			if fireIRQ1 {
+				m.CPU.SetIRQ(1)
+				m.CPU.Run(irqServiceCost)
+				m.CPU.SetIRQ(0)
+			}
 			m.CPU.SetIRQ(6)
 			m.CPU.Run(irqServiceCost)
 			m.CPU.SetIRQ(0)
