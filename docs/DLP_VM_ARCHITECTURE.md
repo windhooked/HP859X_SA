@@ -122,6 +122,45 @@ The fastest disambiguation is the **GPIB oracle** (`pkg/859x/dump.py`): dump the
 live source stack / `$a634` / the record region on a running instrument and
 compare. Statically, hypothesis (1) is the cleanest next probe.
 
+## How options / model are detected & configured (2026-05-30)
+
+Three mechanisms, all of which we currently leave blank/default — strong support
+for hypothesis 1:
+
+1. **Hardware option boards** — presence bits at `0xFFF614` / `0xFFF616`, read in
+   POST (`0x4990`: `tst.b $f614 → bset bit13 $bb2c`; `tst.b $f616 → bit12`).
+   `$bb2c` is the board-config word; `$f618` is written back. We don't model
+   these registers → default read `0` → "no boards installed".
+2. **Model identity = `IDNUM` / `IDLET`** — the DLP queries them everywhere to
+   select model-specific behaviour, e.g. (verbatim ROM DLP source):
+   - `IF(IDNUM>8593);MN98;ELSE MN7;ENDIF;` (`0x73E99`)
+   - `IF(IDNUM==8590);{__A=5E6+(SP*.01);};ELSE{…}` (`0x63268`)
+   - `IF(IDNUM<8594||IDNUM==8596);HNLOCK2;ENDIF;` (`0x73C80`)
+   - `IF(IDLET>66);__MN[16],SYNCMODE…` (66 = `'B'`)
+   `IDNUM` is the model number (8590–8596); `IDLET` the model letter.
+3. **Config array `__MN[]` + `CONFIG INIT` DLP** — `0x74D9B`:
+   `…CONFIG INIT;__MN[4];PRNTADRS1;PLT0;IF(IDLET>66);…`, and option display gated
+   by `IF(__MN[10]==0);KL'SHOW|OPTIONS';ELSE…` (`0x7A0FA`). `__MN[]` is the
+   instrument-config array (model/options/personality), populated at boot from
+   NVRAM / straps; `IDNUM`/`IDLET` derive from it. A CalRAM config byte
+   `$befc` (`= [0x2FC000]`, read at boot `0x3A22`) feeds hardware control
+   (`$f128`), not the model.
+
+**Implication for the derail:** the entire instrument personality is
+`IDNUM`/`IDLET`/`__MN[]`-driven, and we populate none of it (blank CalRAM/NVRAM,
+unmodelled presence registers) — so the firmware cannot identify itself as an
+8593A and the DLP runs a wrong/default path. `__PKIP` is an **uncompiled routine
+in this build** (its name-table offset `0x681` overruns the populated records by
+landing in the `0x02FF` padding just past `__GTGDRV`; the no-op routines
+`__SOONIP`/`__ACPPWRUP` instead have valid `0x01FF` "empty" records). Reaching it
+is the symptom of the mis-identified/blank config.
+
+**Fix locus (hypothesis 1, now concrete):** find where `__MN[]` / `IDNUM` /
+`IDLET` are first populated at boot — from a cal-NVRAM config block (`0x200000`),
+the CalRAM (`0x2FC000`), or a model strap register — and set them for an 8593A
+(`IDNUM=8593`, appropriate `IDLET`, `__MN[]`). The GPIB oracle can dump the live
+`__MN[]`/`IDNUM` from a real unit for ground truth.
+
 ## Tooling
 
 `cmd/reinittrace` single-steps from the armed-sweep state with a ring buffer and
