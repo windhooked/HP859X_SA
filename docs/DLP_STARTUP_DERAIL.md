@@ -1,27 +1,40 @@
-# DLP startup-execution derail — RESOLVED (68000 address-error emulation)
+# DLP startup-execution derail — STILL OPEN (causes a reboot loop)
 
-> ## ✅ RESOLVED (2026-05-30) — `M68K_EMULATE_ADDRESS_ERROR` was OFF
+> ## ⚠️ CORRECTION (2026-05-30, later) — the derail is NOT resolved; it reboots
 >
-> **Root cause:** the DLP interpreter dispatches token-handlers via `jsr (A1)`
-> with NO bounds check (`0x34C90`), *deliberately relying on the 68000
-> address-error exception* to catch a malformed token. When the startup DLP
-> resolves a global routine (`__PKIP`) whose record offset points past the
-> populated records, the token (`0x2FF`) indexes past the dispatch table and
-> `A1` becomes a garbage **odd** address (`0x49463b53`). On real hardware
-> `jsr (odd)` faults → address-error vector 3 (ROM `0x3B16`, a full
-> exception-dispatch table) → the firmware aborts the bad DLP step and
-> continues. Our Musashi build had `M68K_EMULATE_ADDRESS_ERROR M68K_OPT_OFF`
-> (an early-bring-up simplification), so the bad `jsr` executed garbage →
-> "derail". *That* is why every ROM constant matched real hardware yet only we
-> crashed (the long contradiction documented below).
+> A subsequent instruction-level trace (`cmd/reinittrace`, single-stepping from
+> the armed-sweep state) proved the address-error change **did not fix the DLP
+> derail — it converted it into a full instrument REBOOT LOOP.** The exact
+> captured path:
 >
-> **Fix:** `third_party/musashi/m68kconf.h` → `M68K_EMULATE_ADDRESS_ERROR
-> M68K_OPT_ON`. The boot no longer derails; it runs the full startup DLP and
-> **renders the operating UI** (status annunciators, ref-level/atten fields,
-> graticule — see `screens/boot_operating_ui.png`) and processes the
-> front-panel key flag (`bc67` set+cleared). Full suite green incl. the
-> Musashi↔Unicorn DiffCores gate. `TestMachineBootScreen` revived with a new
-> golden. The chain below is kept as the (correct) RE record that led here.
+> ```
+> 034C94  jsr (A1)            ; A1 = garbage 0x49463B53 ("IF;S" = DLP source text)
+> 003B18  (addr-error vec 3)  ; jsr to a non-existent/odd long → address error
+> 003BA6 → 002B3A             ; bus/addr-error dispatch + check
+> 003DA4  move.w #$b902,$bff8  ; recovery: set restart-magic
+> 003DB8  bra 0x3998          ; ← REBOOT (boot prologue)
+> 003998 … 0039BC  jsr $43ba  ; → POST: destructive RAM test fills 0xFEC000–0xFFC000
+> ```
+>
+> So the firmware's *own* address-error handler **reboots the instrument** on
+> the bad DLP `jsr`. Every ~19M cycles the startup DLP re-derails → address
+> error → reboot → POST re-runs the destructive march RAM test over live RAM →
+> the sweep/trace state (`$bf30/$bf34/$befa`, the IRQ6 write pointer `A5`) is
+> wiped. The "operating UI" in `screens/boot_operating_ui.png` is genuine but
+> **re-rendered fresh on each boot pass** before the next derail — it is a
+> boot loop, not stable operation. This also explains the unstable UI, the
+> flashing FAIL annunciators, and why the sweep can never fill a trace.
+>
+> **The address-error emulation is still correct and kept** (`m68kconf.h`
+> `M68K_EMULATE_ADDRESS_ERROR M68K_OPT_ON` — it is faithful HW behaviour). But
+> the real bug below — the DLP VM's `idx` advancing past the factory-DLP
+> program — remains the open blocker. Fixing it is what makes the instrument
+> stay in stable operation (and unblocks sweep/trace + front-panel keys).
+>
+> _Superseded banner (kept for history):_ the earlier text claimed "the boot no
+> longer derails; renders the operating UI … processes the front-panel key
+> flag." That observation was real but mis-interpreted as stable operation; it
+> is actually one pass of the reboot loop.
 
 **Original status (superseded):** mechanism isolated; fix pending. The blocker
 *after* the A16 analog gate ([ANALOG_BUS_MODEL.md](ANALOG_BUS_MODEL.md)) — the
@@ -47,6 +60,36 @@ out of range** of the factory DLP's offset table/records, so `recPtr` lands in
 the `ff 02` filler before the dispatch table (`0x71D03`), the token there
 (`0x2FF`) indexes *past* the dispatch table into DLP source text
 (`ROM[0x72972]="IF;S"=0x49463B53`), and `jsr (garbage)` derails.
+
+## Source-include stack + unresolved-global root (2026-05-30, `cmd/reinittrace`)
+
+Single-stepping the dispatch trajectory into the derail (`cmd/reinittrace`)
+pinned the *semantic* cause — it is an **unresolved DLP global (`__PKIP`)**, not
+a raw pointer bug:
+
+- The DLP runtime keeps a **source-include stack**: depth at `$a634`, 10-byte
+  entries `(size, base, head, tail)` at `0xFFA636 + 10·n`. The pop is at ROM
+  `0x34690`–`0x346C4` (`head==tail` ⇒ `subq.w #1,$a634`; reload `$a62a..$a632`
+  from the parent entry).
+- At the derail the stack is: **n=1** = `base=0x05FB0E head=0xCB tail=0xD0`
+  (the `VRD __A;…VRD __Z;NV` source), **n=0** = `base=0x727CA head=0x06
+  tail=0x4D` (the **outer** factory startup source, ASCII `"__VCOM;_PKI…"`).
+- Trajectory: the outer source (`0x727CA`) **includes** the `VRD __A..__Z;NV`
+  source (`0x5FB0E`); that include declares `__A..__Z` (the token-`0x12F`
+  identifier-resolve handler runs ~23× with a constant `idx=0x6787` while head
+  walks `0x1F→0xCF`), is consumed (`head→tail=0xD0`), and **pops** back to the
+  outer source. The outer source's next token then resolves the global
+  **`__PKIP`** to record `idx=0x6317` → offset `0x681` → `recPtr=0x71D03` (ROM
+  filler) → token `0x2FF` → garbage `jsr`.
+- So `__PKIP` is **referenced but never declared** — only `__A..__Z` were. The
+  name→record resolution (`fcn.320fe` hash lookup) returns an out-of-range
+  record index for the missing symbol. **Open question / next step:** is
+  `__PKIP` a *built-in* global that should already be in a predefined ROM symbol
+  table our lookup isn't finding, or should an earlier boot step have declared
+  it? That is the remaining gap to close. (The earlier `M68K_EMULATE_ADDRESS_ERROR`
+  change only changed the *outcome* of this unresolved-global `jsr` from
+  "execute garbage" to "address-error → reboot loop"; see the correction banner
+  at the top.)
 
 ## The chain (all PCs from docs/rom.asm, Rev L)
 

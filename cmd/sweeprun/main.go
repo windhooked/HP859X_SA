@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"image/png"
 	"os"
+	"sort"
 	"strconv"
 
 	"github.com/windhooked/HP859X_SA/internal/emutest"
@@ -62,17 +63,85 @@ func main() {
 	rd := func(a uint32) uint32 { return m.Bus.Read(a, bus.Long) }
 	rdw := func(a uint32) uint32 { return m.Bus.Read(a, bus.Word) }
 
+	// disableLBPostBoot: once the firmware reaches the operating loop, the
+	// boot-time LoopBreaker becomes harmful — if the firmware re-runs its
+	// non-destructive march RAM test (0x4784) over live RAM, forcing A2 to the
+	// end skips the per-cell RESTORE and leaves the 0xFFBFxx timer/sweep state
+	// stuck at the 0x5555 march pattern. Set SWEEP_DISABLE_LB=1 to switch the
+	// breaker off after the sweep first arms and observe whether the corruption
+	// disappears.
+	disableLBPostBoot := os.Getenv("SWEEP_DISABLE_LB") == "1"
+	// protectSelfTest: once booted, treat the POST self-test region (CPU/ROM
+	// checksum 0x44xx–0x456A + march RAM test 0x4770–0x47F6) as atomic — don't
+	// break its loops and don't inject IRQs while PC is inside it, so the march
+	// test's save→invert→restore cycle over live RAM stays balanced (matching
+	// real HW, which runs the test with interrupts masked).
+	protectSelfTest := os.Getenv("SWEEP_PROTECT_SELFTEST") == "1"
+	inSelfTest := func(pc uint32) bool { return pc >= 0x4490 && pc <= 0x47F6 }
+
 	sweepArmedAt := -1
 	samplePos := 0
 	irq6Count := 0
 
+	marchHitsPostArm := 0 // chunks with PC in the march loop after the sweep armed
+	lbBreaksPostArm := 0  // LoopBreaker fires after the sweep armed
+	corruptAt := -1       // chunk at which bf30 first reads 0x55555555
+	corruptPC := uint32(0)
+	pcHist := map[uint32]int{} // PC >> 8 histogram, sampled post-arm
+	resetHits, supEnterHits, checksumHits := 0, 0, 0
+	postCaptured := false
+
 	for done := 0; done < totalCycles; done += chunkCycles {
 		m.CPU.Run(chunkCycles)
-		lb.Check(m.CPU.Reg(cpu.PC), m.CPU.SetReg)
+		pc := m.CPU.Reg(cpu.PC)
 		chunk := done / chunkCycles
 
-		// IRQ5 timer tick — same cadence as BootToOperating.
-		if chunk%irq5Period == 0 {
+		booted := sweepArmedAt != -1
+		// One-shot: capture the call context the first time POST (re)starts
+		// post-arm. PC==0x4406 is the checksum routine entry — capture
+		// CPU register self-test. Dump the stack so we can see who invoked POST.
+		if booted && !postCaptured && pc == 0x4776 {
+			postCaptured = true
+			fmt.Printf("MARCH-fill entered post-arm at chunk %d: A0=%08X A1=%08X A2=%08X D0=%08X SR=%04X\n",
+				chunk, m.CPU.Reg(cpu.A0), m.CPU.Reg(cpu.A1), m.CPU.Reg(cpu.A2),
+				m.CPU.Reg(cpu.D0), m.CPU.Reg(cpu.SR))
+		}
+		protect := protectSelfTest && booted && inSelfTest(pc)
+		lbActive := !(disableLBPostBoot && booted) && !protect
+		if lbActive {
+			if lb.Check(pc, m.CPU.SetReg) && booted {
+				lbBreaksPostArm++
+			}
+		}
+		if pc >= 0x4784 && pc <= 0x47F6 && sweepArmedAt != -1 {
+			marchHitsPostArm++
+		}
+		if sweepArmedAt != -1 {
+			if pc >= 0x3A9E && pc <= 0x3AAC { // IRQ7/NMI handler entry (soft-restart)
+				resetHits++ // nmiEntryHits
+			}
+			if pc == 0x3AC2 || pc == 0x39BC { // POST call sites (NMI-path / boot)
+				supEnterHits++ // postCallHits
+			}
+			if pc >= 0x454A && pc <= 0x456A { // ROM checksum inner loop
+				checksumHits++
+			}
+		}
+		if sweepArmedAt != -1 {
+			pcHist[pc>>8]++
+		}
+		bf30v := rd(0xFFBF30)
+		if booted && corruptAt == -1 && (bf30v == 0x55555555 || bf30v == 0xAAAAAAAA) {
+			corruptAt = chunk
+			corruptPC = pc
+			fmt.Printf("bf30 corrupted to 0x55555555 at chunk %d (PC=%06X) "+
+				"[marchHitsPostArm=%d lbBreaksPostArm=%d]\n",
+				chunk, pc, marchHitsPostArm, lbBreaksPostArm)
+		}
+
+		// IRQ5 timer tick — same cadence as BootToOperating. Suppressed while the
+		// firmware is inside the atomic POST self-test (protect mode).
+		if chunk%irq5Period == 0 && !protect {
 			m.CPU.SetIRQ(5)
 			m.CPU.Run(irqServiceCost)
 			m.CPU.SetIRQ(0)
@@ -112,6 +181,26 @@ func main() {
 		m.CPU.Reg(cpu.PC), m.CPU.Reg(cpu.SR), m.CPU.Reg(cpu.A5))
 	fmt.Printf("  bf30=%08X bf34=%08X befa=%04X\n",
 		rd(0xFFBF30), rdBF34(), rdw(0xFFBEFA))
+	fmt.Printf("  corruptAt=chunk %d (PC=%06X)  marchHitsPostArm=%d  lbBreaksPostArm=%d  disableLBPostBoot=%v\n",
+		corruptAt, corruptPC, marchHitsPostArm, lbBreaksPostArm, disableLBPostBoot)
+	fmt.Printf("  nmiEntryHits(0x3A9E)=%d  postCallHits(0x3AC2/0x39BC)=%d  checksumHits=%d\n",
+		resetHits, supEnterHits, checksumHits)
+	// Top PC pages (>>8) sampled post-arm — reveals whether the firmware is in
+	// the operating loop (0x185xx/0x5Exxx) or boot-looping (0x045xx/0x047xx/0x0D7xx).
+	type pg struct {
+		page  uint32
+		count int
+	}
+	var pages []pg
+	for p, c := range pcHist {
+		pages = append(pages, pg{p, c})
+	}
+	sort.Slice(pages, func(i, j int) bool { return pages[i].count > pages[j].count })
+	fmt.Printf("  top post-arm PC pages:")
+	for i := 0; i < len(pages) && i < 12; i++ {
+		fmt.Printf(" %04X:%d", pages[i].page, pages[i].count)
+	}
+	fmt.Println()
 	fmt.Printf("  draw counts: moves=%d glyphs=%d lines=%d rects=%d dots=%d\n",
 		d.Moves, d.Glyphs, d.Lines, d.Rects, d.Dots)
 
