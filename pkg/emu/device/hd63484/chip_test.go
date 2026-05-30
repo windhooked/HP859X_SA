@@ -208,30 +208,39 @@ func TestSCLR(t *testing.T) {
 	}
 }
 
-// TestGlyphBGTransparent — with the firmware's standard FG=0/BG=0 pen
-// selectors, glyph blits light FG bits and leave BG bits untouched. This
-// matches observed firmware behaviour (every Rev L glyph uses pen 0 for
-// both); the per-frame screen clear must come from elsewhere (a partial
-// raster burst we don't model yet), not from the glyph BG fill.
-func TestGlyphBGTransparent(t *testing.T) {
+// TestGlyphBlitOpaque — a glyph blit is OPAQUE within its 8×16 cell: FG bits
+// light, and the cell's non-lit pixels are CLEARED (in the foreground plane).
+// This is what lets a re-blitted glyph — e.g. a blinking annunciator redrawn
+// at the same cell — overwrite the previous one instead of accumulating into
+// an unreadable overlap. (The earlier "BG=0 is transparent" model left stale
+// pixels and produced garbled annunciators like "ADC-2VMEAFBIL"; the dim
+// background dot texture still shows through cleared cells because it lives in
+// the separate bgVram plane.)
+func TestGlyphBlitOpaque(t *testing.T) {
 	c := New()
-	// Pre-light pixel (25, 33) — should still be lit after the blit.
+	// Pre-light pixel (25, 33) INSIDE the target cell — must be cleared.
 	c.setVRAMPixel(25, 33)
+	// And one OUTSIDE the cell — must be untouched.
+	c.setVRAMPixel(40, 33)
 	feedWords(c, cmdAMOVE, 20, 30)
 	feedWords(c, cmdWPTN, glyphWPTNCount, 0x0000, 0x0000)
 	for i := 0; i < glyphRows; i++ {
 		feedWords(c, 0x0001) // only bit 0 (column 0) set
 	}
 	feedWords(c, 0x0805, 0x0000, 0xD000, 0x0907)
-	// Column 0 of the cell (x=20) should be lit; the pre-existing pixel
-	// at (25, 33) should be unchanged (BG=0 is transparent).
+	// Column 0 of the cell (x=20) should be lit.
 	for y := 30; y < 38; y++ {
 		if !isLit(c, 20, y) {
 			t.Errorf("glyph FG pixel (20,%d) not lit", y)
 		}
 	}
-	if !isLit(c, 25, 33) {
-		t.Error("pre-existing pixel (25, 33) was cleared by BG=0 blit")
+	// The non-lit pixel (25,33) inside the cell is cleared (opaque).
+	if isLit(c, 25, 33) {
+		t.Error("non-lit cell pixel (25, 33) should be cleared by the opaque glyph blit")
+	}
+	// A pixel outside the 8×16 cell is untouched.
+	if !isLit(c, 40, 33) {
+		t.Error("pixel (40, 33) outside the glyph cell should be untouched")
 	}
 }
 

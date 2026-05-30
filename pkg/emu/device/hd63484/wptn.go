@@ -80,10 +80,16 @@ func (c *Chip) blitGlyph(rows [glyphRows]uint16, fg, bg uint16) {
 		y := c.penY + (glyphRows - 1 - i)
 		for b := 0; b < 16; b++ {
 			x := c.penX + b
-			if row&(1<<uint(b)) != 0 {
+			switch {
+			case row&(1<<uint(b)) != 0 || bgLit:
 				c.setVRAMPixel(x, y)
-			} else if bgLit {
-				c.setVRAMPixel(x, y)
+			default:
+				// OPAQUE glyph: clear the non-lit pixels of the cell in the
+				// foreground plane so a re-blitted glyph (e.g. a blinking
+				// annunciator redrawn at the same cell) overwrites the previous
+				// one instead of accumulating. The dim background dots (bgVram)
+				// still show through the cleared pixels at render time.
+				c.clearVRAMPixel(x, y)
 			}
 		}
 	}
