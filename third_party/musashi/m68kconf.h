@@ -234,7 +234,7 @@
  * NOTE: This is only emulated properly for 68000 mode.
  */
 #ifndef M68K_EMULATE_ADDRESS_ERROR
-#define M68K_EMULATE_ADDRESS_ERROR  M68K_OPT_OFF
+#define M68K_EMULATE_ADDRESS_ERROR  M68K_OPT_ON
 #endif
 
 
