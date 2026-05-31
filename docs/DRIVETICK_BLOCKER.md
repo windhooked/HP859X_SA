@@ -248,3 +248,36 @@ drawing the line, i.e. the __GTTDRW DLP command (0x65986) / its plot source
 (0x5fa22). fcn.171f6 captures+processes the sweep but the plot is the DLP step
 that isn't running. Next: confirm whether the sweep cycle schedules 0x5fa22 (via
 fcn.5ED7E) and run it on the DLP ring. Everything upstream of the paint is done.
+
+### 2026-05-31: TWO-GATE structure found (dynamic stepping via cmd/dlpsched)
+
+Instrumented the DLP scheduler (fcn.d18→0x349b6), interpreter (fcn.34EE8), and
+operating loop (fcn.18568) during a PASSIVE boot (no DriveOperatingTick forcing):
+- **The operating loop fcn.18568 is NEVER entered in passive boot (0 hits).** The
+  startup DLP runs (39 schedule calls + 169 interpreter steps, all done by ~64% of
+  boot — that's what renders the UI), then the firmware loops in a STARTUP sweep-
+  measurement loop, NOT the operating loop. (Prior sessions only ever saw the
+  operating loop via DriveOperatingTick, which FORCES entry — masking this.)
+- **Gate 1 (NEW): the startup sweep loop at ROM 0x17424..0x1747A.** It loops while
+  `(0xFFBEFA & 0x2080)==0` and exits when sweep-done (0xBEFA bit13) is set. Bit13 is
+  set at 0x1746C only if `0xFFA9A0 >= 0` AND `0xFFF300 bit11 (sweep-complete) is
+  CLEAR`. Measured: f300 bit11 IS clear (0x1008), but **0xFFA9A0 = -1 (negative)** →
+  `tst.w 0xa9a0; blt` at 0x17460 SKIPS the bset → the loop never exits.
+  - 0xFFA9A0 = `256 - fcn.89e0(...)` (PC 0x9276..0x927e), a sweep-point-state counter
+    (also written to the A7 bus 0xFFF752 at 0x3015C; fcn.89e0 reads RAM 0xBB06 +
+    buffer state). It is -1 in our model = "no active sweep / sweep done" state.
+  - **CONFIRMED by forcing 0xFFA9A0>=0 while stepping: the operating loop fcn.18568
+    is then entered (0 → 33 hits).** So 0xA9A0=-1 is exactly what keeps the passive
+    boot out of the operating loop.
+- **Gate 2 (the original DRIVETICK blocker, still open): even with the operating
+  loop reached, __GTTDRW (0x65986) is still not invoked (0x6595A scheduled 0×).**
+  The continuous-sweep DLP source that calls __GTTDRW does not run inside the
+  operating loop. So the trace needs BOTH gates cleared.
+
+**Path forward:** (1) make 0xFFA9A0 reach a non-negative sweep-point state faithfully
+— i.e. model whatever fcn.89e0 / the A7-bus sweep counter (0xBB06 / 0xFFF752) needs
+so the startup sweep loop completes naturally (rather than poking 0xA9A0); (2) then,
+in the now-running operating loop, find why the continuous-sweep DLP source (which
+calls __GTTDRW) isn't scheduled — Gate 2. Tool: cmd/dlpsched (4-phase probe:
+schedule histogram → interpreter/loop hits → steady-state PC histogram → 0xA9A0
+gate dump + force test).
