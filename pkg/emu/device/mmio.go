@@ -169,7 +169,28 @@ type HP8593AMMIO struct {
 	// repeats.
 	sweepPoint  int
 	SweepPoints int
+
+	// addrLatch is the A16 write-address diagnostic latch read back at
+	// 0x320000. The POST address-decoder test (ROM 0x4AA0) writes 0x2555 to
+	// 0xFFF700+i*2 for i=0..31 and, after each write, reads 0x320000 expecting
+	// its low 5 bits to equal i — verifying the A16 correctly latches the low
+	// address bits of every f700-register-block write. We capture that index
+	// on each f700-block word write; A16AddrLatch (mapped at 0x320000) returns
+	// it. Without this, POST f612 bit 6 stays clear → "FAIL".
+	addrLatch uint16
 }
+
+// A16AddrLatch is the A16 write-address diagnostic latch at bus address
+// 0x320000. It returns the index of the most recent 0xFFF700-block write so
+// the POST address-decoder self-test passes. See HP8593AMMIO.addrLatch.
+type A16AddrLatch struct{ mmio *HP8593AMMIO }
+
+// AddrLatch returns a Device for 0x320000 backed by this MMIO's write-address
+// latch.
+func (m *HP8593AMMIO) AddrLatch() *A16AddrLatch { return &A16AddrLatch{mmio: m} }
+
+func (l *A16AddrLatch) Read(addr uint32, sz bus.Size) uint32       { return uint32(l.mmio.addrLatch) }
+func (l *A16AddrLatch) Write(addr uint32, sz bus.Size, val uint32) {}
 
 // sweepDetector returns the synthesized detected video level (the ADC reading)
 // for sweep position pt: a low noise floor plus a single CAL-like peak. Values
@@ -224,6 +245,24 @@ func NewHP8593AMMIO() *HP8593AMMIO {
 	// IS0 (offset 0x600) = 0x00: no interrupt assertions at idle.
 	// All other registers zero — the firmware initialises them itself.
 
+	// A16 power-on self-test (POST) configuration straps at 0xFFF614/0xFFF616.
+	// The POST routine at ROM 0x49A0 reads these: when EITHER is non-zero it
+	// sets bb2c bits 12/13 and takes the "mark all self-tests pass" branch (ROM
+	// 0x49C2 writes f610=f612=0xFF), skipping the detailed analog self-test
+	// suite at ROM 0x4534+ (YTF cal, mixer-bias cal, FM-span sense, DAC wraps —
+	// the "CAL YTF FAILED" / "MIXER BIAS CAL FAILED" string family). Those
+	// detailed tests probe analog hardware we do not yet model, so on our
+	// virtual instrument they would all "fail", leaving the f610/f612 POST
+	// result latches at f610=0xF0/f612=0x20 → the reporter at ROM 0x184DE
+	// renders "FAIL: DF0F" (NOT(f612):NOT(f610)) plus the dependent ADC-*/REF
+	// annunciators. Asserting these straps makes the virtual A16 pass POST.
+	// bb2c is a self-test-local accumulator (all 27 ROM refs live in 0x4500..
+	// 0x49E8), so this only affects the POST verdict. Faithfully *running* the
+	// detailed analog suite needs the full analog model — see
+	// docs/ANALOG_MODEL_PLAN.md and docs/POST_SELFTEST.md.
+	m.b[0x614] = 0xFF
+	m.b[0x616] = 0xFF
+
 	return m
 }
 
@@ -232,6 +271,15 @@ func (m *HP8593AMMIO) Read(addr uint32, sz bus.Size) uint32 {
 		return 0
 	}
 	v := beRead(m.b[:], addr, sz)
+
+	// A16 data-path wrap: 0xFFF780..0xFFF7FF mirrors 0xFFF700..0xFFF77F (the
+	// low address bit 7 is not decoded). The POST loopback test (ROM 0x4A0E)
+	// writes the patterns 0x0000/0xFFFF/0x5555/0xAAAA to f700 and reads them
+	// back at f780; the mirror makes f780 echo f700 so the data-path self-test
+	// passes (sets the f612 loopback PASS bits) instead of failing → FAIL.
+	if addr >= 0x780 && addr <= 0x7FF {
+		return beRead(m.b[:], addr-0x80, sz)
+	}
 
 	// TMS9914A HP-IB controller at offset 0x600..0x60F (8 registers,
 	// 2-byte stride). Byte reads route to the chip; reads outside that
@@ -326,6 +374,13 @@ func (m *HP8593AMMIO) Write(addr uint32, sz bus.Size, val uint32) {
 		return
 	}
 	beWrite(m.b[:], addr, sz, val)
+
+	// A16 write-address latch: capture the low address-bit index of every
+	// f700-register-block write so the POST address-decoder test (ROM 0x4AA0)
+	// reads it back at 0x320000. See the addrLatch field + A16AddrLatch.
+	if addr >= 0x700 && addr <= 0x77F {
+		m.addrLatch = uint16((addr & 0x7F) >> 1)
+	}
 
 	// After any write to the SCI command register (0x5FC), immediately
 	// re-assert the "ready" bit so that the next status poll sees it.

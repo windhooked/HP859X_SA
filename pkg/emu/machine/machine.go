@@ -32,7 +32,9 @@
 // OnFault returns 0 to keep the boot sequence moving):
 //
 //	0x310000           sweep-generator output latch (write-only)
-//	0x320000           hardware-status ID register (read-only)
+//	0x320000           A16 write-address diagnostic latch (mapped — returns the
+//	                    index of the last 0xFFF700-block write for the POST
+//	                    address-decoder self-test; see docs/POST_SELFTEST.md)
 package machine
 
 import (
@@ -45,8 +47,8 @@ import (
 
 // Memory map constants.
 const (
-	ROMBase  = uint32(0x000000)
-	ROMSize  = uint32(0x100000) // 1 MB — Rev L (4 × 27C020); see pkg/emu/romloader
+	ROMBase = uint32(0x000000)
+	ROMSize = uint32(0x100000) // 1 MB — Rev L (4 × 27C020); see pkg/emu/romloader
 
 	// CalNVRAM: A16A1 battery-backed calibration SRAM (decoded by U114 PAL's
 	// LCAL signal). 64 KB at 0x200000. Default contents are zero ("dead
@@ -142,6 +144,10 @@ func New8593A(romImage []byte) (*Machine, error) {
 	b.Map(TestRAMBase, TestRAMSize, "TestRAM", testRAM)
 	b.Map(RAMBase, RAMSize, "RAM", ram)
 	b.Map(MMIOBase, MMIOSize, "MMIO", mmio)
+	// A16 write-address diagnostic latch at 0x320000 — the POST address-decoder
+	// self-test (ROM 0x4AA0) reads back the index of its last 0xFFF700-block
+	// write here. Backed by the MMIO's addrLatch. See device/mmio.go.
+	b.Map(0x320000, 0x10, "A16AddrLatch", mmio.AddrLatch())
 
 	c, err := musashi.New(b)
 	if err != nil {
