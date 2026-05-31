@@ -272,3 +272,28 @@ COLD / ADC-TIME: find each one's status-word test (same handler pattern) and mak
 that status read good** — most likely model the ADC-timing self-test (ADC-TIME)
 and the oven/ref hardware so the boot's own handler removes the annunciator.
 This is the precise, bounded remaining task. Tool: cmd/anndesc (verified code map).
+
+### Architecture clarified: TWO annunciator systems (shown ones use the hard path)
+
+Static scan (cmd/anncodemap, finds every `moveq #code; jsr e7f0/e87e/e7a2`) +
+dynamic scan (cmd/annuncode) agree: the code-API (fcn.e7f0 add / fcn.e87e remove,
+per-code handlers `test status-word → remove/add`) handles codes 0x06/0x0E/0x0F/
+0x10/0x11/0x12/0x1D/0x20/0x22/0x23/0x27/0x2A/0x31/0x32 — i.e. FREQ UNCAL, UNLVL,
+RES BW, etc. (the NOT-shown / cleared annunciators).
+
+**The VISIBLE status annunciators — ADC-GND(0x0B), OVEN COLD(0x0D), ADC-2V(0x18),
+ADC-TIME(0x28) — have NO code-API handler** (no moveq+jsr site; fcn.e7f0 never
+called with them). They are driven by the fcn.11B9A aggregation → packed words
+B060/B068/B08C/B098 path instead. cmd/annbits shows those packed words DON'T use
+bit==code encoding (set bits 0x12/0x14/0x2C… don't match the visible codes), so
+the aggregation drawer applies its own bit→code mapping not yet decoded.
+
+**Net:** the easy-to-clear annunciators (code-API, status-word gated) are already
+NOT shown; the ones that ARE shown sit in the aggregation path whose bit→
+annunciator→source mapping resisted the quick hypotheses. Clearing them needs
+either (a) interactive single-step of the aggregation DRAWER to read its bit→code
+table, or (b) recognising they converge with the full analog model — ADC-GND/2V/
+TIME are the ADC self-test (model the ADC like POST f610/f612), OVEN COLD the
+oven timer/state, REF UNLOCK the A9 ref-lock. The hard RE (architecture, code
+map, both systems) is done; what remains is genuinely analog-subsystem modelling.
+Verified tools: cmd/anndesc, cmd/anncodemap, cmd/annbits.
