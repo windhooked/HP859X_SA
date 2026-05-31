@@ -224,3 +224,23 @@ read off the status word/bit it tests, then model that one hardware status as
 good — and the firmware itself removes the annunciator via fcn.e87e (no flag-
 poking, no VRAM hacks). This is the per-annunciator analog-status modelling task,
 one clean site at a time. Tools: cmd/annuncode (the code→site map).
+
+### Key correction: annunciators are BOOT-TIME decisions (not re-evaluated)
+
+`cmd/annunctest` (RunUntil on 0x875E): the oven-status gate executes **0 times
+post-boot** — it runs once during boot and is not re-evaluated in the operating
+loop. This explains why post-boot flag-poking never clears the annunciators (no
+re-check fires fcn.e87e). Also corrected: `fcn.79CC` is NOT an elapsed-seconds
+timer — `fcn.799E` reads `$b078` bits[7:4] as a STATE index and fcn.79CC returns
+a state-dependent value (idx1→200, idx0→9000, idxF→120000) compared to 300. So
+the 0x875E gate is `btst #13,$b070` (hw flag) AND a state-dependent threshold,
+decided at boot.
+
+**Therefore the analog status model is structurally identical to the POST fix:**
+make each subsystem's hardware status read "good" DURING boot so the boot-time
+check never sets the annunciator (vs trying to clear it after). Per annunciator:
+find what sets its boot-time gate flag (e.g. B070 bit13 for the 0x875E gate) →
+trace to the hardware read → model it good. The annunciator add/remove API
+(fcn.e7f0/e87e + cmd/annuncode) localizes each; the gates run at boot. This is
+the concrete, bounded analog-status-model task — one boot-time gate per
+annunciator, modelled like the POST f610/f612 latches were.
