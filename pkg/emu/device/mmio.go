@@ -170,6 +170,10 @@ type HP8593AMMIO struct {
 	sweepPoint  int
 	SweepPoints int
 
+	// Sweep is the analog-model sweep engine backing the 0xFFF200 video-ADC
+	// reads (faithful spectrum: CAL peak + noise floor). See sweepengine.go.
+	Sweep *SweepEngine
+
 	// addrLatch is the A16 write-address diagnostic latch read back at
 	// 0x320000. The POST address-decoder test (ROM 0x4AA0) writes 0x2555 to
 	// 0xFFF700+i*2 for i=0..31 and, after each write, reads 0x320000 expecting
@@ -216,8 +220,13 @@ func sweepDetector(pt, total int) uint16 {
 }
 
 // readSweepADC returns the detector level for the current sweep position and
-// advances it. Called for word reads of 0xFFF200 when SweepActive.
+// advances it. Called for word reads of 0xFFF200 when SweepActive. Backed by
+// the analog-model SweepEngine (faithful spectrum: CAL peak + noise floor); the
+// legacy sweepDetector is retained only as a fallback if the engine is nil.
 func (m *HP8593AMMIO) readSweepADC() uint16 {
+	if m.Sweep != nil {
+		return m.Sweep.DetectADC()
+	}
 	v := sweepDetector(m.sweepPoint, m.SweepPoints)
 	m.sweepPoint++
 	return v
@@ -225,11 +234,16 @@ func (m *HP8593AMMIO) readSweepADC() uint16 {
 
 // ResetSweep rewinds the detector position to the start of the sweep (sweep
 // retrace). The sweep clock calls this when the firmware re-arms a new sweep.
-func (m *HP8593AMMIO) ResetSweep() { m.sweepPoint = 0 }
+func (m *HP8593AMMIO) ResetSweep() {
+	m.sweepPoint = 0
+	if m.Sweep != nil {
+		m.Sweep.Reset()
+	}
+}
 
 // NewHP8593AMMIO returns an initialised MMIO stub with an attached SCIDisplay.
 func NewHP8593AMMIO() *HP8593AMMIO {
-	m := &HP8593AMMIO{Display: NewSCIDisplay(), HPIB: NewTMS9914A()}
+	m := &HP8593AMMIO{Display: NewSCIDisplay(), HPIB: NewTMS9914A(), Sweep: NewSweepEngine()}
 
 	// SCI/display controller: pre-assert all ready bits so every firmware
 	// polling pattern (bits 0, 1, and 2) returns immediately.
