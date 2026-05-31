@@ -41,6 +41,18 @@ type Bus struct {
 	// For reads the return value is used; for writes the return value is ignored.
 	// When nil, faulting reads return all-ones (0xFF / 0xFFFF / 0xFFFFFFFF).
 	OnFault func(addr uint32, sz Size, write bool) uint32
+
+	// OnRead, if set, is invoked after every read (including CPU instruction
+	// fetches and operand reads, which route through here via the Musashi
+	// callbacks) with the address, size, and value. Diagnostic only — leave nil
+	// in normal operation (it adds a per-read call). Used to trace which RAM
+	// word the firmware tests before drawing each status annunciator.
+	OnRead func(addr uint32, sz Size, val uint32)
+
+	// OnWrite, if set, is invoked before every write with the address, size, and
+	// value. Diagnostic only. Used to catch the firmware writing an annunciator
+	// string pointer into its draw list (the status decision).
+	OnWrite func(addr uint32, sz Size, val uint32)
 }
 
 // Map registers dev over [start, start+size). Panics on a zero size or on
@@ -72,19 +84,27 @@ func (b *Bus) find(addr uint32) *mapping {
 // and return its result; otherwise returns all-ones for the given size.
 func (b *Bus) Read(addr uint32, sz Size) uint32 {
 	addr &= AddrMask
+	var v uint32
 	if m := b.find(addr); m != nil {
-		return m.dev.Read(addr-m.start, sz)
+		v = m.dev.Read(addr-m.start, sz)
+	} else if b.OnFault != nil {
+		v = b.OnFault(addr, sz, false)
+	} else {
+		v = faultValue(sz)
 	}
-	if b.OnFault != nil {
-		return b.OnFault(addr, sz, false)
+	if b.OnRead != nil {
+		b.OnRead(addr, sz, v)
 	}
-	return faultValue(sz)
+	return v
 }
 
 // Write stores val at addr. Unmapped accesses invoke OnFault (if set); writes
 // are always dropped when no device is mapped.
 func (b *Bus) Write(addr uint32, sz Size, val uint32) {
 	addr &= AddrMask
+	if b.OnWrite != nil {
+		b.OnWrite(addr, sz, val)
+	}
 	if m := b.find(addr); m != nil {
 		m.dev.Write(addr-m.start, sz, val)
 		return
