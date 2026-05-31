@@ -215,3 +215,26 @@ specific register pair.
   loop (period detection) instead of inferring from a histogram.
 - **`hd63484.Chip.EnableLineLog()` / `Chip.LineLog`** — per-line endpoint
   capture for distinguishing graticule grid from a data trace.
+
+## 2026-05-31: trace-draw unified with the DRIVETICK_BLOCKER (cmd/tracehunt)
+
+Drove the sweep to completion post-boot and instrumented the operating loop:
+- Sweep MECHANICS fully work: the armed sweep (bf34=0x410A positive-peak handler)
+  fills the trace buffer A5→bf30, sweeps complete 77081×, and **befa bit13
+  (sweep-done) DOES fire**. The analog-model SweepEngine supplies faithful data.
+- BUT **__GTTDRW (ROM 0x65986, the trace-draw DLP command) is reached 0 times**,
+  and a PC histogram shows the operating loop spends its time in 0x188xx (loop)
+  + 0x11Dxx (the annunciator/checksum chain) and **never enters the trace-state
+  machine fcn.5ECEE / scheduler fcn.5ED7E**.
+- fcn.5ED7E (schedule the trace DLP source 0x5fa22) and fcn.5ECEE are dispatched
+  via DLP slots 0xB68 / 0x12CA — they run only when the continuous-sweep DLP
+  source executes, which it doesn't: the firmware reaches the operating loop but
+  does not run those DLP sources.
+
+**Conclusion: the trace-draw is NOT a sweep/handshake/analog-data problem (all of
+that works). It is the SAME operating-loop/DLP obstruction as the key-consumer —
+the DRIVETICK_BLOCKER (docs/DRIVETICK_BLOCKER.md): the firmware never enters the
+continuous-sweep DLP path.** The trace-draw, the front-panel key consume, and the
+full annunciator-update all unblock together once that obstruction is resolved
+(the firmware runs its operating-loop DLP sources). The analog model is data-ready
+and waiting on that single firmware-side blocker. Tool: cmd/tracehunt.
