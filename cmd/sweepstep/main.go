@@ -61,33 +61,55 @@ func main() {
 	fmt.Printf("armed: A5=%08X bf30=%08X bf34=%08X befa=%04X\n",
 		m.CPU.Reg(cpu.A5), rdL(0xFFBF30), rdL(0xFFBF34), m.Bus.Read(0xFFBEFA, bus.Word))
 
-	// Put a synthetic sample on the detector, fire IRQ6, and single-step the
-	// handler. The 68000 takes the autovector; PC jumps to 0x4088. Step until
-	// we return to user code (PC leaves the 0x40xx handler region) or 300 steps.
-	m.Bus.Write(0xFFF200, bus.Word, 0x0280)
-	m.CPU.SetIRQ(6)
-	// Step into the exception first.
-	prevPC := m.CPU.Reg(cpu.PC)
-	for i := 0; i < 400; i++ {
-		if err := m.CPU.Step(); err != nil {
-			fmt.Printf("step err: %v\n", err)
-			break
-		}
+	// Fill the trace buffer: fire IRQ6 with synthetic samples until A5 reaches
+	// bf30 (sweep complete, befa bit13 set), gating on A5 < bf30 so we don't
+	// overrun. Between captures let the firmware run a little.
+	bf30 := rdL(0xFFBF30)
+	caps := 0
+	for n := 0; n < 1000 && m.CPU.Reg(cpu.A5) < bf30; n++ {
+		m.Bus.Write(0xFFF200, bus.Word, 0x0200+uint32(n%200))
+		m.CPU.SetIRQ(6)
+		m.CPU.Run(400)
 		m.CPU.SetIRQ(0)
-		pc := m.CPU.Reg(cpu.PC)
-		// Only log the handler region (0x4080..0x40D0) plus the first entry.
-		if pc >= 0x4080 && pc <= 0x40D0 {
-			fmt.Printf("  step %3d PC=%06X A5=%08X D7=%04X  [bf30=%08X bf34=%08X befa=%04X]\n",
-				i, pc, m.CPU.Reg(cpu.A5), m.CPU.Reg(cpu.D7)&0xFFFF,
-				rdL(0xFFBF30), rdL(0xFFBF34), m.Bus.Read(0xFFBEFA, bus.Word))
-		}
-		// Stop once we've entered then left the handler region.
-		if prevPC >= 0x4080 && prevPC <= 0x40D0 && (pc < 0x4080 || pc > 0x40D0) {
-			fmt.Printf("  handler returned to PC=%06X after step %d\n", pc, i)
+		m.CPU.Run(2000) // let the operating loop run between samples
+		caps++
+	}
+	fmt.Printf("sweep filled: %d captures, A5=%08X bf30=%08X bf34=%08X befa=%04X (bit13=%v)\n",
+		caps, m.CPU.Reg(cpu.A5), bf30, rdL(0xFFBF34), m.Bus.Read(0xFFBEFA, bus.Word),
+		m.Bus.Read(0xFFBEFA, bus.Word)&0x2000 != 0)
+
+	// Now single-step the operating loop and see whether the firmware ever
+	// reaches the DLP-driven sweep-trace processing (0x5EC00..0x5EE00), the DLP
+	// trace source (0x5FA00..0x5FB00), or processes sweep-done (clears befa
+	// bit13 / changes bf34 / draws trace lines).
+	linesBefore := m.MMIO.Display.Lines
+	befaBefore := m.Bus.Read(0xFFBEFA, bus.Word)
+	bf34Before := rdL(0xFFBF34)
+	hits := map[uint32]int{}
+	const steps = 3_000_000
+	irqN := 0
+	for i := 0; i < steps; i++ {
+		if err := m.CPU.Step(); err != nil {
 			break
 		}
-		prevPC = pc
+		pc := m.CPU.Reg(cpu.PC)
+		page := pc >> 8
+		if (page >= 0x5EC && page <= 0x5EE) || page == 0x5FA || (pc >= 0x2AB8 && pc <= 0x2B1C) {
+			hits[page]++
+		}
+		irqN++
+		if irqN >= 2500 { // periodic IRQ5 to keep the timer alive
+			m.CPU.SetIRQ(5)
+			m.CPU.Step()
+			m.CPU.SetIRQ(0)
+			irqN = 0
+		}
 	}
-	fmt.Printf("after IRQ6: A5=%08X bf34=%08X befa=%04X\n",
-		m.CPU.Reg(cpu.A5), rdL(0xFFBF34), m.Bus.Read(0xFFBEFA, bus.Word))
+	fmt.Printf("after %d operating-loop steps:\n", steps)
+	fmt.Printf("  sweep-trace region visits: %v\n", hits)
+	fmt.Printf("  Lines: %d -> %d (trace drawn = %v)\n", linesBefore, m.MMIO.Display.Lines, m.MMIO.Display.Lines > linesBefore+50)
+	fmt.Printf("  befa: %04X -> %04X (bit13 %v->%v)\n", befaBefore, m.Bus.Read(0xFFBEFA, bus.Word),
+		befaBefore&0x2000 != 0, m.Bus.Read(0xFFBEFA, bus.Word)&0x2000 != 0)
+	fmt.Printf("  bf34: %08X -> %08X  A5=%08X  PC=%06X\n",
+		bf34Before, rdL(0xFFBF34), m.CPU.Reg(cpu.A5), m.CPU.Reg(cpu.PC))
 }
