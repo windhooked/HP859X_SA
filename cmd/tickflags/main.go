@@ -237,8 +237,8 @@ func main() {
 	// EQUAL for the firmware to continue past the loop:
 	fmt.Println("\n  Loop-exit condition values (need to be EQUAL to continue):")
 	for _, pair := range []struct {
-		name     string
-		a, b     uint32
+		name string
+		a, b uint32
 	}{
 		{"bbba ?= bbbc", 0xFFBBBA, 0xFFBBBC},
 		{"a630 ?= a632", 0xFFA630, 0xFFA632},

@@ -41,14 +41,14 @@
 // Command set: the chip implements ~40 commands (see commands.go). They
 // fall into families:
 //   - System control:   ORG (0x0000), WPR (0x0800), RPR (0x0C00), WPTN
-//                       (0x1800), RPTN (0x1C00)
+//     (0x1800), RPTN (0x1C00)
 //   - Drawing geometry: AMOVE/RMOVE (0x8000/0x8400), ALINE/RLINE (0x8800/
-//                       0x8C00), ARCT/RRCT (0x9000/0x9400), APLL/RPLL
-//                       (poly-line), APLG/RPLG (poly-gon), CRCL (circle),
-//                       ELPS (ellipse), DOT (0xCC00)
+//     0x8C00), ARCT/RRCT (0x9000/0x9400), APLL/RPLL
+//     (poly-line), APLG/RPLG (poly-gon), CRCL (circle),
+//     ELPS (ellipse), DOT (0xCC00)
 //   - Area operations:  AFRCT/RFRCT (filled rect, 0xA000/0xA400), PAINT
-//                       (0xE000), CLR (clear, 0xF000), SCLR (screen
-//                       clear), CPY (copy, 0xF400)
+//     (0xE000), CLR (clear, 0xF000), SCLR (screen
+//     clear), CPY (copy, 0xF400)
 //
 // 8593 Rev L firmware usage (empirically observed; see displayprobe and
 // docs/research.md): the firmware uses AMOVE, ALINE, ARCT, DOT, WPTN

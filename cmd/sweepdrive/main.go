@@ -18,12 +18,12 @@ import (
 	"sort"
 	"strconv"
 
+	"github.com/windhooked/HP859X_SA/internal/emutest"
 	"github.com/windhooked/HP859X_SA/pkg/emu/bus"
 	"github.com/windhooked/HP859X_SA/pkg/emu/cpu"
-	"github.com/windhooked/HP859X_SA/pkg/emu/device"
 	musashi "github.com/windhooked/HP859X_SA/pkg/emu/cpu/musashi"
+	"github.com/windhooked/HP859X_SA/pkg/emu/device"
 	"github.com/windhooked/HP859X_SA/pkg/emu/romloader"
-	"github.com/windhooked/HP859X_SA/internal/emutest"
 )
 
 const rfBase = 0x200000

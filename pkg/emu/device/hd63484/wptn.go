@@ -98,14 +98,14 @@ func (c *Chip) blitGlyph(rows [glyphRows]uint16, fg, bg uint16) {
 
 // feedRaster drives the per-word states of either:
 //
-//   1. A bulk raster-write into video RAM (entered via the WPR MAR-pair the
-//      8593 firmware uses to clear / paint regions). 16,384 data words
-//      pour in; we wrap memPos when it would overflow.
+//  1. A bulk raster-write into video RAM (entered via the WPR MAR-pair the
+//     8593 firmware uses to clear / paint regions). 16,384 data words
+//     pour in; we wrap memPos when it would overflow.
 //
-//   2. A WPTN with non-glyph count (i.e. count != 0x000A), which writes
-//      pattern data into the chip's internal pattern RAM. Less common in
-//      the 8593 firmware (which uses pattern RAM for blink/cursor) but
-//      modelled here so the parser stays in sync.
+//  2. A WPTN with non-glyph count (i.e. count != 0x000A), which writes
+//     pattern data into the chip's internal pattern RAM. Less common in
+//     the 8593 firmware (which uses pattern RAM for blink/cursor) but
+//     modelled here so the parser stays in sync.
 //
 // We disambiguate via dec.wptnCount: if non-zero we're in the pattern-RAM
 // path; otherwise we're in the vram raster path.

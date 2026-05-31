@@ -341,6 +341,9 @@ func (dec *decoder) dispatchCmd(c *Chip, w uint16) {
 	case cmdDOT, 0xCC01: // 0xCC00 / 0xCC01 — DOT without/with attr
 		c.setVRAMPixel(c.penX, c.penY)
 		c.Dots++
+		if c.DotLog != nil {
+			c.DotLog = append(c.DotLog, DotRec{c.penX, c.penY})
+		}
 	case cmdCRCL:
 		dec.st = stCRCLArg
 	case cmdWPTN:
