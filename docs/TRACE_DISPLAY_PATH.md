@@ -93,6 +93,49 @@ model**, not more IRQ poking:
    and emits the trace vectors — at which point `cmd/tracedraw` will capture
    non-axis-aligned `drawLine` segments inside the graticule.
 
+## CORRECTION / deeper finding (2026-05-31, later) — the stall is in DLP, not a missing sweep handshake
+
+The "model the sweep-completion handshake" conclusion above was **premature**.
+A call-stack capture at the innermost spin (`cmd/looptrace`, A6-chain walk)
+shows the measurement handler **does run** — it just stalls *inside its own DLP
+processing*. The captured stack, bottom-up:
+
+```
+0x017560  boot PRESET-measurement driver
+0x04E790  sweep-done / measurement handler  (the 0x4E78A $b0a0-bit11 clearer)
+0x03F7E4  bclr #2,$a5d5
+0x043366 / 0x0355CE / 0x0349xx
+0x034690  DLP scheduler            (fcn.349B6: tst 8(a6)≤0 → exit; else step+recurse)
+0x034C96 / 0x035806  DLP interpreter step (fcn.34EE8)   ← recurses 3× through
+0x0662A6 / 0x065F16  compiled DLP token handlers (__ trampolines push sources)
+0x032B70  DLP record search        ← the 115k-hit innermost spin
+```
+
+So the real picture: the boot PRESET-measurement (`0x17560`) **does** reach the
+measurement handler (`0x4E790`), which invokes the **DLP interpreter** to run a
+boot/measurement DLP script. That script **never terminates** — its `__`-token
+handlers keep pushing sources onto the include stack and the scheduler keeps
+re-resolving the same ~20 DLP record keys (`1..0x14`, ~27× each over the window:
+`cmd/looptrace` key histogram). The DLP record search `fcn.32B70` (lookup by
+key+type in the record table at `$bb54`, count `$bfe6`) does a full backward
+table scan per call and dominates (~33% earlier reads were *also* this, mislabel
+"detector accumulation"). The scheduler exits only when its source arg reaches 0
+(`fcn.349B6 @ 0x349C0`) or the `fcn.34644` check returns bit0 clear — neither
+happens.
+
+**Consequence:** `$b0a0` bit11 never clears not because the handler isn't called
+but because the handler **never returns** — it's blocked inside the
+non-terminating DLP script. The trace-draw is downstream of that return.
+
+**Revised path forward:** this is **DLP-VM** work, not analog-handshake work.
+Next concrete step: trace `fcn.34EE8` (the interpreter step) to identify the
+specific DLP token/source the boot script loops on, and what condition (a status
+read, a flag, a record value) would let that script's loop terminate. This is
+the same class as the historic startup-DLP derail (see DLP_STARTUP_DERAIL.md /
+DLP_VM_ARCHITECTURE.md), now in plain Rev L and past `__PKIP` — a *different*
+non-terminating script, reached only after the corrupt-dump fix let the boot get
+this far.
+
 ## Tools added
 
 - **`cmd/tracedraw`** — drives a sweep (IRQ1 step + IRQ6 capture), captures
