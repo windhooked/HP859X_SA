@@ -17,6 +17,11 @@ int musashi_run(int cycles);
  * Declared here so the config header can reference it. */
 void musashi_instr_hook(unsigned int pc);
 
+/* Run up to `cycles` but stop AT stop_pc (before it executes). Returns cycles
+ * executed; musashi_stopped() is non-zero if stop_pc was reached. */
+int musashi_run_until(int cycles, unsigned int stop_pc);
+int musashi_stopped(void);
+
 /* One-time initialisation: calls m68k_init and sets CPU type to 68000. */
 void musashi_init(void);
 

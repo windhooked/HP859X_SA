@@ -1,3 +1,7 @@
+// Command befprobe finds the writers of the annunciator source-status flags
+// (0xFFB1E0/B1F0/B1F6/B1F8/B1FA) that fcn.11B9A aggregates into the annunciator
+// display words — i.e. the hardware-status checks behind REF UNLOCK / ADC-TIME
+// FAIL / OVEN COLD. Reports each flag's boot value + writer PCs.
 package main
 
 import (
@@ -16,16 +20,15 @@ func main() {
 	m, _ := machine.New8593A(rom)
 	m.CPU.Reset()
 	lb := emutest.NewLoopBreaker(50)
-	wbef := map[uint32]uint32{}
-	rb034 := map[uint32]int{}
-	m.Bus.OnWrite = func(a uint32, sz bus.Size, v uint32) {
-		if a == 0xFFBEF6 {
-			wbef[m.CPU.Reg(cpu.PC)] = v & 0xFFFF
-		}
+	flags := map[uint32]string{0xFFB1E0: "B1E0", 0xFFB1F0: "B1F0", 0xFFB1F6: "B1F6", 0xFFB1F8: "B1F8", 0xFFB1FA: "B1FA"}
+	writers := map[uint32]map[uint32]uint32{} // flag -> {PC -> lastVal}
+	for f := range flags {
+		writers[f] = map[uint32]uint32{}
 	}
-	m.Bus.OnRead = func(a uint32, sz bus.Size, v uint32) {
-		if a >= 0xFFB034 && a <= 0xFFB035 {
-			rb034[m.CPU.Reg(cpu.PC)]++
+	m.Bus.OnWrite = func(a uint32, sz bus.Size, v uint32) {
+		fa := a &^ 1
+		if _, ok := flags[fa]; ok {
+			writers[fa][m.CPU.Reg(cpu.PC)] = v & 0xFFFF
 		}
 	}
 	for c := 0; c < 165_000_000; c += 2000 {
@@ -37,21 +40,16 @@ func main() {
 			m.CPU.SetIRQ(0)
 		}
 	}
-	fmt.Printf("after boot: 0xFFBEF6=%04X  0xFFB034=%04X\n",
-		uint16(m.Bus.Read(0xFFBEF6, bus.Word)), uint16(m.Bus.Read(0xFFB034, bus.Word)))
-	fmt.Println("writers of 0xFFBEF6 (PC -> last value):")
-	for pc, v := range wbef {
-		d, _ := m.CPU.Disasm(pc)
-		fmt.Printf("  %06X val=%04X  %s\n", pc, v, d)
+	var fs []uint32
+	for f := range flags {
+		fs = append(fs, f)
 	}
-	fmt.Println("readers of 0xFFB034:")
-	var ps []uint32
-	for p := range rb034 {
-		ps = append(ps, p)
-	}
-	sort.Slice(ps, func(i, j int) bool { return ps[i] < ps[j] })
-	for _, p := range ps {
-		d, _ := m.CPU.Disasm(p)
-		fmt.Printf("  %06X x%-4d %s\n", p, rb034[p], d)
+	sort.Slice(fs, func(i, j int) bool { return fs[i] < fs[j] })
+	for _, f := range fs {
+		fmt.Printf("\n%s (%06X) = %04X after boot; writers:\n", flags[f], f, uint16(m.Bus.Read(f, bus.Word)))
+		for pc, v := range writers[f] {
+			d, _ := m.CPU.Disasm(pc)
+			fmt.Printf("    PC %06X val=%04X  %s\n", pc, v, d)
+		}
 	}
 }

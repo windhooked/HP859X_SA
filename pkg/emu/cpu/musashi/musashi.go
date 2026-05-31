@@ -75,6 +75,16 @@ func (c *CPU) Run(cycles int) int {
 	return int(C.musashi_run(C.int(cycles)))
 }
 
+// RunUntil runs up to `cycles` but stops the instant the core is about to
+// execute stopPC (PC ends AT stopPC). Returns (cyclesExecuted, hitStopPC). The
+// stop is implemented in C via the per-instruction hook + m68k_end_timeslice,
+// so it is cheap and exact — used to fast-forward to a render entry then hand
+// off to single-step + shadow-stack tracing.
+func (c *CPU) RunUntil(cycles int, stopPC uint32) (int, bool) {
+	n := int(C.musashi_run_until(C.int(cycles), C.uint(stopPC)))
+	return n, C.musashi_stopped() != 0
+}
+
 // Reg returns the value of register r.
 func (c *CPU) Reg(r cpu.Reg) uint32 {
 	return uint32(C.m68k_get_reg(nil, regToMusashi[r]))

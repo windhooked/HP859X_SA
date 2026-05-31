@@ -49,13 +49,36 @@ int musashi_run(int cycles) {
     return m68k_execute(cycles);
 }
 
+/* Stop-at-PC support for RunUntil: the instruction hook ends the timeslice the
+ * moment the core is about to execute g_stop_pc, so a chunked fast-forward can
+ * land exactly on a target instruction (e.g. a render entry) and hand off to
+ * single-stepping with a shadow call stack. g_stop_pc = 0xFFFFFFFF disables. */
+static unsigned int g_stop_pc = 0xFFFFFFFFu;
+static int g_stopped = 0;
+
 /* musashi_instr_hook is called by the Musashi core on every instruction
- * (wired via M68K_INSTRUCTION_CALLBACK in m68kconf.h with SPECIFY_HANDLER).
- * Placeholder: Phase 2 will use it for trace recording.
+ * (wired via M68K_INSTRUCTION_CALLBACK in m68kconf.h with SPECIFY_HANDLER),
+ * with the PC of the instruction about to execute.
  */
 void musashi_instr_hook(unsigned int pc) {
-    (void)pc;
+    if (pc == g_stop_pc) {
+        g_stopped = 1;
+        m68k_end_timeslice();
+    }
 }
+
+/* musashi_run_until runs up to `cycles` but ends the instant the core is about
+ * to execute stop_pc (PC stops AT stop_pc). Returns cycles executed;
+ * musashi_stopped() reports whether stop_pc was reached. */
+int musashi_run_until(int cycles, unsigned int stop_pc) {
+    g_stop_pc = stop_pc;
+    g_stopped = 0;
+    int c = m68k_execute(cycles);
+    g_stop_pc = 0xFFFFFFFFu;
+    return c;
+}
+
+int musashi_stopped(void) { return g_stopped; }
 
 /* -------------------------------------------------------------------------- */
 /* Initialisation                                                               */
