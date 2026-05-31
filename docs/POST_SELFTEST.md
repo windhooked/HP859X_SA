@@ -67,3 +67,33 @@ path would clear it.
 `REF UNLOCK`, `ADC-TIME FAIL`, `OVEN COLD` persist unchanged across all four FAIL
 states above — they are **not** driven by the f610/f612 POST word. They have an
 independent status source (still to be cracked with the same watchpoint method).
+
+## Annunciator investigation (REF UNLOCK / ADC-TIME FAIL / OVEN COLD) — in progress
+
+Method applied (read-watchpoint the ROM string + backtrace). Established with
+`cmd/annunchunt`:
+- The 5 status strings live consecutively at ROM 0x2b37f (ADC-TIME FAIL),
+  0x2b38b (ADC-GND FAIL), 0x2b39b (ADC-2V FAIL), 0x2b3a7 (OVEN COLD), 0x2b3fd
+  (REF UNLOCK).
+- They are copied to RAM (e.g. REF UNLOCK→0xFC44D2, ADC-TIME→0xFC43A2) by the
+  menu builder **fcn.5AA88** (reached via `jsr fcn.5ACB2` at ROM 0x3A02), which
+  copies a whole string table from `[0xCD2]` into per-menu slot vtables at
+  0xFF9578 / 0xFF9590 / 0xFF9594+menu*0xE0.
+- **All 5 are copied; only 3 are shown** (REF UNLOCK, ADC-TIME FAIL, OVEN COLD)
+  — so the draw is status-gated, with ADC-GND/ADC-2V passing but ADC-TIME
+  failing (the ADC self-test has per-reference bits: GND/+2V ok, TIME fails).
+- Ruled out: NOT the f610/f612 POST word (annunciators persist across all FAIL
+  states); the ROM strings are read ONLY by the copy (PC 0x6A48); the RAM copies
+  are read ONLY by the builder length-check (PC 0x5AAFE) — **never re-read at
+  screen-draw time**. So the graticule glyphs are emitted in the builder's
+  one-pass copy/draw (chars in registers) or by a separate status render, gated
+  by a status test not yet localized.
+
+Next: instrument the menu render over the 0xFF9594 slot vtable to find the
+per-slot status-condition field, OR (more direct) find where each subsystem
+POSTS its status (ref-lock detect → REF UNLOCK; ADC timing test → ADC-TIME FAIL;
+oven 5-min timer → OVEN COLD) and model that hardware status. Each annunciator
+maps to a specific un-modeled analog/timer status, so this dovetails with the
+analog model (docs/ANALOG_MODEL_PLAN.md). OVEN COLD is the easiest — a fake
+5-minute IRQ5-tick timer with no temp sensor; it self-clears after ~5 min of
+modeled runtime.
