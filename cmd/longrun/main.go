@@ -61,6 +61,34 @@ func main() {
 			reached, rdW(0xFFB0A0), rdW(0xFFBFE6), rdW(0xFFA62A))
 	}
 
+	// Capture what the frozen loop does with the A7 analog-interface I/O bus:
+	// the select word written to 0xFFF728 (high byte = A7 register address) and
+	// the data read back from 0xFFF72A. Also tally the conditional branches'
+	// flag sources.
+	fmt.Println("\n--- A7 I/O-bus activity in the frozen loop (40k steps) ---")
+	selHist := map[uint16]int{}  // high byte of select word -> A7 register addr
+	readHist := map[uint16]int{} // 0xFFF72A readback values
+	for s := 0; s < 40000; s++ {
+		pc := m.CPU.Reg(cpu.PC)
+		if pc == 0x2265C { // move.w d6,0xf728 : d6 = select word
+			selHist[uint16(m.CPU.Reg(cpu.D6))>>8]++
+		}
+		if m.CPU.Step() != nil {
+			break
+		}
+		if pc == 0x22660 { // just executed move.w 0xf72a,d0 : d0 = readback
+			readHist[uint16(m.CPU.Reg(cpu.D0))]++
+		}
+	}
+	fmt.Println("A7 register selects (high byte of 0xFFF728) -> count:")
+	for sel, n := range selHist {
+		fmt.Printf("  reg %02X x%d\n", sel, n)
+	}
+	fmt.Println("0xFFF72A readback values -> count:")
+	for v, n := range readHist {
+		fmt.Printf("  %04X x%d\n", v, n)
+	}
+
 	// Dump the frozen idle loop: distinct PCs, then the loop body disassembled.
 	fmt.Println("\n--- frozen idle loop (200 steps) ---")
 	seen := map[uint32]bool{}
