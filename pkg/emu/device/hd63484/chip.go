@@ -5,12 +5,29 @@ import (
 	"image/color"
 )
 
-// Display geometry. The HP 8593's CRT raster is 640×480; the ACRTC's PAINT
-// area (per the firmware's 0x003F=63 / 0x00FF=255 parameter words) covers a
-// 1024×512 region. The visible window is the left 640×480 of that area.
+// Display geometry. The HD63484's PAINT/VRAM area (per the firmware's
+// 0x003F=63 / 0x00FF=255 parameter words) covers a 1024×512 bit region.
+//
+// The DISPLAYED raster — the window of VRAM the ACRTC scans to the CRT — is
+// 512×256, set by the boot display-init table at ROM 0xA95E: MWR1=0x40 (64
+// words/line) and VWW=0x0100 (256 displayed lines), with ZFR=0 (×1 zoom, no
+// magnification) and a single base layer (DCR=0xC000). Empirically the firmware
+// draws the graticule as a 400×200 box near (0,0) plus an off-screen back frame
+// at Y[240..440]; with only 256 displayed lines that back frame is below the
+// visible area, which is why it must NOT be rendered. See
+// docs/CRT_GEOMETRY_DIAGNOSIS.md.
+//
+// VisibleWidth/VisibleHeight are that displayed raster (sampled from VRAM).
+// DisplayWidth/DisplayHeight are the OUTPUT framebuffer: the analog CRT stretches
+// the 512×256 raster onto a 4:3 tube, so displayed pixels are ~1.5× taller than
+// wide. We bake that into a 512×384 (4:3) output by upscaling the 256 visible
+// lines ×1.5 vertically (horizontal is 1:1).
 const (
-	DisplayWidth  = 640
-	DisplayHeight = 480
+	VisibleWidth  = 512
+	VisibleHeight = 256
+
+	DisplayWidth  = 512
+	DisplayHeight = 384
 
 	// PaintRowPixels / PaintHeight describe the chip's logical 1bpp paint
 	// area. 1024 pixels per row × 512 rows = 524,288 bits = 65,536 bytes —
@@ -210,7 +227,7 @@ func New() *Chip {
 }
 
 func (c *Chip) resetBounds() {
-	c.minX, c.minY = DisplayWidth, DisplayHeight
+	c.minX, c.minY = VisibleWidth, VisibleHeight
 	c.maxX, c.maxY = 0, 0
 }
 
@@ -257,10 +274,10 @@ func (c *Chip) isVRAMPixelLit(x, y int) bool {
 }
 
 // expandBounds widens the drawn-content bbox to include (x, y). Visible-
-// region clamp so the bbox stays useful for RenderCropped on the 640×480
-// display window.
+// region clamp so the bbox stays useful for RenderCropped — bounds are in
+// VRAM/drawing space (the 512×256 visible window).
 func (c *Chip) expandBounds(x, y int) {
-	if x < 0 || y < 0 || x >= DisplayWidth || y >= DisplayHeight {
+	if x < 0 || y < 0 || x >= VisibleWidth || y >= VisibleHeight {
 		return
 	}
 	if x < c.minX {

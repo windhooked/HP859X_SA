@@ -19,7 +19,13 @@ func (c *Chip) RenderFrame() *image.RGBA {
 	pix := c.img.Pix
 	stride := c.img.Stride
 	for y := 0; y < DisplayHeight; y++ {
-		rowBase := y * PaintRowBytes
+		// Output row y samples VRAM row (y * VisibleHeight / DisplayHeight) —
+		// the analog CRT's vertical stretch of the 256-line raster onto the 4:3
+		// tube (×1.5). Horizontal is 1:1 over the 512-px visible width; VRAM
+		// rows ≥ VisibleHeight (the firmware's off-screen back frame) are never
+		// sampled, so the off-screen second graticule frame is not displayed.
+		srcY := y * VisibleHeight / DisplayHeight
+		rowBase := srcY * PaintRowBytes
 		dstBase := y * stride
 		for x := 0; x < DisplayWidth; x++ {
 			off := dstBase + x*4
@@ -55,10 +61,13 @@ func (c *Chip) RenderCropped() image.Image {
 	if c.maxX < c.minX || c.maxY < c.minY {
 		return c.img
 	}
+	// Bounds are in VRAM/drawing space; the output image is vertically stretched
+	// (VisibleHeight→DisplayHeight). X maps 1:1; Y scales by DisplayHeight/
+	// VisibleHeight.
 	x0 := c.minX - 1
-	y0 := c.minY - 1
 	x1 := c.maxX + 2
-	y1 := c.maxY + 2
+	y0 := c.minY*DisplayHeight/VisibleHeight - 1
+	y1 := (c.maxY+1)*DisplayHeight/VisibleHeight + 1
 	if x0 < 0 {
 		x0 = 0
 	}

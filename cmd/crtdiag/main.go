@@ -40,6 +40,37 @@ func main() {
 		return
 	}
 
+	// Final-refresh view: the last ~60 drawLine calls approximate the most
+	// recent screen paint (what's actually visible at boot end). If the two
+	// boxes are drawn in DIFFERENT refreshes, only one shows here.
+	tail := ll
+	if len(tail) > 60 {
+		tail = tail[len(tail)-60:]
+	}
+	tlx, tly, thx, thy := 1<<30, 1<<30, -(1 << 30), -(1 << 30)
+	for _, r := range tail {
+		for _, p := range [][2]int{{r.X0, r.Y0}, {r.X1, r.Y1}} {
+			if p[0] < tlx {
+				tlx = p[0]
+			}
+			if p[1] < tly {
+				tly = p[1]
+			}
+			if p[0] > thx {
+				thx = p[0]
+			}
+			if p[1] > thy {
+				thy = p[1]
+			}
+		}
+	}
+	fmt.Printf("LAST %d drawLine calls bounding box: x %d..%d  y %d..%d\n", len(tail), tlx, thx, tly, thy)
+	fmt.Println("  last 14 segments:")
+	for i := maxInt(0, len(ll)-14); i < len(ll); i++ {
+		fmt.Printf("    (%4d,%4d)->(%4d,%4d)\n", ll[i].X0, ll[i].Y0, ll[i].X1, ll[i].Y1)
+	}
+	fmt.Println()
+
 	// Overall bounding box.
 	minX, minY, maxX, maxY := 1<<30, 1<<30, -(1 << 30), -(1 << 30)
 	bump := func(x, y int) {
@@ -150,6 +181,26 @@ func main() {
 	fmt.Printf("\nORG commands: %d total, distinct origins (x,y)×count: ", len(orgs))
 	for o, n := range ofreq {
 		fmt.Printf("(%d,%d)×%d  ", o[0], o[1], n)
+	}
+	fmt.Println()
+
+	// Unknown commands — the parser's desync source (an unmodelled opcode
+	// leaves the parser in stCmd, so the following parameter words get
+	// misinterpreted as commands).
+	fmt.Printf("\nparser: %d unknown-command dispatches, %d Glyphs, %d Moves, %d Lines, %d Dots\n",
+		d.UnknownCmds, d.Glyphs, d.Moves, d.Lines, d.Dots)
+	type uc struct {
+		op uint16
+		n  int
+	}
+	var ucs []uc
+	for op, n := range d.UnknownCmdHist {
+		ucs = append(ucs, uc{op, n})
+	}
+	sort.Slice(ucs, func(i, j int) bool { return ucs[i].n > ucs[j].n })
+	fmt.Print("top unknown opcodes (op×count): ")
+	for i := 0; i < len(ucs) && i < 30; i++ {
+		fmt.Printf("%04X×%d  ", ucs[i].op, ucs[i].n)
 	}
 	fmt.Println()
 

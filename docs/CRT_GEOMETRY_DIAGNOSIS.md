@@ -67,4 +67,27 @@ the most common data word.)
    sync.
 
 Tools added: `cmd/crtdiag` (geometry probe), `Chip.Reg(n)` (read-only register accessor),
-`Chip.OrgLog` (ORG-command capture). All diagnostic — no rendering behaviour changed.
+`Chip.OrgLog` (ORG-command capture).
+
+## FIX APPLIED (2026-05-31) — visible window 512×256, 4:3 stretch
+
+Firmware RE (display-init table at ROM **0xA95E**, loader `fcn.0xA91C`, reached from
+`reset_pc` via `fcn.0x38AE → 0xAD76/0xAE88`) gave the ground-truth geometry:
+**MWR1=0x40** (64 words/line → 512 px), **VWW=0x0100** (256 displayed lines),
+**ZFR=0** (×1 zoom — no chip magnification), **DCR=0xC000** (single base layer, no
+split). So the displayed raster is **512×256**, and the off-screen back frame at
+`Y[240..440]` is below the 256-line display — that's the "duplicate box".
+
+Implemented in [chip.go](../pkg/emu/device/hd63484/chip.go) +
+[render.go](../pkg/emu/device/hd63484/render.go): the visible window is now
+`VisibleWidth=512 × VisibleHeight=256` (sampled from VRAM, so off-screen Y≥256 content
+is not drawn), and the output is `DisplayWidth=512 × DisplayHeight=384` with the 256
+raster lines upscaled **×1.5** vertically — the analog CRT's stretch of the 512×256
+raster onto the 4:3 tube. Result (`screens/crt_512x256_fix.png`): the graticule **fills
+and centres the screen** with ~square divisions, and the **duplicate box is gone** —
+matching the real 8593E layout. Golden updated.
+
+Still open (separate items, not CRT-geometry): vertical-stripe background (the uniform
+0x4400 fill — needs dot-texture decode), no trace line yet (trace-paint gap), and the
+parser desync (11285 unknown-opcode dispatches/boot, mostly in self-test phases — see
+above; affects robustness, not the now-correct graticule geometry).
