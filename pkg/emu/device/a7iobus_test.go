@@ -13,12 +13,12 @@ import (
 func TestA7IOBus_RegisterFile(t *testing.T) {
 	var a a7IOBus
 
-	// Select reg 3 (mode nibble 0x1 in the top, as the firmware composes it),
-	// write a value, read it back.
-	a.writeSelect(0x1300)
+	// Select reg 2 (mode nibble 0x1 in the top, as the firmware composes it),
+	// write a value, read it back. Reg 2 is a plain register-file slot.
+	a.writeSelect(0x1200)
 	a.writeData(0xBEEF)
 	if got := a.readData(); got != 0xBEEF {
-		t.Fatalf("reg3 readback = %#04x, want 0xBEEF", got)
+		t.Fatalf("reg2 readback = %#04x, want 0xBEEF", got)
 	}
 
 	// A different register is independent and reads back 0 until written.
@@ -28,10 +28,23 @@ func TestA7IOBus_RegisterFile(t *testing.T) {
 	}
 	a.writeData(0x1234)
 
-	// Re-selecting reg 3 still returns its own value (no cross-talk).
-	a.writeSelect(0x9300) // reg 3, different mode nibble
+	// Re-selecting reg 2 still returns its own value (no cross-talk).
+	a.writeSelect(0x9200) // reg 2, different mode nibble
 	if got := a.readData(); got != 0xBEEF {
-		t.Fatalf("reg3 after touching reg5 = %#04x, want 0xBEEF", got)
+		t.Fatalf("reg2 after touching reg5 = %#04x, want 0xBEEF", got)
+	}
+}
+
+// TestA7IOBus_Reg3SettledStatus checks that A7 register 3 reports the
+// analog-settled status the firmware gates on at ROM 0x22818: bits 6–7 must
+// read as 0b10 (bit7 set, bit6 clear) so `(readback & 0xC0) == 0x80`, while
+// other bits pass through any stored value.
+func TestA7IOBus_Reg3SettledStatus(t *testing.T) {
+	var a a7IOBus
+	a.writeSelect(0x0300) // reg 3
+	got := a.readData()
+	if got&0xC0 != 0x80 {
+		t.Fatalf("reg3 status bits = %#02x, want bit7 set + bit6 clear (0x80)", got&0xC0)
 	}
 }
 

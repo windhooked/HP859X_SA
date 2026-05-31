@@ -63,7 +63,31 @@ func (a *a7IOBus) writeSelect(v uint16) { a.sel = v }
 // writeData stores a word written to 0xFFF72A into the selected register.
 func (a *a7IOBus) writeData(v uint16) { a.regs[a.reg()] = v }
 
-// readData returns the selected register's last-written value. Status/readback
-// registers with live hardware semantics are not yet distinguished (see the
-// type doc); they fall through to the register file.
-func (a *a7IOBus) readData() uint16 { return a.regs[a.reg()] }
+// a7Reg3SettledHi / a7Reg3SettledLo are the bit 7 / bit 6 status of A7
+// register 3, the analog-settle/lock status the post-boot measurement loop
+// polls. The firmware at ROM 0x22818 reads register 3 and spins until
+// `(readback & 0xC0) == 0x80` — i.e. bit 7 SET, bit 6 CLEAR — then proceeds
+// (writes command 0x203 to the $bffe mailbox). On real hardware bit 7 asserts
+// once the A7 analog chain has settled / the LO has locked after the firmware
+// programs it; bit 6 is a separate flag (a band/gain valid bit tested
+// elsewhere at 0x228c2). We report "settled" so the measurement state machine
+// advances past this poll. See docs/A7_ANALOG_IO_BUS.md.
+const (
+	a7Reg3Settled = 0x80 // bit7 = settled/locked, bit6 = 0
+)
+
+// readData returns the selected register's value. Register 3 is a live status
+// register (the analog-settle/lock status — see a7Reg3Settled); every other
+// register falls through to the register file (last-written value, 0 if
+// untouched). Wide DAC/readback registers thus stay faithful while the one
+// status register the firmware gates on reports ready.
+func (a *a7IOBus) readData() uint16 {
+	switch a.reg() {
+	case 3:
+		// Force bits 6–7 to the "settled" pattern (bit7=1, bit6=0); preserve any
+		// other bits a caller might have stored so non-status readers see them.
+		return (a.regs[3] &^ 0x00C0) | a7Reg3Settled
+	default:
+		return a.regs[a.reg()]
+	}
+}

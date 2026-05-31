@@ -8,6 +8,8 @@ package main
 
 import (
 	"fmt"
+	"image/png"
+	"os"
 
 	"github.com/windhooked/HP859X_SA/internal/emutest"
 	"github.com/windhooked/HP859X_SA/pkg/emu/bus"
@@ -59,6 +61,14 @@ func main() {
 		fmt.Printf("window %2d (~%dM cyc): Lines=%d Dots=%d Glyphs=%d  opLoop=%v  b0a0=%04X  bfe6=%d a62a=%04X\n",
 			w, (w+1)*25, m.MMIO.Display.Lines, m.MMIO.Display.Dots, m.MMIO.Display.Glyphs,
 			reached, rdW(0xFFB0A0), rdW(0xFFBFE6), rdW(0xFFA62A))
+	}
+
+	// Render the final framebuffer so we can see what the (now un-frozen)
+	// state machine drew.
+	if f, err := os.Create("/tmp/longrun.png"); err == nil {
+		png.Encode(f, m.MMIO.Display.RenderFrame())
+		f.Close()
+		fmt.Println("wrote /tmp/longrun.png")
 	}
 
 	// Capture what the frozen loop does with the A7 analog-interface I/O bus:
