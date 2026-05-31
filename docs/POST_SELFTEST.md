@@ -97,3 +97,25 @@ maps to a specific un-modeled analog/timer status, so this dovetails with the
 analog model (docs/ANALOG_MODEL_PLAN.md). OVEN COLD is the easiest — a fake
 5-minute IRQ5-tick timer with no temp sensor; it self-clears after ~5 min of
 modeled runtime.
+
+### Update: the fcn.268aa status-message system is NOT the boot annunciator path
+
+Traced the static gate: ROM 0x26d2e draws a status string (base 0x2b31e) when
+`fcn.268aa() != 5`. fcn.268aa reads the annunciator-status indirect bus at
+**0xFFF758 (data) / 0xFFF75A (select)** (write select 8 → read 0xFFF758 →
+process high byte & 7), gated first by `fcn.2689c` which tests **0xFFBF2A bit 16**
+(`move.l $bf2a,D6; not.l; btst #$10` → returns bit0). BUT a boot PC-reach probe
+shows **none of 0x26d2e/0x268aa/0x2689c/0x26ede execute during boot** (x0), and
+0xFFF758/75A sees **zero** boot traffic. So this is a *separate* message system
+(HP-IB / service-mode), sharing the 0x2b31e string base — a red herring for the
+graticule annunciators.
+
+**Reframe for next session:** the boot annunciators (REF UNLOCK / ADC-TIME FAIL
+/ OVEN COLD) are most likely drawn ONCE as the default power-up state and only
+*removed* when each subsystem's status-good path runs (ref-lock acquired, ADC
+cal pass, oven-warm timer elapsed) — which never fires with un-modeled hardware.
+Productive target = the status-CLEARING path per annunciator, found by either
+(a) instrumenting the ACRTC glyph emission (watch 0xFFF5FE writes + backtrace) to
+find the actual graticule drawer/clearer, or (b) modeling each subsystem status
+(0xFFBF2A is a candidate system-status long worth watching). Not the 0x26Exx /
+0xFFF758 path.
