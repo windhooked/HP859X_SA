@@ -225,6 +225,16 @@ func main() {
 		fmt.Printf(" %04X:%d", pages[i].page, pages[i].count)
 	}
 	fmt.Println()
+	// Deterministic ADC-cal signal (not the blinking render): the active-
+	// annunciator buffer $ac9e + the cal state vars. ADC-FAIL annunciator
+	// indices: ADC-TIME=9 ADC-GND=10 ADC-2V=11.
+	annun := make([]byte, 16)
+	for i := range annun {
+		annun[i] = byte(m.Bus.Read(0xFFAC9E+uint32(i), bus.Byte))
+	}
+	fmt.Printf("  $ac9e (active annunciators): % 02x\n", annun)
+	fmt.Printf("  cal vars: 94da=%04X 94dc=%04X 94dd=%04X 94e4=%04X 94e6=%04X 94e8=%04X\n",
+		rdw(0xFF94DA), rdw(0xFF94DC), rdw(0xFF94DD), rdw(0xFF94E4), rdw(0xFF94E6), rdw(0xFF94E8))
 	fmt.Printf("  draw counts: moves=%d glyphs=%d lines=%d rects=%d dots=%d paints=%d paintWords=%d\n",
 		d.Moves, d.Glyphs, d.Lines, d.Rects, d.Dots, d.Paints, d.PaintWords)
 	// VRAM pattern check: dump 24 bytes of two adjacent rows. If identical →
