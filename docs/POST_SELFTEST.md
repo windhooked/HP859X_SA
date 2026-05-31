@@ -174,3 +174,23 @@ visible annunciator via the glyph drawer that consumes them, then trace that one
 source bit (in B1F0/B1F6/B1FA) back to the subsystem status check that sets it,
 and model that hardware as good. The dispatch is no longer a blocker — rendertrace
 walks it. NEW reusable infra: `CPU.RunUntil(cycles, stopPC)` + `cmd/rendertrace`.
+
+### Perturbation result: the source flags are multi-purpose (don't bulk-clear)
+
+Two decisive experiments (`cmd/annunctest`):
+1. Zeroing the source flags + packed words *post-boot* (40M-cycle window) leaves
+   the on-screen annunciators unchanged (`B08C=B098=B060=0000` but REF UNLOCK /
+   ADC-TIME / OVEN COLD still drawn) — the boot drew them into VRAM and the
+   operating loop does not redraw-clear that region. screens/annunc_cleared.png.
+2. Zeroing them *during* boot (before the render) DISRUPTS the boot: the FAIL
+   line + HP-IB ADRS vanish, `EMPTY DLP MEM 7` and a NEW `FREQ UNCAL` annunciator
+   appear, and the three annunciators STILL show. screens/annunc_boot_cleared.png.
+
+Conclusion: 0xFFB1E0/B1F0/B1F6/B1F8/B1FA are **multi-purpose system-status words**
+(frequency-cal, DLP-memory, annunciator bits all interleaved), so the annunciator
+bits cannot be bulk-cleared without collateral damage. The aggregation map in
+fcn.11B9A is correct (data flow proven), but each visible annunciator must be
+cleared by modeling the specific subsystem hardware it reflects (ref-PLL lock →
+REF UNLOCK, ADC-timing → ADC-TIME FAIL, oven 5-min timer → OVEN COLD), NOT by
+flag-poking. That is analog-model work (docs/ANALOG_MODEL_PLAN.md). The render
+dispatch itself is fully cracked (cmd/rendertrace) and no longer a blocker.
