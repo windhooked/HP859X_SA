@@ -221,3 +221,16 @@ gate); inject a PRESET / FREQUENCY key via FrontPanel.SetBit + IRQ3 to put the
 firmware in continuous-sweep spectrum mode, then the sweep-clock + SweepEngine
 paint the trace. The KEYSTONE blocker (frozen operating loop) is solved; this is
 mode/menu navigation on a now-living firmware.
+
+### Sweep cycle runs (fill→process→re-arm); trace-PLOT is the last piece (DLP)
+
+With f300 bit11 + IRQ6 fill, the firmware runs the full sweep cycle: cmd/looptrace2
+single-sweep mode shows A5 fills to bf30 then RESETS to 0x2FD508 each sweep (the
+firmware re-arms — confirms fcn.171f6 processes the completed sweep). But the
+trace LINE doesn't paint (Δdots=28, Δlines=2 over 3 sweeps; a real trace is ~401
+points). So the sweep cycle is alive but the trace-PAINT step — the __GTTDRW DLP
+command (0x65986) — still doesn't produce the line, consistent with the DLP
+runtime not executing the trace-draw source. So the trace draw reduces to: get the
+sweep-trace DLP source (0x5fa22, scheduled by fcn.5ED7E) onto the DLP ring and run
+it. The frozen-loop + sweep-cycle are solved; the trace paint is the final DLP
+step. Tools: cmd/looptrace2, cmd/tracehunt, cmd/rendertrace.
