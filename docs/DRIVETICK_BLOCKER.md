@@ -234,3 +234,17 @@ runtime not executing the trace-draw source. So the trace draw reduces to: get t
 sweep-trace DLP source (0x5fa22, scheduled by fcn.5ED7E) onto the DLP ring and run
 it. The frozen-loop + sweep-cycle are solved; the trace paint is the final DLP
 step. Tools: cmd/looptrace2, cmd/tracehunt, cmd/rendertrace.
+
+### DATA PATH VERIFIED — buffer holds the analog spectrum; only the DLP paint remains
+
+cmd/looptrace2 (buffer-dump mode): after driving one sweep, the trace buffer at
+0x2FD508 (401 words) holds the SweepEngine spectrum — **max=0x17F (CAL peak), min
+=0x0 (noise floor)**. So analog-model → sweep → IRQ6 capture → trace buffer is
+fully working and faithful. The instrument is sweeping with correct data in the
+buffer.
+
+**The ONLY remaining gap is the trace PAINT** — the firmware reading 0x2FD508 and
+drawing the line, i.e. the __GTTDRW DLP command (0x65986) / its plot source
+(0x5fa22). fcn.171f6 captures+processes the sweep but the plot is the DLP step
+that isn't running. Next: confirm whether the sweep cycle schedules 0x5fa22 (via
+fcn.5ED7E) and run it on the DLP ring. Everything upstream of the paint is done.
