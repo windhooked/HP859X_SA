@@ -244,3 +244,31 @@ trace to the hardware read → model it good. The annunciator add/remove API
 (fcn.e7f0/e87e + cmd/annuncode) localizes each; the gates run at boot. This is
 the concrete, bounded analog-status-model task — one boot-time gate per
 annunciator, modelled like the POST f610/f612 latches were.
+
+### VERIFIED annunciator code map + the control model (cmd/anndesc)
+
+Descriptor table [0xFF9562] (base 0xFC58E2 after boot), 6 bytes/code, middle word
+= string offset from base 0x2b31e. Verified codes:
+
+| code | annunciator | code | annunciator |
+|------|-------------|------|-------------|
+| 0x0B | ADC-GND FAIL | 0x23 | FREQ UNCAL |
+| 0x0D | **OVEN COLD** | 0x28 | **ADC-TIME FAIL** |
+| 0x18 | ADC-2V FAIL  | 0x0C/12.. | UNLVL family |
+
+(My earlier guess "OVEN COLD = 0x31/0x32" was WRONG — 0x31/0x32 are handled by the
+unrelated 0x875E gate. Lesson: verify code↔string via the descriptor table first.)
+
+**Control model (confirmed):** every status annunciator is ADDED by default at
+power-up; the boot REMOVES the ones whose status is good. Each has a handler of
+the form `test status-word → fcn.e87e(code) remove if good / fcn.e7f0(code) add
+if bad`. Examples found:
+- FREQ UNCAL (0x23) @ 0x11EB2: `movem.l $b084; or.l; bne add; e87e(0x23)` → B084==0 ⇒ removed.
+- code 0x22 @ 0x11E90: tests $b082. code 0x20 @ 0x9DB2: `cmpi #2,$b1f2`. code 0x11/0x12 @ 0x10498: `cmpi #$12,$b1fe`.
+
+So `cmd/annuncode` (REMOVE scan) confirms the boot removes 0x0C/0x22/0x23/0x27/
+0x2A… (good) but NOT 0x0D/0x28 (OVEN COLD/ADC-TIME still bad). **To clear OVEN
+COLD / ADC-TIME: find each one's status-word test (same handler pattern) and make
+that status read good** — most likely model the ADC-timing self-test (ADC-TIME)
+and the oven/ref hardware so the boot's own handler removes the annunciator.
+This is the precise, bounded remaining task. Tool: cmd/anndesc (verified code map).
