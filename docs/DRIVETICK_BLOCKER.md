@@ -281,3 +281,25 @@ in the now-running operating loop, find why the continuous-sweep DLP source (whi
 calls __GTTDRW) isn't scheduled — Gate 2. Tool: cmd/dlpsched (4-phase probe:
 schedule histogram → interpreter/loop hits → steady-state PC histogram → 0xA9A0
 gate dump + force test).
+
+### 2026-05-31 (cont.): Gate-1 traced to display-mode 0xB0EC, but it's multi-layered
+
+Traced 0xFFA9A0 (the Gate-1 sweep-point counter) to its writers: it is set POSITIVE
+(e.g. 20) at PC **0x90C8** and to **-1** at PC **0x92B2/0x92AA**. Right after the
+0x90C8 write, **0x90CE checks `cmpi.w #0x31, 0xFFB0EC`** — 0xB0EC is the DISPLAY-MODE
+cell (spectrum modes = 0x2D/0x31/0x36; cf. [[trace-display-path]]). Measured: after
+boot **0xB0EC = 0x00** (writers set 0x01 at the PRESET handler 0x4E020 and 0x01/0x1A
+at the mode setter 0x21CDC — NEVER a spectrum mode). So the firmware is in a non-
+spectrum (config/init) mode, the sweep never arms, a9a0 stays -1, Gate 1 holds.
+
+BUT forcing 0xB0EC=0x31 (spectrum) while stepping did NOT make a9a0 go positive
+(0/6M steps; operating loop barely entered, 5×). So the display mode is NECESSARY
+but NOT SUFFICIENT: the choice between the a9a0-positive arm path (0x90C8) and the
+a9a0=-1 abort path (0x92B2) depends on more sweep state than the mode byte alone.
+
+**Net:** the trace blocker is a multi-layered sweep-state machine, not a single
+lever — mode (0xB0EC) + sweep-arm path selection (0x90C8 vs 0x92B2 / fcn.89e0 reading
+0xBB06) + Gate-2 (continuous-sweep DLP in the operating loop). Forcing a9a0>=0
+directly DOES reach the operating loop (33×) but still not __GTTDRW. A faithful fix
+needs the sweep-arming subsystem modeled end-to-end (multi-session). The precise
+gates are now all localized (this doc) for that work.
