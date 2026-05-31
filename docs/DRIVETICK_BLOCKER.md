@@ -174,3 +174,31 @@ C. **Trace what RAM state Rev L's `fcn.568F6 → fcn.11DF4` chain wants
 - `docs/rom_annotations.md` — boot-menu loader chain, dispatch tables.
 - Memory `rev-l-key-consumer-chain.md` — earlier (now stale) notes
   from when these tests passed under 17.12.90 + the 8595 strap.
+
+## 2026-05-31: CRACKED — the operating-loop idle gate is 0xFFF300 bit 11 (sweep-complete)
+
+The 2026-05-29 analog-poll freeze is RESOLVED (the analog-bus model un-froze it);
+the firmware now reaches the operating loop. But it gets stuck in an **idle wait
+loop at ROM 0x188b6** (cmd/looptrace2). Decoded, that loop polls for work and
+exits to the work path 0x18910 when any of: **0xFFF300 bit 11 set** (sweep
+complete), fcn.11da8≠0, or a DLP/key queue head≠tail. With none asserted it spins
+forever — the long-standing "DriveTick" stall.
+
+**0xFFF300 bit 11 = SWEEP COMPLETE.** We modelled bit 12 (sweep-ready) but never
+bit 11. Asserting it makes the firmware exit the idle loop → 0x18910 → (bit11
+set) → **0x18a8c, the continuous-sweep handler**: it re-arms the next sweep
+(loads bf34 from the sweep vtable at b1e8, writes the sweep DACs f716/f70a) and
+calls fcn.171f6 to process the completed sweep. At 0x1892A the firmware ACKs by
+writing 0xFFF300 (clears bit 11). This is the continuous-sweep cycle.
+
+Verified (cmd/looptrace2): asserting 0xFFF300 bit 11 un-sticks the firmware — it
+leaves the idle loop and runs (renders COPYRIGHT HP 1986-98 / rev 980515, drives
+the softkey menu, +250 display lines). The idle gate is cracked.
+
+**Remaining (sweep-clock integration):** model bit 11 faithfully as a sweep clock
+— assert on buffer-full (A5≥bf30), let the firmware ACK-clear it at 0x1892A,
+re-assert after the next sweep period, in sync with IRQ6 buffer fill — so the
+firmware runs a clean continuous-sweep cycle and fcn.171f6 draws the trace
+(rather than the arbitrary timing that currently sends it menu-walking). This is
+the M2 sweep engine. The KEY blocker (the idle gate) is solved. Tool:
+cmd/looptrace2; analog data: pkg/emu/device/sweepengine.go.
