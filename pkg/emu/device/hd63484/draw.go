@@ -20,6 +20,9 @@ func (c *Chip) setPixel(x, y int, set bool) {
 // per-step pattern matching for dotted/dashed styles — but the firmware
 // uses solid-line style for the graticule, so we render solid.
 func (c *Chip) drawLine(x0, y0, x1, y1 int, set bool) {
+	if c.LineLog != nil {
+		c.LineLog = append(c.LineLog, LineRec{x0, y0, x1, y1})
+	}
 	dx, dy := x1-x0, y1-y0
 	if dx < 0 {
 		dx = -dx

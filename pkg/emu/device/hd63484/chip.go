@@ -148,7 +148,20 @@ type Chip struct {
 	AreaClears     int            // CLR commands executed
 	UnknownCmds    int            // commands the parser saw but doesn't model
 	UnknownCmdHist map[uint16]int // histogram of unknown opcodes for RE
+
+	// LineLog, when non-nil, records the endpoints of every drawLine call.
+	// Trace-draw probes use it to distinguish the regular graticule grid
+	// (long axis-aligned segments at fixed pitch) from an irregular data
+	// trace (a dense run of short segments tracking sample values). Enable
+	// with EnableLineLog(); drawLine appends while it is non-nil.
+	LineLog []LineRec
 }
+
+// LineRec is one captured line segment (see Chip.LineLog).
+type LineRec struct{ X0, Y0, X1, Y1 int }
+
+// EnableLineLog turns on per-line endpoint capture into Chip.LineLog.
+func (c *Chip) EnableLineLog() { c.LineLog = make([]LineRec, 0, 4096) }
 
 // New constructs a chip with a cleared VRAM + zeroed state. If the
 // HD63484_GLYPHLOG environment variable is set, a GlyphLogger is attached
