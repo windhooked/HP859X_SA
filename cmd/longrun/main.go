@@ -14,6 +14,7 @@ import (
 	"github.com/windhooked/HP859X_SA/internal/emutest"
 	"github.com/windhooked/HP859X_SA/pkg/emu/bus"
 	"github.com/windhooked/HP859X_SA/pkg/emu/cpu"
+	"github.com/windhooked/HP859X_SA/pkg/emu/device"
 	"github.com/windhooked/HP859X_SA/pkg/emu/machine"
 	"github.com/windhooked/HP859X_SA/pkg/emu/romloader"
 )
@@ -61,6 +62,15 @@ func main() {
 		fmt.Printf("window %2d (~%dM cyc): Lines=%d Dots=%d Glyphs=%d  opLoop=%v  b0a0=%04X  bfe6=%d a62a=%04X\n",
 			w, (w+1)*25, m.MMIO.Display.Lines, m.MMIO.Display.Dots, m.MMIO.Display.Glyphs,
 			reached, rdW(0xFFB0A0), rdW(0xFFBFE6), rdW(0xFFA62A))
+	}
+
+	if len(device.A7ReadHist) > 0 {
+		fmt.Println("A7 register reads over the whole boot (reg -> count, lastSelect, lastVal):")
+		for r := 0; r < 16; r++ {
+			if v, ok := device.A7ReadHist[r]; ok {
+				fmt.Printf("  reg %2d: count=%-7d lastSel=%04X lastVal=%04X\n", r, v[0], v[1], v[2])
+			}
+		}
 	}
 
 	// Render the final framebuffer so we can see what the (now un-frozen)

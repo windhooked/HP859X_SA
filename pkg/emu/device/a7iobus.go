@@ -1,5 +1,15 @@
 package device
 
+import "os"
+
+// A7ReadHist is a diagnostic histogram of A7-register reads: reg -> {count,
+// last-select, last-returned}. Populated only when the A7_LOG env var is set.
+// Used by cmd/longrun to find which A7 status registers the boot-time analog
+// self-test polls (for the REF UNLOCK / OVEN COLD / ADC annunciators).
+var A7ReadHist = map[int][3]int{}
+
+var a7LogOn = os.Getenv("A7_LOG") != ""
+
 // a7IOBus models the A16→A7 "I/O bus": the indirect register pair at
 // 0xFFF728 (select) and 0xFFF72A (data) through which the A16 processor board
 // programs the A7 analog-interface assembly and reads its status back.
@@ -82,6 +92,10 @@ const (
 // untouched). Wide DAC/readback registers thus stay faithful while the one
 // status register the firmware gates on reports ready.
 func (a *a7IOBus) readData() uint16 {
+	if a7LogOn {
+		v := A7ReadHist[a.reg()]
+		A7ReadHist[a.reg()] = [3]int{v[0] + 1, int(a.sel), int(a.regs[a.reg()])}
+	}
 	switch a.reg() {
 	case 3:
 		// Force bits 6–7 to the "settled" pattern (bit7=1, bit6=0); preserve any
