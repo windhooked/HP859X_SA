@@ -142,3 +142,35 @@ cmd/annunchunt, cmd/befprobe.
 **Recommendation:** crack this interactively (break at 0x184BA, step the render)
 in a focused session, OR pivot to the M2 spectrum trace (fully mapped, tractable,
 high visual impact) and return to the cosmetic annunciators after.
+
+### CRACKED: the annunciator render pipeline (via shadow-stack tracer)
+
+The table-dispatched render that defeated A6-backtracing is solved with
+`cmd/rendertrace` (uses the new `CPU.RunUntil` to land exactly on the render
+entry, then single-steps tracking call DEPTH through the slot dispatch). The boot
+status render `fcn.17546` → slot 0x520 calls a tree of drawers; the annunciator
+one is **fcn.11B9A**, which reads the hardware-status source flags and aggregates
+them into the packed annunciator display words:
+
+```
+fcn.11B9A (ROM 0x11B9A):
+  B084 = (B084 & 0x00FF) | (B20E & 0xFF00)
+  B08C = (B08C>>15)      | (B1F0<<1)              ; B08C annunciator bits <- B1F0
+  B098 = (B098>>15 & 1)  | (B1F6 & 0xFFFE)        ; B098 <- B1F6
+  B060 = (B060>>15)      | (B1FA<<2) | ((B1F8>>2)&2)  ; B060 <- B1FA, B1F8
+  B068 = B038
+  btst #13,B1E0 -> bset #31,B0C2 ; btst #11,B0CE -> B246/B248 swap
+  jsr fcn.6B1C(A0=B060, n=0x64) -> B128           ; CHECKSUM (change-detect, not draw)
+```
+
+So the annunciator display state lives in **B060/B068/B08C/B098/B0C2** and is fed
+by the source-status flags **0xFFB1E0/B1F0/B1F6/B1F8/B1FA** (enumerate writers
+with `cmd/befprobe`; each is a complex multi-subsystem word, ~25 writers — e.g.
+B1E0=0x1830, B1F0=0x0064, B1F6=0x00A0, B1F8=0x1856 after boot). fcn.6B1C is a
+checksum/smoothing helper, not the glyph drawer.
+
+**Remaining (well-defined):** map a specific packed bit (B08C/B098/B060) to each
+visible annunciator via the glyph drawer that consumes them, then trace that one
+source bit (in B1F0/B1F6/B1FA) back to the subsystem status check that sets it,
+and model that hardware as good. The dispatch is no longer a blocker — rendertrace
+walks it. NEW reusable infra: `CPU.RunUntil(cycles, stopPC)` + `cmd/rendertrace`.
