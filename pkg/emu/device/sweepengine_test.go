@@ -1,6 +1,10 @@
 package device
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/windhooked/HP859X_SA/pkg/emu/analog"
+)
 
 // TestSweepEngineCALPeak verifies the analog-model sweep produces a faithful
 // trace: a peak at the 300 MHz CAL frequency well above the noise floor, with
@@ -41,6 +45,39 @@ func TestSweepEngineCALPeak(t *testing.T) {
 	if int(peakADC) < floor+0x80 {
 		t.Errorf("peak %#x not above noise floor %#x", peakADC, floor)
 	}
+}
+
+// TestSweepEngineTunes verifies the trace follows tuning: zooming the span to
+// the CAL frequency moves the peak to screen centre, and an injected tone shows
+// at its own point/level. This is the M3 "trace follows CF/span" behaviour.
+func TestSweepEngineTunes(t *testing.T) {
+	s := NewSweepEngine()
+	s.StartHz, s.StopHz = 290e6, 310e6 // zoom to the 300 MHz CAL (span 20 MHz)
+	peak := peakPoint(s)
+	if mid := s.Points / 2; peak < mid-8 || peak > mid+8 {
+		t.Errorf("zoomed CAL peak at point %d, want ≈centre %d", peak, mid)
+	}
+
+	// inject a tone at 1.2 GHz in a 0..2 GHz span; expect a peak at its point.
+	s2 := NewSweepEngine()
+	s2.StartHz, s2.StopHz = 0, 2e9
+	s2.Spectrum.Signals = []analog.Signal{{Hz: 1.2e9, DBm: -25}}
+	want := int(1.2e9 / 2e9 * float64(s2.Points-1))
+	// the injected tone is the strongest above the CAL near 300 MHz only if it
+	// is higher; verify a peak exists at the injected point's bucket.
+	if adc := s2.levelToADC(s2.LevelAt(want)); adc < videoADCFull/2 {
+		t.Errorf("injected tone at point %d ADC=%#x too low", want, adc)
+	}
+}
+
+func peakPoint(s *SweepEngine) int {
+	best, bp := uint16(0), -1
+	for p := 0; p < s.Points; p++ {
+		if a := s.levelToADC(s.LevelAt(p)); a > best {
+			best, bp = a, p
+		}
+	}
+	return bp
 }
 
 // TestSweepEngineDetectAdvances verifies DetectADC walks the sweep and wraps.
