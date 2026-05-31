@@ -1,7 +1,6 @@
-// Clean continuous-sweep drive: clear the stale key flag, model 0xFFF300 bit 11
-// as sweep-complete (assert on buffer full, firmware acks by writing f300),
-// drive IRQ6 to fill from the SweepEngine, and render — to get fcn.171f6 to draw
-// the trace without the firmware menu-walking on a stale key.
+// Proper one-shot sweep-clock: clear f300 bit11 when the firmware re-arms (writes
+// sweep DAC 0xFFF716), drive IRQ6 to fill the buffer from the SweepEngine, set
+// bit11 ONCE when full (A5>=bf30). This is the faithful handshake fcn.171f6 polls.
 package main
 
 import (
@@ -23,33 +22,41 @@ func main() {
 	m.BootToOperating(165_000_000)
 	m.MMIO.SweepActive = true
 	rdL := func(a uint32) uint32 { return m.Bus.Read(a, bus.Long) }
-	rdW := func(a uint32) uint16 { return uint16(m.Bus.Read(a, bus.Word)) }
-	lb := emutest.NewLoopBreaker(50)
-	reach171f6, reachDraw := 0, 0
-	for chunk := 0; chunk < 200_000; chunk++ {
-		m.Bus.Write(0xFFBC67, bus.Byte, 0) // keep the key flag clear (no menu-walk)
-		bf30 := rdL(0xFFBF30)
-		bf34 := rdL(0xFFBF34)
-		full := bf30 != 0 && m.CPU.Reg(cpu.A5) >= bf30
-		// assert f300 bit11 when full, else clear (firmware acks by writing it)
-		v := rdW(0xFFF300)
-		if full {
+	setBit11 := func(on bool) {
+		v := m.Bus.Read(0xFFF300, bus.Word)
+		if on {
 			v |= 0x0800
 		} else {
 			v &^= 0x0800
 		}
-		m.Bus.Write(0xFFF300, bus.Word, uint32(v))
-		for s := 0; s < 8; s++ {
-			pc := m.CPU.Reg(cpu.PC)
-			if pc == 0x171F6 {
-				reach171f6++
+		m.Bus.Write(0xFFF300, bus.Word, v)
+	}
+	complete := false
+	m.Bus.OnWrite = func(a uint32, sz bus.Size, v uint32) {
+		if a == 0xFFF716 && complete { // firmware re-armed → start a new sweep
+			complete = false
+			m.MMIO.Sweep.Reset()
+		}
+	}
+	lb := emutest.NewLoopBreaker(50)
+	sweeps := 0
+	for chunk := 0; chunk < 200_000; chunk++ {
+		bf30 := rdL(0xFFBF30)
+		bf34 := rdL(0xFFBF34)
+		if !complete && (bf34 == 0x40B8 || bf34 == 0x410A) && bf30 != 0 {
+			for k := 0; k < 8 && m.CPU.Reg(cpu.A5) < bf30; k++ {
+				m.CPU.SetIRQ(6)
+				m.CPU.Run(250)
+				m.CPU.SetIRQ(0)
 			}
-			if pc == 0x65986 {
-				reachDraw++
+			if m.CPU.Reg(cpu.A5) >= bf30 {
+				complete = true
+				setBit11(true)
+				sweeps++
 			}
-			if m.CPU.Step() != nil {
-				break
-			}
+		}
+		if !complete {
+			setBit11(false)
 		}
 		m.CPU.Run(2000)
 		lb.Check(m.CPU.Reg(cpu.PC), m.CPU.SetReg)
@@ -58,17 +65,10 @@ func main() {
 			m.CPU.Run(400)
 			m.CPU.SetIRQ(0)
 		}
-		if (bf34 == 0x40B8 || bf34 == 0x410A) && !full {
-			for k := 0; k < 6 && m.CPU.Reg(cpu.A5) < bf30; k++ {
-				m.CPU.SetIRQ(6)
-				m.CPU.Run(250)
-				m.CPU.SetIRQ(0)
-			}
-		}
 	}
-	fmt.Printf("fcn.171f6 reached: %d   __GTTDRW: %d   lines=%d\n", reach171f6, reachDraw, m.MMIO.Display.Lines)
-	f, _ := os.Create("screens/trace_clean.png")
+	fmt.Printf("sweeps signalled complete: %d  final lines=%d\n", sweeps, m.MMIO.Display.Lines)
+	f, _ := os.Create("screens/trace_sweepclock.png")
 	png.Encode(f, m.MMIO.Display.RenderFrame())
 	f.Close()
-	fmt.Println("wrote screens/trace_clean.png")
+	fmt.Println("wrote screens/trace_sweepclock.png")
 }

@@ -202,3 +202,22 @@ firmware runs a clean continuous-sweep cycle and fcn.171f6 draws the trace
 (rather than the arbitrary timing that currently sends it menu-walking). This is
 the M2 sweep engine. The KEY blocker (the idle gate) is solved. Tool:
 cmd/looptrace2; analog data: pkg/emu/device/sweepengine.go.
+
+### Sweep-clock handshake works; secondary blocker = firmware is in CONFIG mode
+
+Implemented the faithful one-shot sweep-clock (cmd/looptrace2): clear f300 bit11
+when the firmware re-arms (writes sweep DAC 0xFFF716), drive IRQ6 to fill the
+buffer from the SweepEngine, set bit11 once when full (A5>=bf30). This avoids the
+crude-timing menu-walk. fcn.171f6 (the sweep executor) returns-early when bit11 is
+clear and processes/draws when set — confirmed the contract.
+
+BUT: with the gate open the firmware navigates to the COPY/CONFIG softkey menu
+(Config Print/Plot, "PRNT PLT COPY DEV") rather than staying in the spectrum
+continuous-sweep MEASURE mode, so fcn.171f6's draw path isn't sustained (only ~6
+sweeps complete then it stops re-arming). The main graticule is shown but no trace
+line. **Next: get the firmware into MEASURE mode** — now that the operating loop
+runs, the front-panel key path should work too (it was blocked by the same idle
+gate); inject a PRESET / FREQUENCY key via FrontPanel.SetBit + IRQ3 to put the
+firmware in continuous-sweep spectrum mode, then the sweep-clock + SweepEngine
+paint the trace. The KEYSTONE blocker (frozen operating loop) is solved; this is
+mode/menu navigation on a now-living firmware.
