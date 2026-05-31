@@ -168,7 +168,16 @@ func (dec *decoder) handleWPRSideEffect(c *Chip, reg, value uint16) {
 	case PRMARHigh:
 		c.marHigh = value
 		if c.marLow == 0x4000 && c.marHigh == 0x0000 {
-			c.memPos = 0
+			// The raster burst targets the MAR word-address: MAR =
+			// (marHigh<<16)|marLow = 0x4000 words → byte offset 0x8000 = row
+			// 256. That is the OFF-SCREEN back-buffer (the display shows only
+			// the 256 lines at rows 0..255 — VisibleHeight). The firmware's
+			// uniform 0x4400 fill is a back-buffer prepare, NOT visible
+			// content; writing it at its true MAR offset keeps it off-screen
+			// instead of striping the visible graticule. (memPos is a byte
+			// offset into bgVram; the fill of 16384 words = 32768 bytes lands
+			// in bgVram[0x8000..0xFFFF] = rows 256..511.)
+			c.memPos = (int(c.marHigh)<<16 | int(c.marLow)) << 1
 			c.Paints++
 			dec.st = stRasterData
 			dec.wptnCount = 0

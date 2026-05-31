@@ -96,3 +96,7 @@ func (c *Chip) Image() *image.RGBA {
 // tests / probes). Live buffer; copy if you need to retain it across
 // further writes.
 func (c *Chip) VRAM() []byte { return c.vram[:] }
+
+// BgVRAM returns a read-only view of the background plane (the 0x4400 raster
+// fill). For diagnostics that inspect the background dot/stripe texture.
+func (c *Chip) BgVRAM() []byte { return c.bgVram[:] }

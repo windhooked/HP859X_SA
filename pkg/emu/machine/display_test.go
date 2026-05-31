@@ -55,14 +55,15 @@ func TestMachineBootScreen(t *testing.T) {
 	// many subroutines, so the instantaneous PC is not a reliable "booted"
 	// signal — a rendered screen is.)
 	//
-	// Threshold tuned for Rev L at 200M cycles with HD63484 raster decoding:
-	// the firmware's 0x4400 dot-pattern background fill plus the graticule +
-	// annunciator overlay, sampled into the 512×384 output (the ACRTC's 512×256
-	// displayed raster, ×1.5 vertical stretch for the 4:3 CRT — see
-	// docs/CRT_GEOMETRY_DIAGNOSIS.md). Without the raster decoder we'd only see
-	// text; the order-of-magnitude jump confirms the PAINT pipeline is feeding
-	// video RAM. The exact count is locked by the golden PNG below.
-	if lit := litPixels(got); lit < 10_000 {
+	// Threshold for Rev L at 200M cycles: the graticule frame + grid + the
+	// annunciator/label text, sampled into the 512×384 output (the ACRTC's
+	// 512×256 displayed raster, ×1.5 vertical stretch for the 4:3 CRT — see
+	// docs/CRT_GEOMETRY_DIAGNOSIS.md). ~11k lit pixels. The firmware's uniform
+	// 0x4400 raster fill is its OFF-SCREEN back-buffer (MAR=0x4000 = row 256,
+	// below the 256-line display) so it no longer stripes the visible area. The
+	// exact image is locked by the golden PNG; this floor is a blank-screen
+	// backstop.
+	if lit := litPixels(got); lit < 7_000 {
 		t.Fatalf("display far below expected (%d lit pixels, PC=%#06X) — "+
 			"PAINT/raster pipeline likely broken", lit, m.CPU.Reg(cpu.PC))
 	}
