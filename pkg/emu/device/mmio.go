@@ -347,6 +347,14 @@ func (m *HP8593AMMIO) Read(addr uint32, sz bus.Size) uint32 {
 		if addr == sweepStatusOffset {
 			return v | sweepStatusReady
 		}
+		// Display data port (0x5FE): return the chip's block-read word. The
+		// POST display-RAM self-test (ROM 0xD6B2) fills a region via the
+		// 0x5800 command then reads it back here word-by-word to verify it —
+		// see hd63484.Chip.ReadData. Before any block fill this returns 0
+		// (the firmware reads the data port nowhere else at runtime).
+		if addr == 0x5FE && m.Display != nil {
+			return uint32(m.Display.ReadData())
+		}
 		// Indirect analog-bus data port: dispatch via analogBus, which holds
 		// the most-recent select written to 0xFFF75C and returns a different
 		// quantity per select (status / ADC / register-file). See analogbus.go.

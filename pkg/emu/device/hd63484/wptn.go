@@ -172,6 +172,11 @@ func (dec *decoder) handleWPRSideEffect(c *Chip, reg, value uint16) {
 			c.Paints++
 			dec.st = stRasterData
 			dec.wptnCount = 0
+			// The canonical MAR pair is also the firmware's "rewind read
+			// pointer" before the POST RAM-verify read loop reads the
+			// block-filled pattern back from the start (ROM 0xD6B2). Reset
+			// the block-read pointer so ReadData() returns dmem[0] onward.
+			c.readPtr = 0
 		}
 	}
 }

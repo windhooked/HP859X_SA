@@ -102,6 +102,24 @@ type Chip struct {
 	// port write in raster mode). BYTE offset into vram.
 	memPos int
 
+	// dmem is the chip's display memory as seen by the block READ/VERIFY
+	// path (word-addressed). The real HD63484 has a single video memory;
+	// our renderer consumes a 1bpp view of it (vram / bgVram), while the
+	// block memory-test commands the firmware issues during POST operate on
+	// raw 16-bit words. The power-up self-test at ROM 0xD6B2 fills a region
+	// with a test pattern via the block-fill command (0x5800), rewinds the
+	// read pointer (the canonical MAR pair 0x4000/0x0000), then issues 0x4000
+	// RD commands reading the words back and XOR-comparing each against the
+	// written pattern — any mismatch fails f612 bit 7 (the 16th POST bit).
+	// Modelling this faithfully (write pattern → memory → read it back) lets
+	// that test pass. Exact 2D RWP/memory-width addressing is NOT modelled —
+	// no firmware path other than this self-test reads display memory back,
+	// and the fill is a single uniform pattern, so a linear mirror reproduces
+	// the observable data path exactly.
+	dmem    [VRAMSize / 2]uint16 // 32768 words = the 64 KB VRAM viewed as words
+	readPtr int                  // auto-incrementing word read pointer
+	fillLen int                  // words populated by the last block fill
+
 	// Pen / drawing state.
 	penX, penY int    // current pen position (pixels)
 	colorReg   uint16 // current foreground colour selector
@@ -276,10 +294,41 @@ func (c *Chip) WriteData(w uint16) {
 // completes every command instantly, so it's always "ready for more".
 func (c *Chip) ReadStatus() uint8 { return DefaultStatus }
 
-// ReadData would return a word from the read-FIFO (e.g. after an RPR or
-// RPTN command). Stubbed to 0 for now; the 8593 firmware never reads the
-// data port at runtime, so this is exercised only by future tests.
-func (c *Chip) ReadData() uint16 { return 0 }
+// blockFill populates the chip's display memory (dmem) with `count` copies of
+// `pattern`, starting at word 0, and rewinds the read pointer to 0. This is the
+// write half of the firmware's display-RAM self-test (the 0x5800 command at ROM
+// 0xD6B2): a uniform pattern written across the region, subsequently read back
+// word-by-word and XOR-verified. count is clamped to the memory size.
+func (c *Chip) blockFill(pattern uint16, count int) {
+	if count < 0 {
+		count = 0
+	}
+	if count > len(c.dmem) {
+		count = len(c.dmem)
+	}
+	for i := 0; i < count; i++ {
+		c.dmem[i] = pattern
+	}
+	c.fillLen = count
+	c.readPtr = 0
+}
+
+// ReadData returns the next word from the block READ path — the word at the
+// current read pointer of the chip's display memory (dmem), post-incrementing
+// the pointer (the HD63484 RWP auto-increments on each read-back). This is the
+// data the POST self-test at ROM 0xD6B2 reads after each RD command to verify
+// the pattern it filled. The read pointer is rewound to the start of the
+// filled region whenever the firmware writes the canonical read MAR pair
+// (0x4000/0x0000) — see handleWPRSideEffect. Before any block fill (fillLen==0)
+// this returns 0, matching the prior stub for every other (non-readback) path.
+func (c *Chip) ReadData() uint16 {
+	if c.fillLen == 0 {
+		return 0
+	}
+	w := c.dmem[c.readPtr%c.fillLen]
+	c.readPtr++
+	return w
+}
 
 // Counters / accessors used by tests + cmd/* probes.
 

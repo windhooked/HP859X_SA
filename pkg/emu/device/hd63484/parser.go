@@ -45,6 +45,13 @@ const (
 	cmdELPS = 0xC400 // ELPS   — ellipse (2 args)
 	cmdDOT  = 0xCC00 // DOT    — plot one pixel at the pen (0 args)
 
+	// Block fill (used by the POST display-memory self-test at ROM 0xD6B2).
+	// 0x5800 fills a (dx+1)×(dy+1) region of display memory at the current
+	// write pointer with a single pattern word: params = pattern, dx, dy.
+	// The firmware writes 0x5800, pattern, 0x003F, 0x00FF → 64×256 = 16384
+	// words, then reads them all back via RD to verify the RAM. See dmem.
+	cmdBLKFILL = 0x5800 // (3 args: pattern, dx, dy)
+
 	// Memory operations (top nibble 0xE/0xF).
 	cmdPAINT = 0xE000 // PAINT  — flood-fill from pen
 	cmdDMR   = 0xE800 // DMR    — DMA read
@@ -96,6 +103,9 @@ const (
 	stCPYSrcHi                         // CPY:  source MAR high
 	stCPYDX                            // CPY:  dx
 	stCPYDY                            // CPY:  dy
+	stBlkPattern                       // BLKFILL: fill pattern word
+	stBlkDX                            // BLKFILL: dx (width-1)
+	stBlkDY                            // BLKFILL: dy (height-1)
 )
 
 // Glyph packet layout: a WPTN with count=10 is interpreted as a text-glyph
@@ -249,6 +259,19 @@ func (dec *decoder) feed(c *Chip, w uint16) {
 		// the next command without actually performing the copy.
 		dec.st = nextCPYState(dec.st)
 		_ = w
+	case stBlkPattern:
+		dec.clrData = w // reuse clrData as the block-fill pattern
+		dec.st = stBlkDX
+	case stBlkDX:
+		dec.clrDX = int(w) + 1 // width in words = dx+1
+		dec.st = stBlkDY
+	case stBlkDY:
+		// BLKFILL completes: populate the chip's display memory (dmem)
+		// with (dx+1)*(dy+1) copies of the pattern, then rewind the read
+		// pointer so the firmware's verify loop reads it back from the
+		// start. This is the write half of the POST RAM self-test.
+		c.blockFill(dec.clrData, dec.clrDX*(int(w)+1))
+		dec.st = stCmd
 	case stWPRArg:
 		c.writeRegister(dec.wprReg, w)
 		// handleWPRSideEffect may transition the parser into a follow-up
@@ -356,6 +379,8 @@ func (dec *decoder) dispatchCmd(c *Chip, w uint16) {
 		dec.st = stCLRData
 	case cmdCPY, 0xF801, cmdSCPY, 0xFC01:
 		dec.st = stCPYSrcLo
+	case cmdBLKFILL:
+		dec.st = stBlkPattern
 	case cmdRPTN, cmdSCAN:
 		// 0-or-1 arg commands we don't currently exercise. Stay in stCmd.
 	default:
