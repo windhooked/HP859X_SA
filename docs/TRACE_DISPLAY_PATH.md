@@ -161,6 +161,50 @@ trace-draw target is now identified by name (`__GTTDRW`). Cracking it = RE the
 graticule script progress to `__GTTDRW`. (So the sweep state *does* matter — but
 it is consumed through a DLP command, not the direct C polls examined earlier.)
 
+## CORRECTION #2 (2026-05-31, final) — boot DLP init COMPLETES; freeze is a downstream measurement state machine
+
+A long-run progress monitor (`cmd/longrun`, light IRQ driving, 16×25M-cycle
+windows) overturns the "non-terminating DLP" reading too. The boot **does
+finish**:
+
+```
+window 0 (25M):  Lines=39 b0a0=0801(bit11 SET)  a62a=0000
+window 1 (50M):  Lines=77 b0a0=0000(bit11 CLEAR) a62a=01A6   <- init progressing
+window 4 (125M): Lines=77 b0a0=0000              a62a=004D
+window 5..15:    Lines=77 Dots=185 Glyphs=13536 b0a0=0000 a62a=004E  <- FROZEN, identical
+```
+
+So the boot DLP personality-init (declaring the ACP/OBW/CHP/`__CZ*` measurement
+variables via `VRD`, parsed as text) **completes by ~150M cycles**, and `$b0a0`
+bit11 (the trace-draw busy gate) **clears on its own**. The earlier "DLP loops
+forever" was an artifact of *heavy* sweep-IRQ driving (`cmd/looptrace`) keeping
+the DLP scheduler busy; under light driving the init finishes.
+
+**The real steady state is a hard freeze** in a measurement state-machine loop
+at **`0x22532–0x22826`** (44 distinct PCs, every display counter static). That
+loop:
+- does trace processing (`$b0c8` sample index, scalers `0x553c`/`0x5532`);
+- drives an indirect control-register interface — write address to **`0xFFF728`**
+  (built from shadow `$ad7c`), read data from **`0xFFF72A`** (both **unmodelled**
+  in `mmio.go`);
+- branches on RAM flags set by IRQ handlers: `$bf26` bit16 (via helper
+  `0x22668`), `$b1e0` bit11, `$b212` bit12, `$ad7d` bit5.
+
+It is frozen because those flags sit in a fixed state — the loop is waiting for
+**sweep-cycle events** (the IRQ1/IRQ6/timer sequence that a continuously
+sweeping analog board would generate) that our approximate open-loop IRQ
+injection doesn't reproduce. `$b0a0` bit11 being *clear* here confirms (third
+time) the trace-draw is **not** gated by that bit.
+
+**Corrected bottom line:** neither cal, nor a single sweep handshake, nor a
+non-terminating DLP. The firmware boots to completion and then idles in a
+measurement state machine (`0x22532`) waiting for a faithful sweep cycle. Path
+to a drawn trace = model the sweep subsystem end-to-end: the `0xFFF728/0xFFF72A`
+indirect register, and the IRQ-driven RAM-flag handshake (`$bf26`/`$b1e0`/
+`$b212`) that advances the state machine through sweep→process→`__GTTDRW`. This
+is the faithful-sweep modelling task, now bounded to a specific loop and a
+specific register pair.
+
 ## Tools added
 
 - **`cmd/tracedraw`** — drives a sweep (IRQ1 step + IRQ6 capture), captures
