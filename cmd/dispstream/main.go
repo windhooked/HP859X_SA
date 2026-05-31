@@ -1,5 +1,5 @@
-// Command dispstream captures the HD63484 data-port stream and decodes a few
-// APLL/RPLL polyline commands to reveal their real coordinate structure.
+// dispstream: show AMOVE positions immediately preceding APLL/RPLL polylines,
+// to determine whether the small polyline vertices are absolute or pen-relative.
 package main
 
 import (
@@ -21,35 +21,36 @@ func main() {
 		}
 	}
 	m.BootToOperating(200_000_000)
-
-	// Framing-correct walk; dump the first 8 polylines with their vertices, plus
-	// the command word just before (context = what the pen was set to).
-	i, shown := 0, 0
-	var lastCmd uint16
-	for i < len(s) && shown < 8 {
-		w := s[i]
+	penX, penY := 0, 0
+	shown := 0
+	i := 0
+	for i < len(s) && shown < 12 {
+		ww := s[i]
+		_ = ww
 		n, kind := frame(s, i)
-		if (kind == "APLL" || kind == "RPLL") && i+1 < len(s) {
+		switch kind {
+		case "MOVE":
+			penX, penY = int(int16(s[i+1])), int(int16(s[i+2]))
+		case "APLL", "RPLL":
 			cnt := int(s[i+1])
-			fmt.Printf("[%d] %s op=%04X N=%d  prevCmd=%04X verts:", i, kind, w, cnt, lastCmd)
-			for v := 0; v < cnt && v < 10; v++ {
-				if i+2+2*v+1 < len(s) {
-					fmt.Printf(" (%d,%d)", int16(s[i+2+2*v]), int16(s[i+2+2*v+1]))
-				}
-			}
-			fmt.Println()
+			fmt.Printf("%s N=%d pen=(%d,%d) v0=(%d,%d) v1=(%d,%d) vlast=(%d,%d)\n",
+				kind, cnt, penX, penY,
+				int16(s[i+2]), int16(s[i+3]),
+				int16(s[i+4]), int16(s[i+5]),
+				int16(s[i+2+2*(cnt-1)]), int16(s[i+3+2*(cnt-1)]))
 			shown++
 		}
-		if w >= 0x8000 || (w&0xFFE0) == 0x0800 {
-			lastCmd = w
+		if n < 0 {
+			i++
+			continue
 		}
 		i += 1 + n
 	}
 }
 
-// frame returns (paramWords, kind) for the command at s[i], mirroring parser.go.
 func frame(s []uint16, i int) (int, string) {
 	w := s[i]
+	_ = w
 	if w&0xFFE0 == 0x0800 {
 		return 1, "WPR"
 	}
@@ -69,14 +70,11 @@ func frame(s []uint16, i int) (int, string) {
 	if w&0xFFF8 == 0x5C00 {
 		return 3, "SCLR"
 	}
-	if w == 0x1800 { // WPTN
-		if i+1 < len(s) {
-			cnt := int(s[i+1])
-			if cnt == 0x000A {
-				return 1 + 2 + 8 + 4, "WPTNglyph"
-			}
-			return 1 + cnt, "WPTN"
+	if w == 0x1800 && i+1 < len(s) {
+		if int(s[i+1]) == 0x000A {
+			return 15, "WPTNg"
 		}
+		return 1 + int(s[i+1]), "WPTN"
 	}
 	switch w {
 	case 0x0000:
@@ -104,5 +102,5 @@ func frame(s []uint16, i int) (int, string) {
 	case 0x5800:
 		return 3, "BLK"
 	}
-	return 0, "?"
+	return -1, "?"
 }
