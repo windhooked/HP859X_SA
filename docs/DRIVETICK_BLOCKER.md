@@ -329,3 +329,25 @@ that advances arm→sample→COMPLETE→process→__GTTDRW, plus the boot mode t
 0x31. This is genuinely multi-session; the gates are fully localized here for it. The
 analog model (SweepEngine) is data-ready and waiting on that handshake. Probe:
 cmd/dlpsched (10-phase investigation).
+
+### 2026-05-31 (definitive root): sweep COMPLETES, but the trace-draw DLP source is never on the ring
+
+With both gates forced + IRQ6 driving (cmd/dlpsched phase 11): the sweep mechanics +
+completion all work — IRQ6 capture handler runs 13334×, **befa bit13 (sweep-done) IS
+set (54×, final befa=0x2004)**, buffer fills (A5≥bf30). So the completion SIGNAL is
+fine. BUT the **sweep-trace DLP state machine 0x5ECEE (which tests befa bit13 at
+0x5ED04 and schedules __GTTDRW) is NEVER invoked (0 hits).** 0x5ECEE is a DLP COMMAND
+HANDLER reached via primary slot 0x12CA (0x12CA: jmp 0x5ecee) — it runs only when the
+DLP interpreter processes the sweep-trace token, i.e. only when the continuous-sweep
+DLP source is ON THE RING. It isn't: during the forced sweep the DLP scheduler
+(fcn.d18) is called 0× and 0x5ECEE 0×.
+
+**ROOT (complete): the firmware never enters the continuous-sweep MEASURE-mode DLP
+state that schedules the trace-draw source.** Everything downstream of that — sweep
+arm/sample/complete, befa bit13, the 0x5ECEE→__GTTDRW→trace handler — is present and
+working; it's just never reached because the source isn't scheduled. The whole chain
+hinges on the measurement-mode state machine (mode 0xB0EC→0x31 + the measure-mode DLP
+that schedules slot-0x12CA's source). Forcing the leaf cells (mode/a9a0/befa) makes the
+hardware sweep but cannot synthesize the DLP scheduling — that needs the firmware driven
+into measure mode, the genuine multi-session subsystem task. All gates from boot-init
+mode 0x1A down to the unscheduled 0x5ECEE handler are now mapped (this doc).
