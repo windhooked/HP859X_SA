@@ -114,6 +114,14 @@ const sweepStatusReady = uint32(0x1000)
 // have a real model instead of an override-or-don't binary choice).
 const indirectDataOffset = 0x75E
 
+// A16→A7 analog-interface I/O bus indirect register pair (see a7iobus.go).
+// Write a select word to a7SelectOffset, then read/write the addressed A7
+// register via a7DataOffset.
+const (
+	a7SelectOffset = 0x728
+	a7DataOffset   = 0x72A
+)
+
 // HP8593AMMIO is a RAM-backed stub covering the full 4 KB MMIO window.
 // On construction it pre-sets any "always-ready" register values.
 //
@@ -131,6 +139,12 @@ type HP8593AMMIO struct {
 	// abus models the A16 analog-control hybrid (mux + ADC + DAC) behind
 	// the indirect register pair at 0xFFF75C/0xFFF75E. See analogbus.go.
 	abus analogBus
+
+	// a7bus models the A16→A7 analog-interface "I/O bus" behind the indirect
+	// register pair at 0xFFF728/0xFFF72A — the digital control + status
+	// readback for the A7 board (LO/YIG/attenuator/gain/bandwidth DACs + A25
+	// counterlock/status). Separate from abus. See a7iobus.go.
+	a7bus a7IOBus
 
 	// HPIB models the TMS9914A IEEE-488 controller at MMIO offset
 	// 0x600..0x61F. The firmware initialises it during boot then leaves
@@ -224,6 +238,12 @@ func (m *HP8593AMMIO) Read(addr uint32, sz bus.Size) uint32 {
 		if addr == indirectDataOffset {
 			return uint32(m.abus.readData())
 		}
+		// A16→A7 analog-interface I/O-bus data port: dispatch via a7IOBus,
+		// which returns the addressed A7 register (selected by the word last
+		// written to 0xFFF728). See a7iobus.go.
+		if addr == a7DataOffset {
+			return uint32(m.a7bus.readData())
+		}
 		// A16 system-ID hardware-strap registers — fcn.2E74 reads these at
 		// boot to populate RAM[0xFFBF26+] which fcn.1A3E0 then turns into
 		// IDNUM (model number). See systemid.go for the full chain and the
@@ -277,6 +297,10 @@ func (m *HP8593AMMIO) Write(addr uint32, sz bus.Size, val uint32) {
 			m.abus.writeSelect(uint16(val))
 		case indirectDataOffset:
 			m.abus.writeData(uint16(val))
+		case a7SelectOffset:
+			m.a7bus.writeSelect(uint16(val))
+		case a7DataOffset:
+			m.a7bus.writeData(uint16(val))
 		}
 	}
 
