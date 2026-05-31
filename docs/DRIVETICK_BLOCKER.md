@@ -303,3 +303,29 @@ lever — mode (0xB0EC) + sweep-arm path selection (0x90C8 vs 0x92B2 / fcn.89e0 
 directly DOES reach the operating loop (33×) but still not __GTTDRW. A faithful fix
 needs the sweep-arming subsystem modeled end-to-end (multi-session). The precise
 gates are now all localized (this doc) for that work.
+
+### 2026-05-31 (final): Gate 2 = no sweep-COMPLETION handshake (definitive)
+
+Forced BOTH levers (0xB0EC=0x31 spectrum mode AND 0xA9A0>=0) and drove the sweep.
+Result: the firmware **actively sweeps** — 3.1M instr in 0x7C00 (LO/sweep-DAC
+programming), 1.8M in 0x4800 (detector accumulation), operating loop fcn.18568 55×,
+DLP interpreter fcn.34EE8 176×. BUT:
+- **__GTTDRW (0x65986) still fires 0×, and the DLP SCHEDULER (fcn.d18) is called 0×
+  during the whole forced-sweep window.** The operating loop runs the DLP *interpreter*
+  on the EXISTING ring but nothing SCHEDULES new sources — so the trace-draw is never
+  queued.
+- So the sweep runs MECHANICS (LO/detector) but **never COMPLETES** in the way that
+  triggers the sweep-done → __GTTDRW path. (Matches [[trace-display-path]]: "sweeps but
+  re-arms+re-samples instead of drawing — stuck one level below the draw code.")
+
+**Conclusion (this session's net):** the trace blocker is TWO gates, both now precisely
+mapped. Gate 1 = passive boot never enters the operating loop because mode 0xB0EC stays
+non-spectrum (hardcoded 0x1A boot-init at 0x1A29A) → sweep-arm counter 0xA9A0=-1 →
+startup loop 0x17424 spins. Gate 2 = even forcing past Gate 1 (active sweeping), the
+sweep-COMPLETION handshake that schedules __GTTDRW never fires (DLP scheduler 0× during
+sweep). The faithful fix = model the sweep subsystem end-to-end: the IRQ-driven sweep
+state machine + the A7/sweep-status handshake (0xFFF728/72A, f300, the befa/bf34 flags)
+that advances arm→sample→COMPLETE→process→__GTTDRW, plus the boot mode transition to
+0x31. This is genuinely multi-session; the gates are fully localized here for it. The
+analog model (SweepEngine) is data-ready and waiting on that handshake. Probe:
+cmd/dlpsched (10-phase investigation).
