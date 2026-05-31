@@ -49,15 +49,8 @@ func main() {
 	render(m, "specmode_postboot.png")
 
 	detector := func(cell int) uint32 {
-		v := 0x40
-		d := cell - 200
-		if d < 0 {
-			d = -d
-		}
-		if d < 25 {
-			v += (25 - d) * 14
-		}
-		return uint32(v)
+		// clear ascending RAMP across frequency: a real trace = a diagonal line.
+		return uint32(0x30 + cell)
 	}
 	paint, paint2 := 0, 0
 	b0ecSeen := map[uint16]int{}
