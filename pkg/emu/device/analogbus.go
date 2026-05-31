@@ -187,6 +187,13 @@ func (a *analogBus) sampleADC() int16 {
 	case 1: // VIDEO_IF — small positive noise floor
 		return 32
 	case 2: // +2VREF — near top of scale
+		// NOTE: the PRESET ADC cal (fcn.5E6E8) reads this channel MULTI-POINT
+		// while programming the offset DAC (via 0x5E384), expecting a coherent
+		// transfer-function response; a constant leaves ADC-2V FAIL set (cosmetic
+		// per docs/ANNUNCIATORS.md) and likely blocks the trace's dB scaling.
+		// Modelling the real U47 transfer function (read = f(input, DAC, gain
+		// regs 0x90/0x91/0x93)) is the open task — a value guess only shifts the
+		// failing cal step. See the analog-bus memory note.
 		return 0x100
 	default:
 		// Linear from DAC LSBs, sign-extended from 9 bits, so a cal sweep
