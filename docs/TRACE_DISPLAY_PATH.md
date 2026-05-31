@@ -136,6 +136,31 @@ DLP_VM_ARCHITECTURE.md), now in plain Rev L and past `__PKIP` — a *different*
 non-terminating script, reached only after the corrupt-dump fix let the boot get
 this far.
 
+## DLP-command-level (2026-05-31, latest) — the trace-draw is `__GTTDRW`, gated behind a looping `__GGTSWSW`
+
+Mapping the looping token handlers (`cmd/jumptable`) names the script:
+
+- The recursion runs in the **WININIT / graticule DLP source** — the `__GT*`
+  command family (handlers clustered `0x65000–0x67000`): `__GTREDG __GTCLRP
+  __GTWID __GTPRIZ __GTGTRI __GTTDRW __GTSHPP __GTCRBW __GTCVBW __GTCST __GTUPCP
+  __GGTSWSW __GTKSW __GTVDFS __GTWINSET __GTMAKWINA/B __GTONHK __GTNEXT`, plus
+  `WININIT` (`0x066A02`).
+- The two handlers on the captured stack are **`__GGTSWSW`** (`0x066296`, "get
+  sweep sw/state") and **`__GTCST`** (`0x065ED4`). The script loops here.
+- **`__GTTDRW`** (`0x065986`) = "graticule **T**race **DRW**" is the
+  **trace-draw command**. Like the others it is a **trampoline** (`move.w
+  #idx,-(a7); lea source(pc),a0; jsr $d18` — pushes a DLP sub-source and calls
+  the scheduler `0x349B6`; `__GTTDRW` uses index `0x2B`, `__GGTSWSW` index
+  `0x248`). So the trace is drawn by *running a DLP sub-script*, not by compiled
+  C.
+
+**Net:** the boot graticule/window DLP script polls sweep state via
+`__GGTSWSW` and never advances to `__GTTDRW`, so the trace is never drawn. The
+trace-draw target is now identified by name (`__GTTDRW`). Cracking it = RE the
+`__GGTSWSW` sub-script's loop and the sweep-state condition that would let the
+graticule script progress to `__GTTDRW`. (So the sweep state *does* matter — but
+it is consumed through a DLP command, not the direct C polls examined earlier.)
+
 ## Tools added
 
 - **`cmd/tracedraw`** — drives a sweep (IRQ1 step + IRQ6 capture), captures
