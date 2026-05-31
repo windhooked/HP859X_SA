@@ -119,3 +119,26 @@ Productive target = the status-CLEARING path per annunciator, found by either
 find the actual graticule drawer/clearer, or (b) modeling each subsystem status
 (0xFFBF2A is a candidate system-status long worth watching). Not the 0x26Exx /
 0xFFF758 path.
+
+### Candidate status words found (for the interactive-debugging follow-up)
+
+The boot status render lives around ROM 0x184B6-0x184DE (just before/with the
+FAIL reporter): `jsr fcn.17546; jsr fcn.5B0DA; ... <FAIL reporter 0x184DE>`.
+`fcn.5B0DA` is menu-state mgmt that does `move.w $bef6,D6; not.w D6; move.w
+D6,$b034` — same read-and-invert idiom as the FAIL reporter. Measured at boot:
+- **0xFFBEF6 = 0x000F** (writers: 0x1D0E sets 0x000F; 0x2F7A/0x6BAA clear it) →
+  **0xFFB034 = 0xFFF0** (read once at 0x17472, the boot-settle PC).
+- **0xFFBF2A**: system-status long, fcn.2689c tests bit 16 (but that path is not
+  on the boot annunciator route).
+
+Neither is a clean 3-bit match for the 3 shown annunciators, so the per-slot
+condition is elsewhere in the menu render. The render uses table-dispatched
+(slot) calls, which defeat A6-frame backtracing — so the productive method is
+**interactive**: use the GDB stub (`cmd/gdbserver`) to break in the 0x184B6
+render region / fcn.5B0DA and single-step the menu-slot draw, watching which RAM
+status word each annunciator's draw tests. Diagnostic tools left in place:
+cmd/annunchunt, cmd/befprobe.
+
+**Recommendation:** crack this interactively (break at 0x184BA, step the render)
+in a focused session, OR pivot to the M2 spectrum trace (fully mapped, tractable,
+high visual impact) and return to the cosmetic annunciators after.
