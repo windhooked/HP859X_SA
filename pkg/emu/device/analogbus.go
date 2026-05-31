@@ -1,5 +1,19 @@
 package device
 
+import (
+	"fmt"
+	"os"
+	"strconv"
+)
+
+// adcDebugN, when >0, logs the next N ADC conversion triggers (set via env
+// ADC_DEBUG=<count>) — a temporary diagnostic for reverse-engineering the
+// PRESET ADC cal's expected transfer function.
+var adcDebugN = func() int {
+	n, _ := strconv.Atoi(os.Getenv("ADC_DEBUG"))
+	return n
+}()
+
 // analogBus models the A16 board's analog-control hybrid — the chip(s)
 // behind the indirect register-pair at 0xFFF75C (select) and 0xFFF75E
 // (data). Per CLIP 5963-2591 the physical components are:
@@ -161,6 +175,12 @@ func (a *analogBus) writeData(val uint16) {
 		// Writing the low DAC byte completes a send_dac_word (fcn.5E384) and
 		// triggers an ADC conversion on the currently-selected mux channel.
 		a.triggerConversion()
+		if adcDebugN > 0 {
+			adcDebugN--
+			fmt.Fprintf(os.Stderr, "ADC trig: ch=%d ctlA(90)=%04X ctlB(91)=%04X ctlC(93)=%04X dac=%06X -> adc=%d(%#04x)\n",
+				a.regs[abSelCtrlB]&0x07, a.regs[abSelCtrlA], a.regs[abSelCtrlB], a.regs[abSelCtrlC],
+				a.dac, a.latchedADC, uint16(a.latchedADC))
+		}
 	}
 }
 
@@ -186,14 +206,17 @@ func (a *analogBus) sampleADC() int16 {
 		return 0
 	case 1: // VIDEO_IF — small positive noise floor
 		return 32
-	case 2: // +2VREF — near top of scale
-		// NOTE: the PRESET ADC cal (fcn.5E6E8) reads this channel MULTI-POINT
-		// while programming the offset DAC (via 0x5E384), expecting a coherent
-		// transfer-function response; a constant leaves ADC-2V FAIL set (cosmetic
-		// per docs/ANNUNCIATORS.md) and likely blocks the trace's dB scaling.
-		// Modelling the real U47 transfer function (read = f(input, DAC, gain
-		// regs 0x90/0x91/0x93)) is the open task — a value guess only shifts the
-		// failing cal step. See the analog-bus memory note.
+	case 2: // +2VREF — near top of scale.
+		// OPEN TASK: the PRESET ADC cal (fcn.5E6E8) is a successive-
+		// approximation cal that sweeps the offset DAC (logged via ADC_DEBUG)
+		// and measures this channel at DAC≈0x00 vs ≈0x90, expecting a specific
+		// gain/offset. A constant (zero slope) and linear-null guesses
+		// (0x180-dac, 0x1C0-3·dac) both leave the cal cycling ADC-TIME/GND/2V
+		// FAIL — it needs the EXACT U47 transfer function the cal validates
+		// (range-checks @0x5EF96, result compare @0x5E822). Cosmetic per
+		// docs/ANNUNCIATORS.md, but the trace's dB scaling depends on it.
+		// Best cracked with the real-instrument GPIB oracle for ground-truth
+		// ADC readings. See the analog-bus memory note.
 		return 0x100
 	default:
 		// Linear from DAC LSBs, sign-extended from 9 bits, so a cal sweep
