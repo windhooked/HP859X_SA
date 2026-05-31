@@ -106,6 +106,10 @@ const (
 	stBlkPattern                       // BLKFILL: fill pattern word
 	stBlkDX                            // BLKFILL: dx (width-1)
 	stBlkDY                            // BLKFILL: dy (height-1)
+	stPolyCount                        // APLL/RPLL: vertex-count word N
+	stPolyX                            // APLL/RPLL: vertex X / ΔX
+	stPolyY                            // APLL/RPLL: vertex Y / ΔY
+	stSkip                             // consume dec.skipN words then return to stCmd
 )
 
 // Glyph packet layout: a WPTN with count=10 is interpreted as a text-glyph
@@ -141,6 +145,15 @@ type decoder struct {
 	// CLR working storage.
 	clrData uint16
 	clrDX   int
+
+	// Polyline working storage (APLL/RPLL): remaining vertex count and whether
+	// the coordinates are relative (RPLL) or absolute (APLL).
+	polyN   int
+	polyRel bool
+
+	// skipN counts the remaining parameter words to consume for a framed-but-
+	// unrendered command (stSkip).
+	skipN int
 }
 
 // feed dispatches a single 16-bit word into the chip according to the
@@ -272,6 +285,44 @@ func (dec *decoder) feed(c *Chip, w uint16) {
 		// start. This is the write half of the POST RAM self-test.
 		c.blockFill(dec.clrData, dec.clrDX*(int(w)+1))
 		dec.st = stCmd
+	case stPolyCount:
+		// APLL/RPLL vertex count. The command is count-prefixed: N vertices
+		// follow as N (X,Y) pairs. N==0 ends immediately.
+		dec.polyN = int(w)
+		if dec.polyN <= 0 {
+			dec.st = stCmd
+		} else {
+			dec.st = stPolyX
+		}
+	case stSkip:
+		// Consume one parameter word of a framed-but-unrendered command.
+		dec.skipN--
+		if dec.skipN <= 0 {
+			dec.st = stCmd
+		}
+	case stPolyX:
+		dec.moveX = int(int16(w))
+		dec.st = stPolyY
+	case stPolyY:
+		// One polyline vertex consumed. We FRAME these correctly (1 + 2N words)
+		// so the stream stays in sync — that's the desync fix. We do NOT draw
+		// them yet: the firmware's APLL/RPLL vertices are tiny ORG-relative
+		// point-runs (e.g. (1,0),(2,0),(3,0)… — the dotted-grid / fine detail),
+		// and drawing them as pen-connected lines without applying the ORG
+		// origin produces spurious radiating segments. Rendering them correctly
+		// (as ORG-offset dots) is the dotted-grid task; until then, consume and
+		// keep the pen at the last vertex so any trailing relative cmd is sane.
+		ex, ey := dec.moveX, int(int16(w))
+		if dec.polyRel {
+			ex, ey = c.penX+dec.moveX, c.penY+int(int16(w))
+		}
+		c.penX, c.penY = ex, ey
+		dec.polyN--
+		if dec.polyN <= 0 {
+			dec.st = stCmd
+		} else {
+			dec.st = stPolyX
+		}
 	case stWPRArg:
 		c.writeRegister(dec.wprReg, w)
 		// handleWPRSideEffect may transition the parser into a follow-up
@@ -328,6 +379,31 @@ func (dec *decoder) dispatchCmd(c *Chip, w uint16) {
 	if w&cmdRPRMask == cmdRPRBase {
 		// RPR has no args; pushes the register value into the read-FIFO.
 		// We don't model the FIFO yet; just stay in stCmd.
+		return
+	}
+	// Count-prefixed polyline family — APLL (0x9800) / RPLL (0x9C00). The low
+	// 10 bits carry attribute/area-mode flags; mask them off. These are the
+	// commands that previously desynced the parser (e.g. 0x9841): they read a
+	// vertex-count word then 2×N coordinate words, NOT a fixed 2. Masking with
+	// 0xFC00 keeps APLL/RPLL distinct from ARCT(0x9000)/RRCT(0x9400).
+	switch w & 0xFC00 {
+	case 0x9800: // APLL — absolute polyline
+		dec.polyRel = false
+		dec.st = stPolyCount
+		return
+	case 0x9C00: // RPLL — relative polyline
+		dec.polyRel = true
+		dec.st = stPolyCount
+		return
+	}
+	// SCLR (selective clear, 0x5C00 | logical-op in low 3 bits): 3-word
+	// parameter layout (fill word, ΔX, ΔY). Frame it (consume 3) so the stream
+	// stays in sync — 0x5C02 was a desync source — but do NOT render it: the
+	// region coords are ORG-relative (which we don't apply yet), so drawing it
+	// would land in the wrong place. Consume-only via the skip counter.
+	if w&0xFFF8 == 0x5C00 {
+		dec.skipN = 3
+		dec.st = stSkip
 		return
 	}
 	// Strict exact-match dispatch. The family-mask approach (each top-6-
