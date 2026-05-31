@@ -216,7 +216,7 @@ func (dec *decoder) feed(c *Chip, w uint16) {
 		// transformation yet, but record the values so register-reads
 		// see them.
 		c.regs[0x1F] = uint16(dec.moveX) // stash X
-		_ = w
+		c.OrgLog = append(c.OrgLog, [2]int{dec.moveX, int(int16(w))})
 		dec.st = stCmd
 	case stCRCLArg:
 		// CRCL — circle of radius |w| at current pen.

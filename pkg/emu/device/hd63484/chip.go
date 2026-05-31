@@ -177,6 +177,12 @@ type Chip struct {
 	// DotLog, when non-nil, records the pen position of every DOT command —
 	// used to locate a dot-drawn spectrum trace. Enable with EnableDotLog().
 	DotLog []DotRec
+
+	// OrgLog records the (X,Y) of every ORG (set-drawing-origin) command. The
+	// renderer does NOT yet apply ORG to drawing coordinates; this capture is
+	// for the CRT-geometry diagnostic (cmd/crtdiag) to show what origin the
+	// firmware expects the chip to add to subsequent draw coordinates.
+	OrgLog [][2]int
 }
 
 // LineRec is one captured line segment (see Chip.LineLog).
@@ -334,3 +340,12 @@ func (c *Chip) ReadData() uint16 {
 
 func (c *Chip) PenX() int { return c.penX }
 func (c *Chip) PenY() int { return c.penY }
+
+// Reg returns parameter register n (0..31), or 0 if out of range. Read-only —
+// for diagnostics that inspect the chip's display-control / partition setup.
+func (c *Chip) Reg(n int) uint16 {
+	if n < 0 || n >= len(c.regs) {
+		return 0
+	}
+	return c.regs[n]
+}
