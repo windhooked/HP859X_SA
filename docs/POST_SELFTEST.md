@@ -194,3 +194,33 @@ cleared by modeling the specific subsystem hardware it reflects (ref-PLL lock �
 REF UNLOCK, ADC-timing → ADC-TIME FAIL, oven 5-min timer → OVEN COLD), NOT by
 flag-poking. That is analog-model work (docs/ANALOG_MODEL_PLAN.md). The render
 dispatch itself is fully cracked (cmd/rendertrace) and no longer a blocker.
+
+### CRACKED: the annunciator add/remove API (the clean abstraction)
+
+The deeply-layered packed-words/aggregation is a red herring for *control*. The
+firmware manages annunciators by a simple numeric-code API:
+- **fcn.e7f0(D0=code)** — ADD/draw annunciator `code`
+- **fcn.e87e(D0=code)** — REMOVE annunciator `code`
+- descriptor table at **[0xFF9562]** maps code → string + screen position
+  (entry = code*6+2; position from $ba80/$ba82).
+
+`cmd/annuncode` (uses CPU.RunUntil to stop at each call, reads code=D0 + caller
+from the linked frame A6+4) maps every code to its **condition site**. Boot ADDs
+codes 0x01–0x07 — the visible annunciators — each at a specific status check:
+
+```
+code 0x01 @ 0x4E520     code 0x05 @ 0x118EE (annunciator chain)
+code 0x02 @ 0x08888     code 0x06 @ 0x26646 / 0x4E51A
+code 0x03 @ 0x09670     code 0x07 @ 0x1CFC2
+code 0x04 @ 0x07CF2
+```
+(REMOVE sites for codes 0x0C..0x2A also mapped.) OVEN COLD = code 0x31/0x32,
+gated at ROM 0x875E by `btst #13,$b070` (oven-cold hw flag) AND `fcn.79CC < 300`
+(elapsed seconds < 5 min); ≥300 → fcn.e87e(0x31/0x32) removes it. fcn.79CC →
+fcn.799E reads the power-on time source.
+
+**Now bounded:** for each visible annunciator, disassemble its condition site to
+read off the status word/bit it tests, then model that one hardware status as
+good — and the firmware itself removes the annunciator via fcn.e87e (no flag-
+poking, no VRAM hacks). This is the per-annunciator analog-status modelling task,
+one clean site at a time. Tools: cmd/annuncode (the code→site map).
