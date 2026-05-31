@@ -69,6 +69,19 @@ func main() {
 			reached, rdW(0xFFB0A0), rdW(0xFFBFE6), rdW(0xFFA62A))
 	}
 
+	if len(device.A7WriteHist) > 0 {
+		fmt.Println("A7 register WRITES over boot (reg -> count, minVal, maxVal):")
+		for r := 0; r < 16; r++ {
+			if v, ok := device.A7WriteHist[r]; ok {
+				span := v[2] - v[1]
+				tag := ""
+				if span > 1000 {
+					tag = "  <- wide-range (DAC?)"
+				}
+				fmt.Printf("  reg %2d: count=%-6d min=%04X max=%04X span=%d%s\n", r, v[0], v[1], v[2], span, tag)
+			}
+		}
+	}
 	if len(device.A7ReadHist) > 0 {
 		fmt.Println("A7 register reads over the whole boot (reg -> count, lastSelect, lastVal):")
 		for r := 0; r < 16; r++ {

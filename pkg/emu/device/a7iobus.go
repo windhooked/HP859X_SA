@@ -2,11 +2,12 @@ package device
 
 import "os"
 
-// A7ReadHist is a diagnostic histogram of A7-register reads: reg -> {count,
-// last-select, last-returned}. Populated only when the A7_LOG env var is set.
-// Used by cmd/longrun to find which A7 status registers the boot-time analog
-// self-test polls (for the REF UNLOCK / OVEN COLD / ADC annunciators).
+// A7ReadHist / A7WriteHist are diagnostic histograms of A7-register accesses:
+// reg -> {count, last-select-or-?, last-value}. Populated only when the A7_LOG
+// env var is set. Used to recover the A7 register map (which registers are the
+// YTO/span tuning DACs — 12-bit ramping values — vs control/status).
 var A7ReadHist = map[int][3]int{}
+var A7WriteHist = map[int][3]int{} // reg -> {count, minVal, maxVal}
 
 var a7LogOn = os.Getenv("A7_LOG") != ""
 
@@ -71,7 +72,24 @@ func (a *a7IOBus) reg() int { return int((a.sel >> 8) & 0x0F) }
 func (a *a7IOBus) writeSelect(v uint16) { a.sel = v }
 
 // writeData stores a word written to 0xFFF72A into the selected register.
-func (a *a7IOBus) writeData(v uint16) { a.regs[a.reg()] = v }
+func (a *a7IOBus) writeData(v uint16) {
+	a.regs[a.reg()] = v
+	if a7LogOn {
+		r := a.reg()
+		h := A7WriteHist[r]
+		if h[0] == 0 {
+			h[1], h[2] = int(v), int(v)
+		}
+		if int(v) < h[1] {
+			h[1] = int(v)
+		}
+		if int(v) > h[2] {
+			h[2] = int(v)
+		}
+		h[0]++
+		A7WriteHist[r] = h
+	}
+}
 
 // a7Reg3SettledHi / a7Reg3SettledLo are the bit 7 / bit 6 status of A7
 // register 3, the analog-settle/lock status the post-boot measurement loop
