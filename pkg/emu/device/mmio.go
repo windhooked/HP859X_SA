@@ -151,7 +151,60 @@ type HP8593AMMIO struct {
 	// it alone; in the operating loop it accesses these registers via
 	// the IRQ4 handler when HP-IB activity occurs. See tms9914a.go.
 	HPIB *TMS9914A
+
+	// SweepActive enables the detector-ADC model at 0xFFF200. The IRQ6
+	// sample-capture handler reads 0xFFF200 ("sweep-start latch / detector
+	// ADC" per docs/research.md) once per ADC_SYNC to get the detected video
+	// level for the current sweep point. When SweepActive is set, word reads
+	// of 0xFFF200 return the synthesized detector level for the current sweep
+	// position (a noise floor + a CAL-like peak) and advance the position; the
+	// machine's sweep clock fires IRQ6 to step through points. When clear,
+	// 0xFFF200 reads return the stored byte-buffer value (the prior behaviour),
+	// so non-sweep firmware paths are unaffected. We model only READS — writes
+	// (the firmware's LO/sweep-start latching) still store normally, so we do
+	// not trigger spurious sweep-starts.
+	SweepActive bool
+	// sweepPoint advances on each 0xFFF200 detector read; SweepPoints is the
+	// sweep length (samples per sweep) over which the synthesized spectrum
+	// repeats.
+	sweepPoint  int
+	SweepPoints int
 }
+
+// sweepDetector returns the synthesized detected video level (the ADC reading)
+// for sweep position pt: a low noise floor plus a single CAL-like peak. Values
+// are in the firmware's video-ADC range (≈0..0x1FF, 0 V→bottom graticule, +2 V
+// →top). This is a placeholder spectrum until the real LO/IF/detector chain is
+// modelled; it gives the firmware coherent, peaked data to paint.
+func sweepDetector(pt, total int) uint16 {
+	if total <= 0 {
+		total = 401
+	}
+	pt %= total
+	v := 0x20 // noise floor near the bottom
+	// a Gaussian-ish peak at ~1/3 of the span (a "signal")
+	c := total / 3
+	d := pt - c
+	if d < 0 {
+		d = -d
+	}
+	if d < total/12 {
+		v += (total/12 - d) * 0x180 / (total / 12)
+	}
+	return uint16(v)
+}
+
+// readSweepADC returns the detector level for the current sweep position and
+// advances it. Called for word reads of 0xFFF200 when SweepActive.
+func (m *HP8593AMMIO) readSweepADC() uint16 {
+	v := sweepDetector(m.sweepPoint, m.SweepPoints)
+	m.sweepPoint++
+	return v
+}
+
+// ResetSweep rewinds the detector position to the start of the sweep (sweep
+// retrace). The sweep clock calls this when the firmware re-arms a new sweep.
+func (m *HP8593AMMIO) ResetSweep() { m.sweepPoint = 0 }
 
 // NewHP8593AMMIO returns an initialised MMIO stub with an attached SCIDisplay.
 func NewHP8593AMMIO() *HP8593AMMIO {
@@ -243,6 +296,11 @@ func (m *HP8593AMMIO) Read(addr uint32, sz bus.Size) uint32 {
 		// written to 0xFFF728). See a7iobus.go.
 		if addr == a7DataOffset {
 			return uint32(m.a7bus.readData())
+		}
+		// Detector ADC at 0xFFF200: when a sweep is active, the IRQ6 capture
+		// handler reads the detected video level for the current sweep point.
+		if addr == 0x200 && m.SweepActive {
+			return uint32(m.readSweepADC())
 		}
 		// A16 system-ID hardware-strap registers — fcn.2E74 reads these at
 		// boot to populate RAM[0xFFBF26+] which fcn.1A3E0 then turns into

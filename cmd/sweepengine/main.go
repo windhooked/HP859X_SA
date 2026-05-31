@@ -1,9 +1,10 @@
-// Command sweepengine drives a faithful BOUNDED sweep: IRQ6 sample-capture gated
-// on A5<bf30 (so we never over-fire past buffer-full and creep A5 past the peak
-// handler's post-increment bf30 check), detector indexed by trace-buffer cell,
-// no IRQ1 (which perturbs menu state). The firmware's IRQ6 handler (peak mode at
-// bf34=0x410A) advances A5 per point and re-arms via 0x40C2; fcn.CFBE draws each
-// A5-$b1d8 delta. Renders to ./screens/.
+// Command sweepengine drives a faithful sweep using the MMIO detector-ADC model:
+// it sets SweepActive (so 0xFFF200 READS return the synthesized detector — never
+// writing the sweep-start latch, which previously caused spurious menu nav), then
+// fires IRQ6 as the sweep clock gated on A5<bf30. The firmware's peak handler
+// captures the detector into the trace buffer; fcn.CFBE paints each A5-$b1d8
+// delta. Resets the detector position when A5 wraps (retrace). Renders to
+// ./screens/.
 package main
 
 import (
@@ -24,6 +25,7 @@ func main() {
 	m.CPU.Reset()
 	lb := emutest.NewLoopBreaker(50)
 	rdL := func(a uint32) uint32 { return m.Bus.Read(a, bus.Long) }
+	rdW := func(a uint32) uint16 { return uint16(m.Bus.Read(a, bus.Word)) }
 
 	for done := 0; done < 160_000_000; done += 2000 {
 		m.CPU.Run(2000)
@@ -34,24 +36,14 @@ func main() {
 			m.CPU.SetIRQ(0)
 		}
 	}
-	bufStart := rdL(0xFFBF30) - 802 // 401 words below the end pointer
-	fmt.Printf("booted: Lines=%d A5=%08X bf30=%08X bufStart=%08X bf34=%08X\n",
-		m.MMIO.Display.Lines, m.CPU.Reg(cpu.A5), rdL(0xFFBF30), bufStart, rdL(0xFFBF34))
+	fmt.Printf("booted: Lines=%d b0ec=%04X A5=%08X bf30=%08X bf34=%08X\n",
+		m.MMIO.Display.Lines, rdW(0xFFB0EC), m.CPU.Reg(cpu.A5), rdL(0xFFBF30), rdL(0xFFBF34))
 
-	// detector: noise floor + a peak (indexed by trace-buffer cell 0..400).
-	detector := func(cell int) uint32 {
-		v := 0x40
-		d := cell - 200
-		if d < 0 {
-			d = -d
-		}
-		if d < 25 {
-			v += (25 - d) * 14
-		}
-		return uint32(v)
-	}
+	noDrive := os.Getenv("NODRIVE") != ""
+	m.MMIO.SweepActive = true
+	m.MMIO.SweepPoints = 401
 	linesBefore := m.MMIO.Display.Lines
-	sweeps := 0
+	prevA5 := m.CPU.Reg(cpu.A5)
 	for i := 0; i < 200000; i++ {
 		m.CPU.Run(700)
 		lb.Check(m.CPU.Reg(cpu.PC), m.CPU.SetReg)
@@ -63,28 +55,24 @@ func main() {
 		a5 := m.CPU.Reg(cpu.A5)
 		bf30 := rdL(0xFFBF30)
 		bs := bf30 - 802
-		// Only capture while the firmware's sweep window is open (A5 inside buffer).
-		if a5 >= bs && a5 < bf30 {
-			cell := int(a5-bs) / 2
-			m.Bus.Write(0xFFF200, bus.Word, detector(cell))
-			m.CPU.SetIRQ(6)
+		if a5 < prevA5 { // A5 rewound => firmware re-armed a new sweep (retrace)
+			m.MMIO.ResetSweep()
+		}
+		prevA5 = a5
+		if !noDrive && a5 >= bs && a5 < bf30 {
+			m.CPU.SetIRQ(6) // sweep clock; handler reads 0xFFF200 (detector)
 			m.CPU.Run(250)
 			m.CPU.SetIRQ(0)
-			if cell == 0 {
-				sweeps++
-			}
 		}
 		if i%20000 == 0 && i > 0 {
-			fmt.Printf("  i=%d Lines=%d A5=%08X bf30=%08X sweeps~%d\n",
-				i, m.MMIO.Display.Lines, m.CPU.Reg(cpu.A5), rdL(0xFFBF30), sweeps)
+			fmt.Printf("  i=%d Lines=%d b0ec=%04X A5=%08X\n", i, m.MMIO.Display.Lines, rdW(0xFFB0EC), m.CPU.Reg(cpu.A5))
 		}
 		if m.MMIO.Display.Lines > linesBefore+200 {
-			fmt.Printf("** trace drawing at i=%d: Lines %d -> %d\n", i, linesBefore, m.MMIO.Display.Lines)
+			fmt.Printf("** big draw at i=%d: Lines %d -> %d\n", i, linesBefore, m.MMIO.Display.Lines)
 			break
 		}
 	}
-	fmt.Printf("final: Lines %d -> %d (drew=%v) sweeps~%d A5=%08X\n",
-		linesBefore, m.MMIO.Display.Lines, m.MMIO.Display.Lines > linesBefore+200, sweeps, m.CPU.Reg(cpu.A5))
+	fmt.Printf("final: Lines %d -> %d  b0ec=%04X\n", linesBefore, m.MMIO.Display.Lines, rdW(0xFFB0EC))
 	if f, err := os.Create("screens/sweepengine.png"); err == nil {
 		png.Encode(f, m.MMIO.Display.RenderFrame())
 		f.Close()
