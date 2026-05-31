@@ -27,10 +27,15 @@ func main() {
 	rdL := func(a uint32) uint32 { return m.Bus.Read(a, bus.Long) }
 	rdW := func(a uint32) uint16 { return uint16(m.Bus.Read(a, bus.Word)) }
 
+	force94e4 := os.Getenv("FORCE_94E4") != "" // force the cal-validated sentinel
 	const windowCycles = 25_000_000
 	for w := 0; w < 16; w++ {
 		reached := false
 		for done := 0; done < windowCycles; done += 2000 {
+			if force94e4 {
+				m.Bus.Write(0xFF94E4, bus.Word, 0xD2D2)
+				m.Bus.Write(0xFF94DA, bus.Word, 0x0000) // clear the ADC-fail marker
+			}
 			// brief single-step burst to sample for fcn.18568
 			for s := 0; s < 6; s++ {
 				if m.CPU.Step() != nil {
@@ -75,10 +80,14 @@ func main() {
 
 	// Render the final framebuffer so we can see what the (now un-frozen)
 	// state machine drew.
-	if f, err := os.Create("/tmp/longrun.png"); err == nil {
+	out := "screens/longrun.png"
+	if force94e4 {
+		out = "screens/longrun_force94e4.png"
+	}
+	if f, err := os.Create(out); err == nil {
 		png.Encode(f, m.MMIO.Display.RenderFrame())
 		f.Close()
-		fmt.Println("wrote /tmp/longrun.png")
+		fmt.Println("wrote", out)
 	}
 
 	// Capture what the frozen loop does with the A7 analog-interface I/O bus:
