@@ -155,6 +155,15 @@ func main() {
 			m.CPU.SetIRQ(0)
 		}
 
+		// IRQ1 sweep-clock: drive the sweep state machine continuously (it
+		// advances the sweep position + DAC and, when a sweep finishes, sets
+		// befa bit13 / re-arms). SWEEP_IRQ1=1.
+		if fireIRQ1 && booted && chunk%irq5Period == 2 {
+			m.CPU.SetIRQ(1)
+			m.CPU.Run(irqServiceCost)
+			m.CPU.SetIRQ(0)
+		}
+
 		// IRQ6 sample capture — only once the firmware has armed the sweep.
 		armed := rdBF34() == 0x40B8
 		if armed && sweepArmedAt == -1 {
@@ -181,13 +190,6 @@ func main() {
 			}
 			m.Bus.Write(0xFFF200, bus.Word, v)
 			samplePos = (samplePos + 1) % 401
-			// IRQ1 (sweep-step) first, then IRQ6 (sample capture) — the real
-			// sweep fires them as a coordinated pair. SWEEP_IRQ1=1 enables it.
-			if fireIRQ1 {
-				m.CPU.SetIRQ(1)
-				m.CPU.Run(irqServiceCost)
-				m.CPU.SetIRQ(0)
-			}
 			m.CPU.SetIRQ(6)
 			m.CPU.Run(irqServiceCost)
 			m.CPU.SetIRQ(0)
