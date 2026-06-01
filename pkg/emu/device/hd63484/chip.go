@@ -26,7 +26,13 @@ const (
 	VisibleWidth  = 512
 	VisibleHeight = 256
 
-	DisplayWidth  = 512
+	// DisplayWidth is wider than VisibleWidth to account for the CRT overscan
+	// region. HWR (AR 0x92 = 0x043F) gives H-active = (0x3F+1)*8 = 512px and
+	// H-blank = 0x04*8 = 32px. The display scans from VRAM col 0 (orgCol=48 puts
+	// the box left edge at col 48, left-margin labels at col 8+, and the M of
+	// SPECTRUM/ANALYZER at col 512–527 which the wider image captures). The CRT
+	// physically illuminates H-active + H-blank columns; our framebuffer matches.
+	DisplayWidth  = 512 + 32 // = 544: HWR H-active + H-blank
 	DisplayHeight = 384
 
 	// PaintRowPixels / PaintHeight describe the chip's logical 1bpp paint

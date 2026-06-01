@@ -52,18 +52,28 @@ func (c *Chip) RenderFrame() *image.RGBA {
 		vramRow := (start + srcY) % PaintHeight
 		rowBase := vramRow * PaintRowBytes
 		dstBase := y * stride
+		// renderXStart = 0: the display scans from VRAM column 0.
+		// DisplayWidth (see chip.go) is set to HWR_active + HWR_blank = 512 + 32 = 544
+		// so the full content span (VRAM cols 8..527) fits without clipping either side.
+		const renderXStart = 0
 		for x := 0; x < DisplayWidth; x++ {
 			off := dstBase + x*4
-			mask := byte(1 << uint(x&7))
-			idx := rowBase + (x >> 3)
+			vx := renderXStart + x
+			if vx < 0 || vx >= PaintRowPixels {
+				pix[off] = 0
+				pix[off+1] = 0
+				pix[off+2] = 0
+				pix[off+3] = 0xFF
+				continue
+			}
+			mask := byte(1 << uint(vx&7))
+			idx := rowBase + (vx >> 3)
 			switch {
 			case c.vram[idx]&mask != 0:
-				// Bright foreground: graticule, trace, glyphs, dots.
 				pix[off] = fgColor.R
 				pix[off+1] = fgColor.G
 				pix[off+2] = fgColor.B
 			case c.bgVram[idx]&mask != 0:
-				// Dim background: the firmware's faint dot texture.
 				pix[off] = bgPaintColor.R
 				pix[off+1] = bgPaintColor.G
 				pix[off+2] = bgPaintColor.B
