@@ -314,3 +314,36 @@ func TestUnknownCmd(t *testing.T) {
 		t.Errorf("pen after recovery = (%d,%d), want (11,22)", c.penX, c.penY)
 	}
 }
+
+// TestDisplayStartPageFlip verifies the HD63484 Address-Register protocol decodes
+// the display-address registers (RAR1/MWR1) and that displayStartRow follows a
+// page-flip, while AR=0 still routes drawing to the command parser.
+func TestDisplayStartPageFlip(t *testing.T) {
+	c := New()
+
+	// AR protocol: select RAR1 (AR 0xC8), then stream RAR1, MWR1 — the AR
+	// auto-increments by 2 per 16-bit word (0xC8 → 0xCA).
+	c.WriteCmd(0xC8)
+	c.WriteData(0x0000) // RAR1 = 0   (display start = front buffer)
+	c.WriteData(0x0040) // MWR1 = 64  (words per raster line)
+	if c.dispRAR != 0x0000 || c.dispMWR != 0x0040 {
+		t.Fatalf("AR decode: dispRAR=%#04x dispMWR=%#04x, want 0x0000/0x0040", c.dispRAR, c.dispMWR)
+	}
+	if got := c.displayStartRow(); got != 0 {
+		t.Errorf("RAR1=0 → displayStartRow=%d, want 0 (front buffer)", got)
+	}
+
+	// AR=0 selects the command FIFO: drawing must still reach the parser.
+	c.WriteCmd(0x0000)
+	feedWords(c, cmdAMOVE, 10, 20)
+	if c.penX != 10 || c.penY != 20 {
+		t.Errorf("AR=0 must feed the command parser: pen=(%d,%d), want (10,20)", c.penX, c.penY)
+	}
+
+	// Page-flip: re-point RAR1 at the back-buffer (row 256 = word 256×64 = 0x4000).
+	c.WriteCmd(0xC8)
+	c.WriteData(256 * 64)
+	if got := c.displayStartRow(); got != 256 {
+		t.Errorf("flip RAR1 → displayStartRow=%d, want 256 (back buffer)", got)
+	}
+}

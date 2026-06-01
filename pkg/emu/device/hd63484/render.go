@@ -12,20 +12,41 @@ import "image"
 // bits directly. RenderFrame is a pure read of that state, so calls are
 // idempotent and reflect exactly what the firmware has painted as of the
 // most recent command word.
+// displayStartRow returns the VRAM row the display scans from, derived from the
+// HD63484 base raster/read address RAR1 (AR 0xC8) divided by the memory width
+// MWR1 (AR 0xCA, words per raster line). This is the page-flip selector: in the
+// boot the firmware sets RAR1=0 (→ row 0, the front buffer) and never changes it,
+// so the render is unchanged; if it ever re-points RAR1 at the back-buffer (e.g.
+// the word address of row 256), the display follows. Wrapped to PaintHeight.
+func (c *Chip) displayStartRow() int {
+	wpr := int(c.dispMWR)
+	if wpr <= 0 {
+		wpr = PaintRowBytes / 2 // 64 words/line (1024 bits ÷ 16) default
+	}
+	row := (int(c.dispRAR) / wpr) % PaintHeight
+	if row < 0 {
+		row += PaintHeight
+	}
+	return row
+}
+
 func (c *Chip) RenderFrame() *image.RGBA {
 	if c.img == nil {
 		c.img = image.NewRGBA(image.Rect(0, 0, DisplayWidth, DisplayHeight))
 	}
 	pix := c.img.Pix
 	stride := c.img.Stride
+	// The display scans VRAM from the page-flip display-start row (RAR1; row 0
+	// in the boot = front buffer). If the firmware ever re-points RAR1 at the
+	// back-buffer, the displayed buffer follows. See displayStartRow.
+	start := c.displayStartRow()
 	for y := 0; y < DisplayHeight; y++ {
-		// Output row y samples VRAM row (y * VisibleHeight / DisplayHeight) —
-		// the analog CRT's vertical stretch of the 256-line raster onto the 4:3
-		// tube (×1.5). Horizontal is 1:1 over the 512-px visible width; VRAM
-		// rows ≥ VisibleHeight (the firmware's off-screen back frame) are never
-		// sampled, so the off-screen second graticule frame is not displayed.
+		// Output row y samples VRAM row start + (y * VisibleHeight / DisplayHeight),
+		// wrapped — the analog CRT's vertical stretch of the 256-line raster onto
+		// the 4:3 tube (×1.5). Horizontal is 1:1 over the 512-px visible width.
 		srcY := y * VisibleHeight / DisplayHeight
-		rowBase := srcY * PaintRowBytes
+		vramRow := (start + srcY) % PaintHeight
+		rowBase := vramRow * PaintRowBytes
 		dstBase := y * stride
 		for x := 0; x < DisplayWidth; x++ {
 			off := dstBase + x*4

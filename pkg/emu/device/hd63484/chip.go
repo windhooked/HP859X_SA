@@ -88,10 +88,27 @@ const DefaultStatus = StatusCED | StatusARD | StatusWFR | StatusWFE
 // video) and means commands that erase regions — SCLR, CLR, glyph BG fill —
 // naturally undo prior drawing without any per-surface tricks.
 type Chip struct {
-	// Address register (the last value written to the CMD port). Commands
-	// dispatched via the parser below; this field is retained for status /
-	// debugging.
+	// Address register (the last value written to the CMD/AR port, 0xFFF5FC).
+	// In the HD63484 Address-Register protocol it selects which control register
+	// the data port (0xFFF5FE) writes to: AR==0 → command-FIFO (drawing
+	// commands, dispatched by the parser below); AR addressing a control register
+	// → that register's value (auto-incrementing AR by 2 per word). We decode the
+	// display-address registers (AR 0xC8..0xCF) so the display-start can be
+	// modelled; other control regs still flow to the parser (harmless — they only
+	// appear during init).
 	addrReg uint16
+
+	// Display-address registers (the AR-protocol "base screen" set programmed by
+	// the firmware's display-init at ROM 0xA95E). RAR1 (AR 0xC8) is the base
+	// raster/read start address; MWR1 (AR 0xCA) the memory width (words/line);
+	// SAR1 (AR 0xCC:0xCE) the base start address. RenderFrame scans VRAM from
+	// displayStartRow() so that if the firmware ever PAGE-FLIPS (re-points RAR1 at
+	// the back-buffer) the displayed buffer follows. In the boot we render these
+	// are static (RAR1=0 → row 0 → the front buffer), so the render is unchanged.
+	dispRAR   uint16 // AR 0xC8 — base raster/read address (display start)
+	dispMWR   uint16 // AR 0xCA — base memory width (words per raster line)
+	dispSARHi uint16 // AR 0xCC — base start address, high word
+	dispSARLo uint16 // AR 0xCE — base start address, low word
 
 	// Parameter register file (32 × 16-bit). See registers.go for slot
 	// meanings.
@@ -329,10 +346,28 @@ func (c *Chip) WriteCmd(val uint16) {
 	c.addrReg = val
 }
 
-// WriteData feeds one 16-bit word into the chip's command/data FIFO. Most
-// of the chip's state machine lives here — see parser.go.
+// WriteData feeds one 16-bit word into the chip via the data port (0x5FE).
+// Per the HD63484 Address-Register protocol, when addrReg selects a display-
+// address control register (AR 0xC8..0xCF) the word is that register's value —
+// capture it (auto-incrementing AR per the chip) and do NOT feed the command
+// parser. Any other AR (including 0 = command-FIFO) feeds the parser, so drawing
+// is unchanged. See parser.go for the FIFO state machine.
 func (c *Chip) WriteData(w uint16) {
 	c.DataWords++
+	if c.addrReg >= 0xC8 && c.addrReg <= 0xCF {
+		switch c.addrReg {
+		case 0xC8:
+			c.dispRAR = w
+		case 0xCA:
+			c.dispMWR = w
+		case 0xCC:
+			c.dispSARHi = w
+		case 0xCE:
+			c.dispSARLo = w
+		}
+		c.addrReg += 2 // HD63484 AR auto-increment (per 16-bit word)
+		return
+	}
 	c.dec.feed(c, w)
 }
 
