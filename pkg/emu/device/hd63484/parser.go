@@ -224,14 +224,24 @@ func (dec *decoder) feed(c *Chip, w uint16) {
 		c.FilledRects++
 		dec.st = stCmd
 	case stORG1:
-		dec.moveX = int(int16(w))
+		dec.moveX = int(int16(w)) // XW — word address in display memory
 		dec.st = stORG2
 	case stORG2:
-		// ORG sets the drawing-origin; we don't model coordinate
-		// transformation yet, but record the values so register-reads
-		// see them.
-		c.regs[0x1F] = uint16(dec.moveX) // stash X
-		c.OrgLog = append(c.OrgLog, [2]int{dec.moveX, int(int16(w))})
+		// ORG: compute the drawing-coordinate origin from (XW, XD).
+		//   ORG_col = (XW % MWR1) * 16 + (XD & 0xF)
+		//   ORG_row = XW / MWR1
+		// MWR1 is the words-per-row from the display init. Use dispMWR if set,
+		// otherwise fall back to the default (64 words = 1024 px/row for Rev L).
+		xw := dec.moveX
+		xd := int(w & 0xF) // dot position within the word (bits 0–3 of XD param)
+		mwr := int(c.dispMWR)
+		if mwr <= 0 {
+			mwr = PaintRowBytes / 2 // 64 words/row default
+		}
+		c.orgCol = (xw%mwr)*16 + xd
+		c.orgRow = xw / mwr
+		c.regs[0x1F] = uint16(xw) // stash XW for register-read diagnostics
+		c.OrgLog = append(c.OrgLog, [2]int{xw, int(w)})
 		dec.st = stCmd
 	case stCRCLArg:
 		// CRCL — circle of radius |w| at current pen.

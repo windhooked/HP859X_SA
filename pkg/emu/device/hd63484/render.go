@@ -36,10 +36,14 @@ func (c *Chip) RenderFrame() *image.RGBA {
 	}
 	pix := c.img.Pix
 	stride := c.img.Stride
-	// The display scans VRAM from the page-flip display-start row (RAR1; row 0
-	// in the boot = front buffer). If the firmware ever re-points RAR1 at the
-	// back-buffer, the displayed buffer follows. See displayStartRow.
-	start := c.displayStartRow()
+	// The display scans VRAM starting from:
+	//   displayStartRow() (from RAR1/MWR1) + displayScanStart (CRT vertical offset)
+	// displayScanStart=23 is the number of VRAM rows before the visible CRT window
+	// begins, derived from the ORG_row=256 geometry: to fit the firmware's full
+	// content span fwY∈[-22,220] (VRAM rows 36..278) within the 256-row window,
+	// the scan must start at row 23 (keeping row 36 ≥ 23 at the top and row 278 =
+	// 23+255 at the bottom). See the defaultOrgRow / displayScanStart comments.
+	start := c.displayStartRow() + displayScanStart
 	for y := 0; y < DisplayHeight; y++ {
 		// Output row y samples VRAM row start + (y * VisibleHeight / DisplayHeight),
 		// wrapped — the analog CRT's vertical stretch of the 256-line raster onto

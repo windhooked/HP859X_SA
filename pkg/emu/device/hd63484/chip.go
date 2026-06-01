@@ -98,6 +98,15 @@ type Chip struct {
 	// appear during init).
 	addrReg uint16
 
+	// orgCol / orgRow store the drawing-coordinate origin as set by the ORG command
+	// (opcode 0x0400, params XW and XD). Every firmware drawing coordinate is
+	// relative to this origin:
+	//   VRAM_col = orgCol + fwX
+	//   VRAM_row = orgRow - fwY  (Y-up→Y-down flip)
+	// Initialised to defaultOrgCol/defaultOrgRow; updated by the ORG handler.
+	orgCol int
+	orgRow int
+
 	// Display-address registers (the AR-protocol "base screen" set programmed by
 	// the firmware's display-init at ROM 0xA95E). RAR1 (AR 0xC8) is the base
 	// raster/read start address; MWR1 (AR 0xCA) the memory width (words/line);
@@ -246,6 +255,16 @@ type DotRec struct{ X, Y int }
 // EnableDotLog turns on per-dot position capture into Chip.DotLog.
 func (c *Chip) EnableDotLog() { c.DotLog = make([]DotRec, 0, 4096) }
 
+// DispRAR returns the current RAR1 (display-start word address).
+func (c *Chip) DispRAR() uint16 { return c.dispRAR }
+
+// DispMWR returns the current MWR1 (words per raster line).
+func (c *Chip) DispMWR() uint16 { return c.dispMWR }
+
+// DisplayStartRow returns the VRAM row the display currently scans from (same
+// as the internal displayStartRow helper — exposed for probing).
+func (c *Chip) DisplayStartRow() int { return c.displayStartRow() }
+
 // New constructs a chip with a cleared VRAM + zeroed state. If the
 // HD63484_GLYPHLOG environment variable is set, a GlyphLogger is attached
 // (see glyph_logger.go).
@@ -253,6 +272,8 @@ func New() *Chip {
 	c := &Chip{
 		UnknownCmdHist: make(map[uint16]int),
 		linePattern:    0xFFFF, // solid until the firmware programs a stipple
+		orgCol:         defaultOrgCol,
+		orgRow:         defaultOrgRow,
 	}
 	c.resetBounds()
 	c.glyphLog = newGlyphLoggerFromEnv()
@@ -264,34 +285,34 @@ func (c *Chip) resetBounds() {
 	c.maxX, c.maxY = 0, 0
 }
 
-// drawYOrigin is the Y-axis flip origin. The firmware draws in a Y-UP
-// (Cartesian, bottom-left-origin) coordinate system: the reference-level /
-// top-status text is emitted at LARGE Y (≈205) and the bottom CENTER/SPAN/RES-BW
-// annotations at SMALL/negative Y (≈-22), with the 10×8 graticule between them
-// (grid lines Y=0..200). VRAM/render is Y-DOWN (raster: row 0 = top), so a pixel
-// drawn at firmware Y is stored at VRAM row `drawYOrigin - Y` to flip the axis.
-// The origin offsets the firmware Y range [-22, ~205] into the visible 256-line
-// window: Y=205 → row ~14 (top), Y=-22 → row ~241 (bottom). Tuned so both the
-// top REF line and the bottom annotation block land on-screen with the graticule
-// centred. See docs/CRT_GEOMETRY_DIAGNOSIS.md.
-const drawYOrigin = 219
-
-// drawXOrigin is the X-axis drawing origin: the screen column where firmware
-// X=0 lands. The firmware lays its UI out across X ∈ [-40, +472] — the graticule
-// box at X=0..400, the left-margin annotations (PEAK / LOG / dB/ / REF .0) at
-// NEGATIVE X (to the left of the box), and the right-side labels (SPECTRUM
-// ANALYZER / SYNC / units) out to X≈464. A pixel drawn at firmware X is stored at
-// VRAM column `X + drawXOrigin`. Without this, X<0 (the whole left margin) clipped
-// off-screen and the box sat hard against the left edge.
+// defaultOrgCol / defaultOrgRow are the chip's hard-coded ORG values before any
+// ORG command is issued. They are set by the 8593 firmware's display-init routine
+// (ROM 0xA95E) via the ORG command with XW=0x4003, XD=0xa450, MWR1=0x40=64:
 //
-// The lit-pixel extent (glyphs carry 1 px left padding + 2 px right padding in
-// their 8-px cell) is X ∈ [-39, +469], so the offset must satisfy 39 ≤ off ≤ 42
-// to keep both ends inside the 512-px visible window. We use 42 (the top of that
-// range) to give the left-margin labels a clean ~3 px gap from the screen edge
-// while the rightmost pixel still lands on the last column. (The HD63484 encodes
-// this as its horizontal display origin; the value is derived here from the
-// firmware's own content span.) Symmetric with drawYOrigin.
-const drawXOrigin = 42
+//   ORG_col = (XW % MWR1) * 16 + (XD & 0xF) = (3)*16 + 0 = 48
+//   ORG_row = XW / MWR1                       = 16387 / 64 = 256
+//
+// The ORG command sets the drawing-coordinate origin in display memory. All
+// firmware drawing coordinates (AMOVE/ALINE/etc.) are relative to this origin:
+//   VRAM_col = ORG_col + fwX
+//   VRAM_row = ORG_row - fwY  (Y-up→Y-down flip)
+//
+// displayScanStart is the first VRAM row the display's visible window scans from.
+// It derives from the HD63484's vertical window registers (VWR-A=5, MWR1=64) and
+// the firmware's content span: with ORG_row=256 the firmware draws at fwY∈[-22,220],
+// mapping to VRAM rows [36,278]. To fit ALL of that within the 256-row visible
+// window the scan must start at or before row 36 and must end at or after row 278.
+// The minimum valid range is [23,36], and we pick 23 to leave the maximum head-room
+// at the top of the screen for date/time / HP-logo content the firmware may draw
+// in future (or which the real instrument draws when the RTC and options are
+// present). So:
+//   displayScanStart = 23
+//   effective drawYOrigin = ORG_row - displayScanStart = 256 - 23 = 233
+const (
+	defaultOrgCol    = 48  // ORG_col derived from XW=0x4003, MWR1=64, XD=0
+	defaultOrgRow    = 256 // ORG_row derived from XW=0x4003, MWR1=64
+	displayScanStart = 23  // first VRAM row the display scans (VWR-A geometry)
+)
 
 // vramByteAddr returns the byte offset within vram that holds pixel (x, y),
 // or -1 if the pixel is outside the paint area. The bit within that byte
@@ -307,8 +328,8 @@ func (c *Chip) vramByteAddr(x, y int) int {
 // bounding box. Out-of-range coordinates are silently ignored — matches
 // the chip's hardware clipping behaviour.
 func (c *Chip) setVRAMPixel(x, y int) {
-	x += drawXOrigin    // firmware X → VRAM column (left-margin origin)
-	y = drawYOrigin - y // firmware Y-up → VRAM Y-down (raster)
+	x = c.orgCol + x    // firmware X → VRAM column via ORG
+	y = c.orgRow - y    // firmware Y-up → VRAM Y-down via ORG
 	addr := c.vramByteAddr(x, y)
 	if addr < 0 {
 		return
@@ -320,8 +341,8 @@ func (c *Chip) setVRAMPixel(x, y int) {
 // clearVRAMPixel turns off the pixel at (x, y) — used by glyph BG fills,
 // CLR, and SCLR.
 func (c *Chip) clearVRAMPixel(x, y int) {
-	x += drawXOrigin    // firmware X → VRAM column (left-margin origin)
-	y = drawYOrigin - y // firmware Y-up → VRAM Y-down (raster)
+	x = c.orgCol + x    // firmware X → VRAM column via ORG
+	y = c.orgRow - y    // firmware Y-up → VRAM Y-down via ORG
 	addr := c.vramByteAddr(x, y)
 	if addr < 0 {
 		return
@@ -332,8 +353,8 @@ func (c *Chip) clearVRAMPixel(x, y int) {
 // isVRAMPixelLit reports whether the pixel at (x, y) is currently set.
 // Returns false for out-of-range coordinates.
 func (c *Chip) isVRAMPixelLit(x, y int) bool {
-	x += drawXOrigin    // firmware X → VRAM column (left-margin origin)
-	y = drawYOrigin - y // firmware Y-up → VRAM Y-down (raster)
+	x = c.orgCol + x    // firmware X → VRAM column via ORG
+	y = c.orgRow - y    // firmware Y-up → VRAM Y-down via ORG
 	addr := c.vramByteAddr(x, y)
 	if addr < 0 {
 		return false
