@@ -297,3 +297,53 @@ TIME are the ADC self-test (model the ADC like POST f610/f612), OVEN COLD the
 oven timer/state, REF UNLOCK the A9 ref-lock. The hard RE (architecture, code
 map, both systems) is done; what remains is genuinely analog-subsystem modelling.
 Verified tools: cmd/anndesc, cmd/anncodemap, cmd/annbits.
+
+### CRACKED (2026-06-01): ADC-TIME FAIL = ADC-cal-validity verdict; the cal sweep never runs at boot
+
+Chased ADC-TIME (code 0x28) to its actual source: the **ADC self-calibration
+validity check**, NOT a conversion-timing measurement. The chain, fully RE'd
+(tools: `cmd/calreach`, ad-hoc 0xFF94E4 write-probe):
+
+- **The verdict gate** is ROM **0x5E822 / 0x5F050**: `cmpi.w #0xd2d2, 0xFF94E4`.
+  `0xd2d2` is the **"cal-valid" signature**. `0xFF94E4` is a volatile-RAM cell
+  (rebuilt every boot — NOT battery-backed, NOT restored from cal NVRAM).
+- **fcn.5E3E2** (ROM 0x5E3E2) is the re-validator. Preconditions at its top
+  (0x5E3F6): `0x94e4` must ALREADY be `0xd2d2`, the cal-table pointer `0x948e`
+  must be non-zero and equal `0x94d2`. It then re-checks a **120-entry longword
+  cal table** at `[0x948e]` against a structured contract; any miss → `0x94e4=0`:
+  - `[0x00..0x13]` wide sanity bounds `[-0x800000, 0x7FFFFF]` (consts @0x5E380/0x5E37C)
+  - `[0x14..0x27]` **strict linear ramp** `-0x0A28 + k·0x64` (base const @0x5E3DE) ← the tight one
+  - `[0x28..0x3b]` unchecked
+  - `[0x3c..0x4f]` ∈ `[0, 0xff]`
+  - `[0x50..0x63]` ∈ `[0, 0x3ff]`
+  - `[0x64..0x77]` ∈ `{0x80, 0x83}`, no run ≥ 10 (a dither/toggle region)
+- **The ONLY writer of `0x94e4 = 0xd2d2`** is ROM **0x5F046**, inside the ADC
+  auto-cal sweep (entry **0x5ED7E**, dispatched via fcn.b68 from fcn.48316,
+  orchestrated by fcn.48f28/fcn.4833c — the "CAL: …" alignment subsystem). The
+  sweep programs the mux/DAC (selects 0x90/0x91/0x93 + DAC bytes via fcn.5E384),
+  collects ~120 ADC samples (fcn.5E6BC) into the table, writes the signature,
+  then calls fcn.5E3E2 to re-validate.
+
+**Decisive measurement (`cmd/calreach`, 200M-cycle boot):** the auto-cal sweep
+entry **0x5ED7E is reached 0 times** and `0x94e4` is **never** written `0xd2d2`
+(only 0x5555 from the march-RAM test and 0x0 from inits/fcn.5E3E2's fail path).
+So the cal table is **never built** → validity never established → the firmware
+keeps ADC-TIME FAIL.
+
+**Reframe — this is HONEST behaviour, not a wrong hardware model.** ADC-TIME FAIL
+means "no valid ADC alignment exists", which is *correct* for our instrument: the
+firmware's alignment routine (the auto-cal sweep) hasn't run. A real 8593 shows
+ADC/OVEN annunciators on a cold un-aligned boot too, and clears them only after
+power-up alignment completes. The alignment subsystem has **no external static
+caller** (reached via the DLP/measurement dispatch), and our boot never drives it
+— the same gap that blocks the spectrum-trace paint.
+
+**Consequence for the fix:** shaping `sampleADC`'s transfer function is *necessary
+but not sufficient*. Until the firmware actually executes the auto-cal sweep
+(0x5ED7E), no ADC readings are consumed and `0xd2d2` is never written, so no
+transfer function can clear the annunciator. Clearing ADC-TIME faithfully is
+therefore **coupled to running the firmware's alignment/measurement flow** — i.e.
+it converges with the sweep/trace acquisition task (docs/TRACE_DISPLAY_PATH.md,
+docs/DRIVETICK_BLOCKER.md), exactly as docs/ANNUNCIATORS.md predicted. The precise
+ADC-cal contract above (the ramp + bounded regions) is the spec `sampleADC` must
+satisfy *once that flow runs*. Tool added: `cmd/calreach`.

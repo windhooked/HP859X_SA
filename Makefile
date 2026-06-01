@@ -33,5 +33,9 @@ test:
 test-fast:
 	go test ./pkg/emu/cpu/musashi/ ./pkg/emu/machine/ ./internal/emutest/
 
+
+gui:
+	DYLD_FALLBACK_LIBRARY_PATH=/usr/local/lib go run ./cmd/gui/
+
 clean:
 	rm -rf $(BIN)

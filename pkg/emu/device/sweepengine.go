@@ -1,6 +1,11 @@
 package device
 
-import "github.com/windhooked/HP859X_SA/pkg/emu/analog"
+import (
+	"math"
+	"math/rand"
+
+	"github.com/windhooked/HP859X_SA/pkg/emu/analog"
+)
 
 // SweepEngine produces the video-ADC reading the firmware samples at 0xFFF200
 // for each point of a trace sweep, using the semi-physical analog model
@@ -25,7 +30,17 @@ type SweepEngine struct {
 	StartHz  float64 // sweep start frequency
 	StopHz   float64 // sweep stop frequency
 	Points   int     // samples per sweep (401 on the 8593)
-	pos      int     // current sweep position (advances per DetectADC)
+
+	// NoiseFloorDBm is the centre level of the displayed "grass" noise floor
+	// added per point. It is raised onto the screen (vs the analog model's true
+	// ~-90 dBm thermal floor, which is off-screen at a 0 dBm reference) so the
+	// trace shows the classic noisy SA baseline. NoiseAmpDB is the peak random
+	// variation added on top (per point), giving the grass its texture.
+	NoiseFloorDBm float64
+	NoiseAmpDB    float64
+
+	pos int        // current sweep position (advances per DetectADC)
+	rng *rand.Rand // per-point noise generator (seeded → reproducible)
 }
 
 // videoADCFull is the full-scale 0xFFF200 video-ADC reading (top of screen).
@@ -43,7 +58,37 @@ func NewSweepEngine() *SweepEngine {
 		StartHz:  0,
 		StopHz:   2.9e9,
 		Points:   401,
+		// Visible grass: centre ~10% up the 80 dB window (−72 dBm at 0 dBm ref)
+		// with ±6 dB of per-point random texture. Seeded for reproducibility.
+		NoiseFloorDBm: -72,
+		NoiseAmpDB:    6,
+		rng:           rand.New(rand.NewSource(0x8593)),
 	}
+}
+
+// SetSignals validates and installs the injected CW tones (the signal
+// boundary/limit check). A signal whose frequency is outside the sweep span
+// [StartHz, StopHz] is DROPPED — it cannot appear in any point bucket — and its
+// amplitude is clamped to the display window [RefLevelDBm-80, RefLevelDBm].
+// Returns how many signals were dropped for being out of band.
+func (s *SweepEngine) SetSignals(sigs []analog.Signal) (dropped int) {
+	lo, hi := s.Detector.RefLevelDBm-80, s.Detector.RefLevelDBm
+	valid := make([]analog.Signal, 0, len(sigs))
+	for _, sig := range sigs {
+		if sig.Hz < s.StartHz || sig.Hz > s.StopHz {
+			dropped++
+			continue
+		}
+		if sig.DBm > hi {
+			sig.DBm = hi
+		}
+		if sig.DBm < lo {
+			sig.DBm = lo
+		}
+		valid = append(valid, sig)
+	}
+	s.Spectrum.Signals = valid
+	return dropped
 }
 
 // freqAt returns the centre input frequency tuned at sweep point p.
@@ -100,7 +145,20 @@ func (s *SweepEngine) DetectADC() uint16 {
 	}
 	p := s.pos % pts
 	s.pos++
-	return s.levelToADC(s.bucketPeakDBm(p))
+	sig := s.bucketPeakDBm(p) // spectrum: signals + the model's true thermal floor
+	// Add the displayed grass: a random level around NoiseFloorDBm, power-summed
+	// with the spectrum so a real tone rises cleanly above the noise.
+	if s.rng != nil && s.NoiseAmpDB != 0 {
+		grass := s.NoiseFloorDBm + s.rng.Float64()*s.NoiseAmpDB
+		return s.levelToADC(powerSumDBm(sig, grass))
+	}
+	return s.levelToADC(sig)
+}
+
+// powerSumDBm returns 10·log10(10^(a/10) + 10^(b/10)) — the dBm level of two
+// incoherent contributions summed in linear power.
+func powerSumDBm(a, b float64) float64 {
+	return 10 * math.Log10(math.Pow(10, a/10)+math.Pow(10, b/10))
 }
 
 // Reset rewinds the sweep position (retrace).

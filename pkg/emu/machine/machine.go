@@ -111,6 +111,15 @@ type Machine struct {
 	TestRAM    *bus.RAM
 	RAM        *bus.RAM
 	MMIO       *device.HP8593AMMIO
+
+	// SweepDrive, when true, makes the boot loop fire the sweep interrupts
+	// (IRQ1 step + IRQ6 capture) autonomously while the firmware has a sweep
+	// armed — modelling the analog sweep board that raises those IRQs as its
+	// ramp advances. Off by default so BootToOperating (and the golden screen
+	// test) are unaffected; enabled by BootToOperatingWithSweep. See
+	// driveSweepCycle and docs/TRACE_DISPLAY_PATH.md "TWO-IRQ SWEEP MODEL".
+	SweepDrive bool
+	sweepAccum int // cycle accumulator that paces sweep points (see driveSweepCycle)
 }
 
 // New8593A creates a Machine loaded with romImage. The image must be exactly
@@ -163,10 +172,13 @@ func New8593A(romImage []byte) (*Machine, error) {
 
 // Boot-loop tuning (see package doc for why each is needed).
 const (
-	bootChunkCycles    = 2000 // cycles per Run() call
-	bootBreakThresh    = 50   // consecutive same-loop chunks before LoopBreaker fires
-	bootIRQPeriod      = 5    // inject an IRQ5 timer tick every N chunks
-	bootIRQServiceCost = 400  // cycles allowed for the IRQ5 handler to run
+	bootChunkCycles     = 2000 // cycles per Run() call
+	bootBreakThresh     = 50   // consecutive same-loop chunks before LoopBreaker fires
+	bootIRQPeriod       = 5    // inject an IRQ5 timer tick every N chunks
+	bootIRQServiceCost  = 400  // cycles allowed for the IRQ5 handler to run
+	sweepCyclesPerPoint = 2300 // pace: one sweep point per ~2300 cycles ⇒ ~58 ms / 401-pt sweep
+	sweepStepCost       = 400  // cycles allowed for the IRQ1 sweep-step handler to run
+	sweepCaptureCost    = 250  // cycles allowed for the IRQ6 capture handler to run
 )
 
 // BootToOperating runs the firmware to its operating loop using the fast path:
@@ -193,8 +205,24 @@ func (m *Machine) BootToOperatingFaithful(maxCycles int) {
 	m.bootLoop(maxCycles, nil)
 }
 
+// BootToOperatingWithSweep boots like BootToOperating but ALSO drives the analog
+// sweep: it enables the SweepEngine detector model (SweepActive) and fires the
+// sweep interrupts (IRQ1 step + IRQ6 capture) whenever the firmware has a sweep
+// armed (see driveSweepCycle). This lets the firmware run real sweep cycles —
+// capturing the modelled spectrum into the trace buffer, completing sweeps via its
+// own IRQ handlers, and drawing the trace + advancing the operating loop. Use this
+// (not BootToOperating) when you want a live, sweeping instrument; it is kept
+// separate so the deterministic golden-screen boot is unaffected. Inject signals
+// via m.MMIO.Sweep.Spectrum before calling. Budget maxCycles ≥ 150M.
+func (m *Machine) BootToOperatingWithSweep(maxCycles int) {
+	m.SweepDrive = true
+	m.MMIO.SweepActive = true
+	m.bootLoop(maxCycles, emutest.NewLoopBreaker(bootBreakThresh))
+}
+
 // bootLoop is the shared boot driver: run in chunks, optionally break known
-// delay loops (lb may be nil), and inject the periodic IRQ5 timer tick.
+// delay loops (lb may be nil), and inject the periodic IRQ5 timer tick. When
+// SweepDrive is set it also drives the sweep interrupts (see driveSweepCycle).
 func (m *Machine) bootLoop(maxCycles int, lb *emutest.LoopBreaker) {
 	for done := 0; done < maxCycles; done += bootChunkCycles {
 		m.CPU.Run(bootChunkCycles)
@@ -207,6 +235,46 @@ func (m *Machine) bootLoop(maxCycles int, lb *emutest.LoopBreaker) {
 			m.CPU.Run(bootIRQServiceCost)
 			m.CPU.SetIRQ(0)
 		}
+
+		if m.SweepDrive {
+			m.driveSweepCycle()
+		}
+	}
+}
+
+// driveSweepCycle models the analog sweep board: while the firmware has the
+// trace-capture handler armed (bf34 = 0x40B8 store / 0x410A peak-detect) and the
+// trace buffer isn't full (A5 < bf30), it fires IRQ1 (sweep update/step — advances
+// the ramp and reprograms the f200/f300/f400 sweep DACs) then a burst of IRQ6
+// (sample capture). The firmware's own IRQ handlers raise befa bit13 (sweep-done)
+// when the buffer fills (IRQ6 end-of-sweep 0x40C2) — so the sweep completes, the
+// trace processes and draws, and the operating loop advances, the faithful way
+// (no flag-forcing). Data comes from m.MMIO.Sweep via SweepActive. See
+// docs/TRACE_DISPLAY_PATH.md "TWO-IRQ SWEEP MODEL".
+func (m *Machine) driveSweepCycle() {
+	bf34 := m.Bus.Read(0xFFBF34, bus.Long)
+	if bf34 != 0x40B8 && bf34 != 0x410A {
+		return
+	}
+	// Pace to real sweep time: accumulate elapsed boot-chunk cycles and emit one
+	// sweep point (IRQ1 step + IRQ6 capture) per sweepCyclesPerPoint, so a
+	// 401-point sweep spans ~58 ms rather than completing in a single burst.
+	m.sweepAccum += bootChunkCycles
+	bf30 := m.Bus.Read(0xFFBF30, bus.Long)
+	for m.sweepAccum >= sweepCyclesPerPoint && m.CPU.Reg(cpu.A5) < bf30 {
+		m.sweepAccum -= sweepCyclesPerPoint
+		m.CPU.SetIRQ(1) // sweep step: advance the ramp, reprogram the sweep DACs
+		m.CPU.Run(sweepStepCost)
+		m.CPU.SetIRQ(0)
+		m.CPU.SetIRQ(6) // capture one sample
+		m.CPU.Run(sweepCaptureCost)
+		m.CPU.SetIRQ(0)
+	}
+	// Don't let the accumulator run away while the buffer is full (between a
+	// completed sweep and the firmware's re-arm) — that would burst-fire the next
+	// sweep's first points and break the pacing.
+	if m.CPU.Reg(cpu.A5) >= bf30 && m.sweepAccum > sweepCyclesPerPoint {
+		m.sweepAccum = sweepCyclesPerPoint
 	}
 }
 

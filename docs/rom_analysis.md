@@ -300,11 +300,21 @@ The 22V10 memory-decode PAL source (`HP80159.PLD`, dumped from a real 8591A by P
 | `LRM0`/`LRM1` | `/MA23 * /MA21 * MA18 * RLW` / `* /MA18 *` | `0x000000–0x07FFFF` (ROM, mirrored to 2 MB) | ROM ✓ |
 | **`LCAL`** | `/MA23 * MA21 * /MA20` | **`0x200000–0x2FFFFF`** | **CAL NVRAM** (not "RF/IF hardware"!) |
 | `LCAB`/`LIOA`/`LSTB` | low-half MA23=0 control regions | `0x300000`+ | I/O bus (mapping TBD) |
-| `LRTC` | `MA23 * /MA20 * /MA15 * MA14` | `~0xEF4000` region | **front-panel processor** (`device.FrontPanel`) |
+| `LRTC` | `MA23 * /MA20 * /MA15 * MA14` | `~0xEF4000` region | **front-panel processor + RTC** (`device.FrontPanel`); the BCD real-time clock lives here at 0xEF4001–0xEF4017 — see below |
 | `LKBD` | `MA23 * /MA20 * MA15 * /MA14` | `~0xEF8000` region | **MC68230 PIT** |
 | `LUSER` | `MA23 * MA20 * (/MA16 + /MA15 + /MA14)` | user/option memory | TBD |
 
-**The PAL signal names are misleading** (chosen for an earlier design): `LRTC` actually selects the front-panel chip, `LKBD` selects the MC68230 PIT. And the MMIO at `0xFFF000` is **not decoded by this PAL** — there's a second decoder PAL (likely U115 `08590-80239`, not yet sourced) for the I/O bus / HD63484 / sweep DACs etc.
+**`LKBD` is misleadingly named** (it selects the MC68230 PIT, not a keyboard). But
+**`LRTC` is correctly named** — corrected 2026-06-01: the front-panel/LRTC range at
+0xEF4000 carries a **battery-backed BCD real-time clock** at 0xEF4001–0xEF4017 (12
+nibble registers → 6 BCD bytes year/month/day/hour/min/sec, OKI MSM6242-class),
+multiplexed with the key-matrix scan over the same nibble addresses. The firmware
+reads it in fcn.59E2C (timedate-display mode) and it retains the date across reboots
+(battery-backed). Earlier text here that called LRTC a misnomer "for the front-panel
+chip, not an RTC" was WRONG. Full decode: docs/rom_annotations.md "CORRECTION
+(2026-06-01)". The MMIO at `0xFFF000` is **not decoded by this PAL** — there's a
+second decoder PAL (likely U115 `08590-80239`, not yet sourced) for the I/O bus /
+HD63484 / sweep DACs etc.
 
 **This *completely* reframes the trace work.** Previously I'd been treating `0x200000` as an "RF/IF hardware register region" with `0x200A3C` as a "points-acquired counter". Wrong on both counts:
 

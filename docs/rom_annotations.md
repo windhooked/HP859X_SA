@@ -1047,3 +1047,146 @@ differentiation happens at menu-select time via the softkey-bind path
 (`fcn.6A2E` and the dispatch family it covers), not from a per-menu ROM
 array. See `docs/ROM_DATA_CATALOG.md` "Per-menu position → handler-ID
 table" for the full breakdown.
+
+## Real-time clock / system time survey (2026-06-01)
+
+Investigated whether an RTC blocks the boot/cal/operating flow. Tools:
+`cmd/clockprobe`, `cmd/calreach`.
+
+**There is NO hardware RTC chip.** The memory-decode PAL (08590-80159) exposes no
+clock-chip select — the `LRTC` PAL signal is a misnomer that selects the
+**front-panel** processor (0xEF4000), not a real-time clock. The 8593 keeps time
+entirely in **software**, advanced by the IRQ5 timer tick.
+
+**Time base — IRQ5 handler (ROM 0x3ECE):**
+- `addq.l #1, 0xBF12` — the millisecond/tick counter. ALSO the deadline base for
+  the generic timeout primitive (fcn.47fc arms `deadline = BF12 + timeout`;
+  fcn.4824 fires when `BF12 ≥ deadline`). The ADC self-cal polls (fcn.5E5DE @
+  0x5E5FA, init poll @ 0x5E6FC) time out against this.
+- `addq.l #1, 0xBF16` — a second free-running counter (rolls → sets 0xBEFB.7).
+- `subq.l #1, 0xBF1A`, `subq.l #1, 0xBF22` — settle/dwell countdown timers, SET
+  positive by 0x3B3C0/0x3B3F2 and tested in the operating loop (0x18D90/0x18DAC).
+- plus the f300/f400/bb6x sweep-step bookkeeping.
+
+**Measured behaviour (cmd/clockprobe, 120M-cycle boot):**
+- BF12/BF16 stay **0 for the first ~25–30M cycles**, then advance ~1 tick per
+  ~10k cycles. The freeze is the **SR interrupt mask**: early boot runs at SR IPL 7
+  (IRQ5 masked) — injected IRQ5 is correctly ignored until the firmware lowers the
+  mask on reaching the operating loop. This is faithful, not a bug. (~18% of all
+  chunks sit at IPL 7, concentrated in early boot.)
+- BF1A/BF22 free-run **negative** in our boot — i.e. nothing actively sets/uses
+  them as timed waits in the paths we reach (their setter 0x3B3C0/0x3B3F2 isn't on
+  the boot path).
+
+**Clock consumers and whether any blocks:**
+- ADC-cal poll deadlines (fcn.47fc/4824): SAFE — once the clock ticks (post-30M),
+  polls complete in 1–2 ticks, far inside the 1000–1500-tick timeouts.
+- 5-minute "CAL" reminder: fcn.4DF34 @ 0x4DF4A does `cmpi.l #0x493E0(=300000), BF12`
+  → adds annunciator code 0x1B ("CAL"). 300000 ticks ≈ billions of cycles →
+  effectively unreachable in a normal boot. Cosmetic.
+- Operating-loop periodic work (0x18E22: `cmpi.l #0x64, BF16`) — time-gated housekeeping.
+- Date/time DISPLAY (the blank top-left line): formatter fcn.59718 + month-name
+  table at ROM 0x5A484 ("JAN FEB … DEC"). The displayed wall-clock is a software
+  value that is never SET (no time/date set command issued at boot), so it renders
+  blank/default. Cosmetic.
+
+**Conclusion — RTC ELIMINATED as a hard blocker.** The clock is software-only and
+behaves correctly given the IRQ mask. The ADC auto-cal sweep that gates ADC-TIME
+(see docs/POST_SELFTEST.md) is **not** time-triggered — it is gated on the
+DLP/operating-loop state (the DriveTick blocker), independent of any real-time
+value. No wall-clock wait stalls the boot.
+
+### Address-coverage audit — no unmodeled RTC anywhere (cmd/unmapped)
+
+To rule out a memory-mapped RTC chip, `cmd/unmapped` audits every bus access in a
+200M-cycle boot across three categories:
+
+1. **Truly unmapped (bus OnFault): 4 addresses, none an RTC** —
+   `0x310000` (sweep-generator output latch, write-only, intentionally unmodeled)
+   and `0xF00000`/`0xF80000`/`0xFBF5FE` (boot RAM-sizing probes from the
+   partition code at PC 0x3430/0x344E/0x33EA). No peripheral.
+2. **Mapped-but-stubbed devices** — the **MC68230 PIT timer registers
+   (0xEF8020–0xEF8034) are NEVER accessed**, so the firmware does not use the
+   68230's on-chip timer as a clock. Only 0xEF8000 (PGCR, 3×) and 0xEF8002
+   (serial status, polled 1127×) are touched. The front panel (0xEF4000) sees
+   only three control writes (0xEF401B/D/F) from the date-title code at 0x599xx.
+3. **MMIO 0xFFF000–0xFFFFFF: 101 offsets, none counter-like** — tracking the count
+   of distinct values each offset returns, the maximum is **7** (0xFFF618, the
+   multiplexed board-ID/option register, already modeled). A live RTC/counter
+   register would return dozens of monotonically-increasing values; none does.
+   Every heavily-accessed offset is already modeled (sweep f200/f300/f400,
+   ACRTC f5fc/5fd/5fe, HP-IB f60x, sweep DACs f70x, analog I/O f728/72a,
+   ADC f75c/75e).
+
+**Definitive: there is no hardware RTC in any address range the firmware accesses,
+nor any unmodeled counting register.** The date-title formatter (fcn.59718) runs
+at boot and reads no unmodeled hardware — its time source is a software date held
+in RAM (never SET at boot → renders blank). Time-of-day is purely the software
+IRQ5 counter (0xBF12/0xBF16). The RTC is conclusively eliminated as both a device
+and a blocker.
+
+### Deep audit: PIT serial 0xEF8000/0xEF8002 — adequately stubbed, NOT a blocker
+
+The most heavily-polled stubbed register from the coverage audit was 0xEF8002
+(MC68230 PIT, polled 1127×). Reversed fcn.2EE8 (the boot serial-transport init):
+
+- The transport is selected by RAM flag `0xB05F`: `==0` → the **PIT** path
+  (0xEF8000/8002); `!=0` → the alternate 0xFFF140/0xFFF148 controller. Our boot
+  takes the PIT path (matches the audit — 0xFFF148 is never touched).
+- The PIT path (ROM 0x2F96–0x2FF0) writes MC68230 control bytes (0x72/0x5D/0x10/
+  0x24) to 0xEF8002 with `dbra` handshake delays, then reads **port A (0xEF8000)**
+  twice into a stack local. That read is a **handshake-acknowledge side-effect** —
+  the value is **discarded** (the local is `clr.w`'d at 0x31FA before any use; the
+  downstream comm-config at 0x3134 reads the unrelated global 0x9AFA). So the
+  zeroed stub is correct; the read value cannot divert the boot.
+- The 1127 runtime reads of 0xEF8002 are serial-status polls during HP-IB/printer
+  output; our RAM-backed stub returns consistent values and the firmware proceeds.
+
+**Verdict:** the PIT/serial range is the HP-IB/serial transport, adequately
+modelled as a stub, and is NOT the blocker. Eliminated. (The genuinely
+blocker-relevant unmodelled surface is the analog-measurement path — the A7 I/O
+bus 0xFFF728/72A and the measurement/alignment DLP flow — not any serial port.)
+
+### CORRECTION (2026-06-01): there IS a hardware RTC — at 0xEF4001–0xEF4017 (LRTC select)
+
+The "RTC eliminated" conclusion above was **WRONG** — it was based only on the
+default-boot access trace, with timedate mode OFF. The user's physical observation
+(the date is retained across a reboot) is correct: there is a **battery-backed
+hardware RTC**, and it is real silicon, not a software clock.
+
+**Location: 0xEF4001–0xEF4017 — the `LRTC` PAL select range.** "LRTC" was NOT a
+misnomer (docs/rom_analysis.md's earlier "LRTC selects the front-panel chip, not
+an RTC" claim is wrong): the front-panel/LRTC address space at 0xEF4000 carries a
+**4-bit-bus BCD real-time clock** whose 12 nibble registers are MULTIPLEXED with
+the key-matrix scan over the same addresses.
+
+**The RTC-read routine** (fcn.59E2C, and an identical twin ending at 0x59E2A,
+reached via slot fcn.430) reads 12 nibbles and packs 6 BCD bytes, then strobes
+`move.b #4, 0xEF401B`:
+
+| byte | hi-nibble @ (mask) | lo-nibble @ | field  | BCD range |
+|------|--------------------|-------------|--------|-----------|
+| -0x6 | 0xEF4017 (0xF)     | 0xEF4015    | year   | 00–99     |
+| -0x5 | 0xEF4013 (0x1)     | 0xEF4011    | month  | 01–12     |
+| -0x4 | 0xEF400F (0x3)     | 0xEF400D    | day    | 01–31     |
+| -0x3 | 0xEF400B (0x3)     | 0xEF4009    | hour   | 00–23     |
+| -0x2 | 0xEF4007 (0x7)     | 0xEF4005    | minute | 00–59     |
+| -0x1 | 0xEF4003 (0x7)     | 0xEF4001    | second | 00–59     |
+
+fcn.59EF0 then formats hour/min/sec as "HH:MM:SS" (BCD nibble → +0x30 ASCII, ':'
+separators) — the top-left time display. The high-nibble masks (1/3/7 for the tens
+of month/day-hour/min-sec) are the signature of a standard BCD calendar RTC such as
+the **OKI MSM6242** / Epson RTC-62421/72421 family (4-bit registers, sec…year).
+
+**Why the audit missed it:** the RTC read only runs when CONFIG → TIMEDATE mode is
+ON (off by default), so it never executed in the instrumented boot. And our
+`device.FrontPanel` already CLAIMS 0xEF4001–0xEF4017 and decodes them as the KEY
+MATRIX, so even an RTC read would have been silently absorbed as key data — not
+faulted, not flagged. This is the "mapped-but-stubbed within a device" blind spot.
+
+**Status vs. the boot/cal blocker:** the RTC is NOT a boot/cal/trace blocker (it is
+read only in timedate-display mode). But it is genuine unmodelled hardware — to make
+the date/time display work, `device.FrontPanel` needs an RTC mode: when the firmware
+selects the clock (the 0xEF401B command path) the 12 nibble registers must return
+BCD time instead of key-matrix data. Battery-backed in real HW (A16A1BT1 domain) →
+the retained date. Likely chip: MSM6242-class. See docs/HARDWARE.md §6.

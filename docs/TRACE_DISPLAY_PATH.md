@@ -238,3 +238,243 @@ continuous-sweep DLP path.** The trace-draw, the front-panel key consume, and th
 full annunciator-update all unblock together once that obstruction is resolved
 (the firmware runs its operating-loop DLP sources). The analog model is data-ready
 and waiting on that single firmware-side blocker. Tool: cmd/tracehunt.
+
+## Another DLP-scheduled element: the timedate display (2026-06-01)
+
+The CONFIG > TIMEDATE date/time display is a THIRD DLP-scheduled display source
+blocked by the same operating-loop/DLP-render obstruction (alongside the trace
+draw and the annunciator update). Enable mechanism fully traced:
+
+- The **CONFIG > TIMEDATE > TIMEDATE ON/OFF** softkey is `KH'TIMEDATE|ON .OFF.',,
+  TIMEDSP` (menu DLP source at ROM 0x7B1A0); pressing it runs the DLP macro
+  `${TIMEDSP=!TIMEDSP;}` — it toggles the **DLP variable TIMEDSP** (stored in the
+  typed-variable store, the 0x5C000 subsystem; see ROM_DATA_CATALOG.md).
+- `TIMEDSP` = true ⇒ the date/time paints top-left. The date formatter is
+  **fcn.59718** (uses month table 0x5A484; ':' time format via fcn.59EF0), reached
+  through the **DLP scheduler fcn.d18** — i.e. it only paints when the DLP runtime
+  renders its scheduled sources, the same gate as the trace.
+- The **power-up / default-config DLP preset at ROM 0x74D10** contains
+  `…TIMEDSP ON; DATEMODE MDY;…`, so a factory/default configuration enables
+  timedate by default (the `__PKIP`/`__MN` recall preset). On real hardware the
+  date therefore shows out of the box; in our boot it does not, because the
+  DLP-scheduled render doesn't run (this blocker), not because of the enable.
+- `0xFFBC64` bit 13 is the C-side timedate redraw flag (set on entry to fcn.59718,
+  tested across the operating loop fcn.18568 at 0x1859A/0x189C4/0x18EB6).
+
+**The RTC hardware itself is now modelled and correct** (device.FrontPanel,
+0xEF4001–0xEF4017, proven by cmd/rtcprobe via the firmware's own fcn.59E2C). So
+once the DLP-render obstruction is cleared, the date should paint with no extra
+RTC work — set TIMEDSP and the existing clock model supplies the BCD. Decision
+(2026-06-01): defer the timedate display to this DLP-render effort rather than a
+one-off poke. Enable lever for that work: DLP variable TIMEDSP.
+
+## FRESH dynamic trace (2026-06-01) — confirms: stuck in the BOOT SWEEP ORCHESTRATOR, never reaches fcn.18568
+
+A clean debugger-driven profile (cmd/dlpfresh single-steps a post-boot window;
+cmd/sweepstate snapshots the sweep cells) settles the conflicting prior notes.
+**The "firmware reaches the operating loop" claim (CLAUDE.md ★2026-05-31) is wrong
+under faithful driving.** Ground truth:
+
+- Boot to ~45M cycles: stuck mid-init in the sweep-step loop (0x4800 timer-poll
+  73% + 0x7C00 LO-DAC + 0x25000 freq-calc); b0a0 bit11 SET.
+- Boot to ~250M cycles (init complete, b0a0 bit11 CLEAR): the steady state is the
+  **boot sweep orchestrator at 0x17400** — 34% in 0x17400, 62% in its callee
+  0xCC00–0xD7FF, 3% slot-dispatch (0x400). **fcn.18568 reached 0 times** in a 4M-step
+  window; so are fcn.34EE8, fcn.349B6, fcn.5ECEE, __GTTDRW, fcn.59718.
+
+The orchestrator loop (disasm 0x17400):
+```
+0x17402  move.w $f300,D6 ; btst #11,D6 ; bne 0x17418   ; wait for sweep-in-progress
+0x1740E  jsr $4824 (deadline) ; beq 0x17402            ; else poll w/ timeout
+...
+0x17460  tst.w $a9a0 ; blt 0x17472                      ; if point-counter < 0, SKIP done
+0x17466  btst #11,D6 ; bne 0x17472
+0x1746C  bset #13,$befa                                 ; mark sweep-DONE
+0x17476  move.w #$2080,D0 ; and.w $befa ; beq 0x17424   ; loop until befa bit13|bit7
+```
+
+Steady-state cells (cmd/sweepstate, stable across 12M cycles):
+`a9a0=ffff(-1)  a2e8=0000  a2ee=0000  befa=0404  f300=1008  bf34=0000`, PC=0x1745C.
+
+**Root cause (precise):** nothing drives a sweep cycle during BootToOperating —
+- `$a9a0` (sweep point counter) is **-1**, so the sweep-done bset is skipped;
+- `$f300` bit 11 (sweep-in-progress) **never pulses** — mmio.go models only bit 12
+  (`sweepStatusReady=0x1000`), not bit 11;
+- `$bf34` (IRQ6 capture dispatch) is **0** — sample capture isn't armed;
+- **pkg/emu/device/sweepengine.go is NOT wired into machine.go** — it's a
+  standalone model used only by cmd tools, so the boot never gets sweep data,
+  bit-11 pulses, or a point-counter advance.
+
+So the trace/timedate/annunciator DLP renders are all downstream of a sweep
+orchestrator that never completes a sweep. **The bounded task: wire a faithful
+sweep cycle into the boot** — f300 bit 11 pulse (in-progress→done) + `$a9a0` point
+counter advancing 0..N in lock-step with IRQ6 buffer fill (bf34-armed) — so the
+0x17400 orchestrator sets befa bit13, processes the trace, and hands off to
+fcn.18568. This is CORRECTION #2's "model the sweep subsystem end-to-end",
+now pinned to the exact loop + cells. Tools: cmd/dlpfresh, cmd/sweepstate.
+
+### Callee dissected (2026-06-01) — the sweep is NEVER ARMED; no second gate
+
+Per the "trace the 0xCC00-0xD7FF callee first" decision (cmd/hotloop):
+
+- The 62% callee is **fcn.cfbe** (0xCFBE), called **93689×** in a 3M-step window.
+  It is the sweep-acquisition sync, but in this state it **always early-exits**:
+  work-path 0xD07E = **0 hits**, early-exit 0xD618 = **93689**. It bails because its
+  acquire-arg `bit0 of (9,A6)` is clear. (The `$bffe` writes 0x107/0x109 are
+  write-only progress-checkpoint TAGS, not a hardware mailbox — the whole 0x4001/
+  0x7001/0x010x family tags code checkpoints; the real timer handshake is `$befb`
+  bit7, IRQ5-driven and satisfied.) **So there is NO independent second gate** —
+  the callee is a no-op idle bail.
+- **The sweep is never armed.** Across the window `bf34` stays **0** (IRQ6 capture
+  handler unset) and `a9a0` stays **< 0** (point counter unset). `b0e6=0xFFF1`.
+- The arm sequence lives at **0x173A0-0x173CC** (programs `$f300` low nibble = 8,
+  clears `befa` bit13, sets `bf34 = ($48,A4)` from the band-indexed handler table,
+  then `tst a9a0; bge` …). It executes **0.00%** of the window (page 0x17000 = 55
+  hits) — the orchestrator never goes through it. `a9a0` is armed to a real count
+  (`0x100`) only at **0x9288** (sweep-setup fcn.~0x9200), which is never called;
+  a9a0 is only ever (re)set to -1 (0x8FBE/0x92AA/0x92B2).
+
+**Refined root cause:** the firmware is not "mid-sweep and stalled" — it is in a
+**pre-sweep IDLE loop** that never ARMS/STARTS a sweep. The orchestrator spins
+(0x17400 poll f300 bit11 + call fcn.cfbe which bails), with `a9a0=-1` so the
+sweep-done bset is skipped and the arm path is never taken. The lever is therefore
+**the sweep-START trigger**: what should call the sweep-setup (fcn.~0x9200 → set
+`a9a0=0x100`, arm `bf34`) and why it never fires. That trigger is normally issued
+from the operating-loop/DLP sweep source — which we don't reach — so this is the
+same chicken-and-egg as the operating-loop entry, now localized to the sweep-arm
+trigger. Next trace: the caller/gate of fcn.~0x9200 (the sweep-setup). Tools:
+cmd/dlpfresh, cmd/sweepstate, cmd/hotloop.
+
+### PROOF (2026-06-01) — the sweep-arm gate IS the lever; forcing it reaches the LIVE operating UI
+
+Per "trace then prove": after tracing the sweep-START trigger (fcn.8f04 arms
+a9a0=20 early but resets to -1 via the 0x9298 `cmpi.l #0x3a98,-0x4(a6)` path, so
+steady-state a9a0=-1 → pre-sweep idle), the force-arm proof (cmd/hotloop) is
+decisive:
+
+**Forcing `a9a0=0x190` (≥0) + `befa` bit13 (sweep-done) post-boot drives the
+firmware out of the boot-measurement idle loop and INTO the live operating loop.**
+- It takes the armed path (0x173EE) + process branch (0x17490) + reaches
+  **fcn.18568** (0× otherwise).
+- It renders the **softkey menu** — "COPY DEV / PRNT PLT", "Plot Config",
+  "Print Config", **"Time Date"**, "Chan Prefix", "More 1 of 8" — plus the boot
+  banner ("COPYRIGHT HP 1986-90", "rev 980615", "HP-IB ADRS: 0"). The softkey
+  menu is the interactive UI and never renders in the stuck idle state.
+- **800 vectors drawn** (Lines 7905→8705) vs 0 normally. screens/proof_forcearm.png.
+
+So the long-standing "operating loop / DLP render" blocker reduces to: **the
+firmware never arms a sweep because fcn.8f04 computes the point counter a9a0 = -1
+at steady state.** Make a9a0 arm to a valid positive count (and befa bit13 advance
+in lock-step with a real sweep cycle) and the firmware runs the live UI.
+
+Remaining gates (now bounded, downstream of the arm):
+1. The **C trace-draw at 0x174E0** (`jsr $568`, arg 0) is gated by **fcn.104dc**
+   (0x174D0) which returned bit0 SET → SKIP. fcn.104dc blanks the draw when
+   `fcn.104ba() ≥ 0x191(401)` OR (`pos ≥ b0ac` ∧ `b1e0` bit13 ∧ ¬`b072` bit10 ∧
+   `b0c2`==0). So a faithful sweep (point index advancing 0..401 in lock-step)
+   would satisfy it.
+2. The arm itself: why fcn.8f04's `-0x4(a6) ≥ 0x3a98` path picks a9a0=-1 (the
+   point-count math from span/sweep-time). That is the natural fix vs. forcing.
+
+Net: the blocker is now a concrete, bounded **sweep-arm + lock-step point-counter**
+model, PROVEN to unblock the live operating UI when satisfied. Tools: cmd/dlpfresh,
+cmd/sweepstate, cmd/hotloop (force-arm proof).
+
+### IMPLEMENTATION EXPERIMENT (2026-06-01, branch sweep-cycle-model) — IRQ6 lock-step unblocks the UI + drawing
+
+The sweep IS armed during boot (bf34=0x40B8/0x410A written at 0x173CC, 18×) but our
+BootToOperating never fires IRQ6, so no samples capture, the sweep never completes,
+and the firmware aborts (bf34→0, a9a0=-1) into the idle orchestrator.
+
+**Driving IRQ6 in lock-step DURING boot** (SweepActive=true so f200 supplies
+SweepEngine ADC samples; fire IRQ6 while bf34∈{0x40B8,0x410A} and A5<bf30):
+- bf34 STAYS armed (109k arm-windows vs reset-to-0), **92k sweeps complete**, befa
+  bit13 fires, **55,615 vectors drawn** (vs ~7,900 baseline).
+- Renders the **live operating UI** (softkey menu COPY DEV/Plot Config/Time Date/...
+  + banner) AND trace-like vertical lines. screens/exp_sweepdrive.png.
+
+**Partial, not clean yet:** the drawing happens during the boot phase; in the
+post-160M steady window the operating loop (0x18568) is entered only transiently
+(1×) and the C-draw (0x174E0)/__GTTDRW don't re-fire, so the trace shows as two
+vertical bars, not a sustained spectrum line. a9a0 stays -1 (time-limited sweep).
+
+**Status:** the MECHANISM is validated (IRQ6 lock-step → armed sweeps → UI + draw),
+but a CLEAN sustained trace needs refinement (faithful IRQ6 pacing tied to sweep
+time, correct point-index→X mapping, sustained operating-loop residence). Not wired
+into machine.go yet — per project rule "a half-mock is worse than the clean screen",
+the aggressive-IRQ6 model shouldn't replace BootToOperating until the trace is clean.
+Experiment tool: cmd/hotloop (branch sweep-cycle-model).
+
+### TWO-IRQ SWEEP MODEL (2026-06-01) — the sweep is IRQ-driven (IRQ1 step + IRQ6 capture); trace draws
+
+Decisive architecture finding (answering "how is the main loop notified of sweep
+complete?"): **the sweep is fully interrupt-driven by TWO interrupts, both of which
+raise the sweep-done flag the main loop polls — no busy-wait, no flag-forcing:**
+- **IRQ1 (0x2AB8) = sweep UPDATE/STEP:** `jsr $ca` (load sample/step), `bset #13,
+  $befa` (sweep-done), reprograms the sweep DACs f200/f300/f400/f70a/f716. This is
+  what ADVANCES the ramp across the band.
+- **IRQ6 (0x4088) = sample CAPTURE:** reads f200, scales (bf2e video-filter
+  integrator), dispatches via bf34 to 0x40B8 (store to (A5)+) ; when A5≥bf30
+  (buffer full) it falls through to **0x40C2 end-of-sweep → `bset #13,$befa`**.
+
+My first experiment drove only IRQ6 → samples captured but the ramp never stepped →
+degenerate (vertical-bar) trace. **Driving IRQ1+IRQ6 together** (cmd/hotloop
+`irq1+irq6`) fixes it: window LineLog flips from vertical to 3248 horizontal
+segments, the buffer fills (A5→bf30=0x2FD82A), befa bit13 set the REAL way, and the
+trace DRAWS — flat noise floor along the bottom + signal spikes (CAL 300 MHz +
+injected tones), with the live operating UI (softkey menu + banner). The trace is
+FAITHFUL: noise floor -90 dBm is below the 80 dB window at 0 dBm ref, so it sits on
+the bottom edge and tones rise as spikes — correct for those settings.
+screens/trace_irq1irq6_tones.png.
+
+**So the faithful model is established:** the machine must fire **IRQ1 + IRQ6
+autonomously, paced to the sweep time**, while the firmware has the sweep armed
+(bf34∈{0x40B8,0x410A}) and the buffer isn't full (A5<bf30) — exactly like the IRQ5
+timer tick is injected. SweepEngine (already wired at m.MMIO.Sweep, SweepActive
+gates f200) supplies the data. Remaining polish: pace IRQ1/IRQ6 to real sweep
+time (not per-chunk burst), sustain the operating loop, and (cosmetic) put the
+noise floor on-screen for a textbook trace. Tool: cmd/hotloop (branch
+sweep-cycle-model), modes irq6 / irq1 / irq1+irq6.
+
+### WIRED INTO THE MACHINE (2026-06-01, branch sweep-cycle-model)
+
+The two-IRQ sweep model is now production code (opt-in), not just an experiment:
+- **`Machine.SweepDrive`** (bool, default false) + **`Machine.driveSweepCycle()`** —
+  in the boot loop, while the firmware has the capture handler armed
+  (bf34∈{0x40B8,0x410A}) and the buffer isn't full (A5<bf30), it fires IRQ1 (sweep
+  step) then a burst of up to 8 IRQ6 (sample capture). The firmware's own handlers
+  raise befa bit13 (sweep-done) when the buffer fills — faithful, no flag-forcing.
+- **`Machine.BootToOperatingWithSweep(maxCycles)`** — enables SweepDrive +
+  SweepActive and boots; supplies trace data from m.MMIO.Sweep (inject tones via
+  m.MMIO.Sweep.Spectrum.Signals first). Kept SEPARATE from BootToOperating so the
+  deterministic golden-screen boot is untouched (verified: full suite green).
+- **`TestBootToOperatingWithSweep`** locks it in: asserts befa bit13 set (sweep
+  completed the real way), trace buffer non-empty (samples captured), and >15k
+  vectors drawn (trace drawn). cmd/sweeprun2 renders it (screens/sweeprun2.png).
+
+Remaining polish (cosmetic, not blocking): pace IRQ1/IRQ6 to real sweep time
+instead of per-chunk burst; put the noise floor on-screen for a textbook trace;
+sustain the operating loop indefinitely. The core blocker — "the firmware never
+sweeps because nothing fires the sweep IRQs" — is RESOLVED.
+
+### REFINEMENTS (2026-06-01) — real-time pacing, random noise floor, signal limits
+
+Three polish items, all on branch sweep-cycle-model:
+- **Paced to real sweep time:** driveSweepCycle now paces via a cycle accumulator
+  (`sweepCyclesPerPoint=2300` ⇒ ~58 ms for a 401-point sweep) — one IRQ1+IRQ6 point
+  per ~2300 cycles, not a per-chunk burst. Clamps the accumulator while the buffer
+  is full so re-arm doesn't burst-fire the next sweep.
+- **Visible random noise floor (grass):** SweepEngine gains NoiseFloorDBm (default
+  -72 dBm, ~10% up the 80 dB window) + NoiseAmpDB (±6 dB) + a seeded RNG; DetectADC
+  power-sums the per-point random grass with the spectrum. The trace now shows the
+  classic noisy SA baseline (400/401 points non-zero) — screens/sweeprun2.png. The
+  analog model's true -90 dBm thermal floor is unchanged; the grass is a display
+  layer in SweepEngine (seeded → reproducible; tests unaffected).
+- **Signal boundary/limit check:** `SweepEngine.SetSignals` drops tones outside the
+  sweep span [StartHz,StopHz] and clamps amplitudes to the display window
+  [RefLevel-80, RefLevel]; returns the dropped count. cmd/sweeprun2 demonstrates a
+  5 GHz tone dropped and a +20 dBm tone clamped.
+
+Tests: TestSweepEngineSetSignals (boundary), TestBootToOperatingWithSweep (still
+green with pacing+grass), full suite green. Render: screens/sweeprun2.png shows the
+grass baseline + live operating UI.

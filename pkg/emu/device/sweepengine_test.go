@@ -83,11 +83,40 @@ func peakPoint(s *SweepEngine) int {
 // TestSweepEngineDetectAdvances verifies DetectADC walks the sweep and wraps.
 func TestSweepEngineDetectAdvances(t *testing.T) {
 	s := NewSweepEngine()
+	s.NoiseAmpDB = 0 // disable per-point random grass so the position value is deterministic
 	first := s.DetectADC()
 	for i := 1; i < s.Points; i++ {
 		s.DetectADC()
 	}
 	if wrapped := s.DetectADC(); wrapped != first {
 		t.Errorf("after a full sweep DetectADC=%#x, want wrap to %#x", wrapped, first)
+	}
+}
+
+// TestSweepEngineSetSignals checks the signal boundary/limit guard: signals
+// outside the sweep span are dropped, and amplitudes are clamped to the display
+// window [RefLevel-80, RefLevel].
+func TestSweepEngineSetSignals(t *testing.T) {
+	s := NewSweepEngine() // 0..2.9 GHz span, 0 dBm ref → window [-80, 0]
+	dropped := s.SetSignals([]analog.Signal{
+		{Hz: 1.0e9, DBm: -30},  // in band, in window → kept as-is
+		{Hz: 5.0e9, DBm: -25},  // out of band (>2.9 GHz) → dropped
+		{Hz: 2.0e9, DBm: 20},   // in band, over-range → clamped to 0 dBm
+		{Hz: 0.5e9, DBm: -200}, // in band, under-range → clamped to -80 dBm
+	})
+	if dropped != 1 {
+		t.Errorf("dropped = %d, want 1 (the 5 GHz out-of-band tone)", dropped)
+	}
+	got := s.Spectrum.Signals
+	if len(got) != 3 {
+		t.Fatalf("kept %d signals, want 3", len(got))
+	}
+	for _, sig := range got {
+		if sig.Hz < s.StartHz || sig.Hz > s.StopHz {
+			t.Errorf("kept out-of-band signal %g Hz", sig.Hz)
+		}
+		if sig.DBm > s.Detector.RefLevelDBm || sig.DBm < s.Detector.RefLevelDBm-80 {
+			t.Errorf("signal %g Hz amplitude %g dBm not clamped to window", sig.Hz, sig.DBm)
+		}
 	}
 }
