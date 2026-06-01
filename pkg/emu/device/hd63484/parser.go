@@ -10,11 +10,13 @@ package hd63484
 // a comment with the official ACRTC mnemonic + parameter count.
 const (
 	// System-control commands (top nibble 0x0).
-	cmdORG     = 0x0000 // ORG    — set drawing origin (2 args: X, Y)
+	cmdNOP     = 0x0000 // NOP    — no operation (0 args); firmware pads the FIFO with it
+	cmdORG     = 0x0400 // ORG    — set drawing origin (2 args: mem-addr, dot). Datasheet 0x0400.
 	cmdWPRBase = 0x0800 // WPR    — write parameter register (low 5 bits = reg #; 1 arg)
 	cmdWPRMask = 0xFFE0 // mask to match the WPR family (0x0800..0x081F)
 	cmdRPRBase = 0x0C00 // RPR    — read parameter register (low 5 bits = reg #; 0 args, 1 result)
 	cmdRPRMask = 0xFFE0
+	cmdGCHR    = 0xD000 // (per-glyph attribute/terminator; 1 arg) — emitted after each text glyph
 	cmdWPTN    = 0x1800 // WPTN   — write pattern RAM (next word = count of pattern words)
 	cmdRPTN    = 0x1C00 // RPTN   — read pattern RAM (1 arg, returns count words)
 	cmdSCAN    = 0x1400 // SCAN   — scan boundary (rare; 1 arg)
@@ -377,8 +379,10 @@ func (dec *decoder) dispatchCmd(c *Chip, w uint16) {
 		return
 	}
 	if w&cmdRPRMask == cmdRPRBase {
-		// RPR has no args; pushes the register value into the read-FIFO.
-		// We don't model the FIFO yet; just stay in stCmd.
+		// RPR — read parameter register (0 args; pushes the register value into
+		// the read-FIFO). The read-FIFO is not modelled. Recognised-but-stubbed:
+		// gate it (panics unless allowlisted) then stay at command position.
+		c.gate("cmd:rpr", "command RPR %#04x (read parameter register; read-FIFO not modelled)", w)
 		return
 	}
 	// Count-prefixed polyline family — APLL (0x9800) / RPLL (0x9C00). The low
@@ -388,10 +392,12 @@ func (dec *decoder) dispatchCmd(c *Chip, w uint16) {
 	// 0xFC00 keeps APLL/RPLL distinct from ARCT(0x9000)/RRCT(0x9400).
 	switch w & 0xFC00 {
 	case 0x9800: // APLL — absolute polyline
+		c.gate("cmd:apll", "command APLL %#04x (absolute polyline; framed but vertices not rendered)", w)
 		dec.polyRel = false
 		dec.st = stPolyCount
 		return
 	case 0x9C00: // RPLL — relative polyline
+		c.gate("cmd:rpll", "command RPLL %#04x (relative polyline; framed but vertices not rendered)", w)
 		dec.polyRel = true
 		dec.st = stPolyCount
 		return
@@ -402,6 +408,7 @@ func (dec *decoder) dispatchCmd(c *Chip, w uint16) {
 	// region coords are ORG-relative (which we don't apply yet), so drawing it
 	// would land in the wrong place. Consume-only via the skip counter.
 	if w&0xFFF8 == 0x5C00 {
+		c.gate("cmd:sclr-area", "command SCLR-area %#04x (selective clear, 3 args; framed but region not rendered)", w)
 		dec.skipN = 3
 		dec.st = stSkip
 		return
@@ -419,6 +426,8 @@ func (dec *decoder) dispatchCmd(c *Chip, w uint16) {
 	// matches only and add the specific attribute-bit variants the
 	// firmware actually uses (sourced from cmd/_r2survey).
 	switch w {
+	case cmdNOP:
+		// NOP — no parameters; remain at command position.
 	case cmdORG:
 		dec.st = stORG1
 	case cmdAMOVE:
@@ -448,24 +457,44 @@ func (dec *decoder) dispatchCmd(c *Chip, w uint16) {
 	case cmdWPTN:
 		dec.st = stWPTNCount
 	case cmdPAINT:
+		c.gate("cmd:paint", "command PAINT %#04x (flood-fill from pen; not modelled)", w)
 		dec.st = stPAINTSeed
 	case cmdSCLR, 0xF401: // 0xF400 / 0xF401 — SCLR without/with attr
 		dec.st = stSCLRArg
 	case cmdCLR, 0xF001: // 0xF000 / 0xF001 — CLR without/with attr
 		dec.st = stCLRData
 	case cmdCPY, 0xF801, cmdSCPY, 0xFC01:
+		c.gate("cmd:cpy", "command CPY/SCPY %#04x (area copy, 4 args; consumed but not performed)", w)
 		dec.st = stCPYSrcLo
 	case cmdBLKFILL:
 		dec.st = stBlkPattern
 	case cmdRPTN, cmdSCAN:
-		// 0-or-1 arg commands we don't currently exercise. Stay in stCmd.
+		// 0-or-1 arg commands. Recognised-but-stubbed: gate (panics unless
+		// allowlisted) then stay at command position.
+		c.gate("cmd:rptn-scan", "command %#04x (RPTN/SCAN; not modelled)", w)
+	case cmdGCHR:
+		// Post-glyph attribute/terminator command (1 arg). The firmware emits
+		// it after every text glyph (docs/research.md §7 trailer:
+		// 0x0805 0x0000 0xD000 0x0907). Its argument tracks glyph content but
+		// has no observable effect on our 1bpp monochrome render. Recognised-
+		// but-stubbed: gate it (allowlist cmd:0xd000) and frame its single
+		// argument so the command stream stays in sync.
+		if c.gate("cmd:0xd000", "command 0xD000 (post-glyph attribute, 1 arg) — side-effect not modelled") {
+			dec.skipN = 1
+			dec.st = stSkip
+		}
 	default:
-		// Unknown / unmodelled command. Tally for RE diagnostics; stay
-		// in stCmd (don't desync — the next genuine command word will
-		// re-anchor the parser).
+		// Faithfulness gate: an opcode with no handler. This is either a
+		// genuinely-unimplemented command or a parser desync (data misread as a
+		// command) — both must be surfaced, not silently tallied. Record for the
+		// panic context, then panic.
 		c.UnknownCmds++
 		if c.UnknownCmdHist != nil {
 			c.UnknownCmdHist[w]++
 		}
+		if probeNoPanic {
+			return
+		}
+		c.unimplementedf("command opcode %#04x at command position (no handler)", w)
 	}
 }

@@ -287,29 +287,61 @@ IS the HD63484 command set.
   at the bottom — matching the real instrument.
 
 ### 7.2 Command port `0x5FC` / status `0x5FD` / data `0x5FE`
-- **Status `0x5FD`** = constant `0x27` (bits 0,1,2,5 ready) — STUB (instant-complete chip).
-- **Command/data** parsed by `decoder` (`parser.go`) — a FIFO state machine. Modeled commands:
+
+**Port routing (`mmio.go`, measured over a full 200M-cycle boot — `0x5FC`=Word-W only,
+`0x5FD`=Byte-R only, `0x5FE`=Word-R/Word-W only):**
+- **Command `0x5FC` (Word-W)** → `Display.WriteCmd` (Address-Register load; AR=0 selects the
+  command FIFO, AR≠0 selects a control register).
+- **Status `0x5FD` (Byte-R)** = constant `0x27` (bits 0,1,2,5 ready) — STUB (instant-complete
+  chip; the real controller asserts ready asynchronously). This is the one deliberate
+  MMIO-port model.
+- **Data `0x5FE` (Word-R/W)** → `Display.WriteData` / `Display.ReadData` (FIFO command words on
+  write; block read-back on read).
+- A **boundary guard** (`mmio.guardDisplayPort`) panics on any non-word access to `0x5FC`/`0x5FE`
+  — those would bypass the word-forwarding and be silently absorbed by the backing store.
+
+**Faithfulness contract (`strict.go`).** The driver must never silently ignore a command or
+register access. Anything not faithfully modeled hits `unimplementedf` and **panics
+deterministically**. The only escape is the explicit, justified **allowlist** (`allowedUnmodeled`)
+— store-only control registers and framed-but-unrendered commands, each with a written reason.
+Keys: `cmd:<op>`, `ar:<0xNN>`, `wpr:<0xNN>`, `mmio:<0xNNN>`.
+
+**Command FIFO (AR=0)** parsed by `decoder` (`parser.go`) — a state machine. Commands:
 
 | Opcode | Cmd | Params | Status |
 |---|---|---|---|
-| `0x0000` | ORG (origin) | 2 | parsed; **not applied** to coords (GAP) |
+| `0x0000` | NOP | 0 | MODELED (FIFO padding) |
+| `0x0400` | ORG (origin) | 2 | parsed; coord-transform **not applied** (GAP) |
 | `0x08RR` | WPR (write param reg RR) | 1 | MODELED |
-| `0x0CRR` | RPR | 0 | consumed |
-| `0x1800` | WPTN — glyph (count `0x000A`) or pattern-RAM | 15 / 1+N | MODELED (glyph blit) |
+| `0x0CRR` | RPR (read param reg) | 0 | allowlisted `cmd:rpr` (read-FIFO not modeled) |
+| `0x1800` | WPTN — glyph (count `0x000A`=10 words) or pattern-RAM | 2+10 / 1+N | MODELED (glyph blit) |
+| `0xD000` | per-glyph attribute/terminator | 1 | allowlisted `cmd:0xd000` (framed; no visible effect) |
 | `0x8000/0x8400` | AMOVE/RMOVE | 2 | MODELED |
-| `0x8800/0x8C00` | ALINE/RLINE | 2 | MODELED (Bresenham) |
+| `0x8800/0x8C00` | ALINE/RLINE | 2 | MODELED (Bresenham + stipple) |
 | `0x9000/0x9400` | ARCT/RRCT | 2 | MODELED (outline) |
 | `0xA000/0xA400` | AFRCT/RFRCT | 2 | MODELED (filled) |
-| `0x9800/0x9C00` | APLL/RPLL (polyline) | **1+2N** (count-prefixed) | framed, **consume-only** (drawing needs ORG — GAP) |
+| `0x9800/0x9C00` | APLL/RPLL (polyline) | **1+2N** (count-prefixed) | allowlisted `cmd:apll/rpll` (framed; drawing needs ORG — GAP) |
 | `0x5800` | block-fill (POST RAM test) | 3 | MODELED (`dmem` fill) |
-| `0x5C00` | SCLR (selective clear) | 3 | framed consume-only (GAP) |
+| `0x5C00` | SCLR (selective area-clear) | 3 | allowlisted `cmd:sclr-area` (framed; needs ORG — GAP) |
 | `0xCC00` | DOT | 0 | MODELED |
 | `0xC000` | CRCL | 1 | MODELED |
 | `0xF000/0xF400` | CLR/SCLR | 3/1 | MODELED |
-| `0xE000` | PAINT | 1 | no-op (GAP) |
-| other | unknown | — | counted (`UnknownCmdHist`); ~141/boot residual |
+| `0xE000` | PAINT | 1 | gated `cmd:paint` (not allowlisted → panics if hit) |
+| `0xF800/0xFC00` | CPY/SCPY | 4 | gated `cmd:cpy` (not allowlisted → panics if hit) |
+| `0x1C00/0x1400` | RPTN/SCAN | — | gated `cmd:rptn-scan` (panics if hit) |
+| other | unknown | — | **PANIC** (faithfulness gate) |
 
-  Parser desync was reduced 11285→141/boot by framing the count-prefixed polyline family.
+  The boot stream is now **clean through the command parser** — zero unknown opcodes reach
+  command position. The former ~73/boot residual desync was a glyph-framing bug: WPTN count=10
+  is exactly 10 data words, but the parser consumed a blind 4-word "trailer" afterward, mis-framing
+  the post-glyph commands (`0x0805` WPR5, `0xD000`+arg). It also mislabelled ORG as `0x0000` (really
+  NOP); ORG is `0x0400` per the datasheet. Both fixed.
+
+**Control registers (AR≠0)** decoded by `writeControlReg` (`strict.go`): display-address set
+(`0xC8` RAR1, `0xCA` MWR1, `0xCC/0xCE` SAR1) drive display-start/page-flip; all other control
+registers (`0x02` CCR, `0x04` OMR, `0x06` DCR, `0x82–0x8a` raster timing, `0x92–0x9c` window/cursor,
+`0xe0–0xea` cursor/zoom) are **store-only latches**, each allowlisted with a reason (no observable
+effect on the 1bpp monochrome output). Any un-allowlisted control register **panics**.
 
 - **Block read-back (`0x5FE` read):** the POST display-RAM test (ROM `0xD6B2`) block-fills VRAM
   (`0x5800`), rewinds the read pointer (MAR `0x4000/0x0000`), then issues RD commands and reads

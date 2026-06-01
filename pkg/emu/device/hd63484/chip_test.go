@@ -2,6 +2,7 @@ package hd63484
 
 import (
 	"image/color"
+	"strings"
 	"testing"
 )
 
@@ -300,19 +301,22 @@ func TestGlyphPacket(t *testing.T) {
 	}
 }
 
-// TestUnknownCmd — unknown command opcodes are tallied + skipped without
-// desyncing the parser (next valid command must dispatch normally).
+// TestUnknownCmd — under the faithfulness contract (strict.go) an unrecognised
+// command opcode at command position must PANIC deterministically, never be
+// silently tallied-and-skipped. (The old behaviour hid parser desyncs behind an
+// UnknownCmds counter; the gate now surfaces them.)
 func TestUnknownCmd(t *testing.T) {
 	c := New()
-	feedWords(c, 0x4003) // not a recognised command
-	if c.UnknownCmds != 1 {
-		t.Errorf("UnknownCmds=%d, want 1", c.UnknownCmds)
-	}
-	// Following AMOVE must still work.
-	feedWords(c, cmdAMOVE, 11, 22)
-	if c.penX != 11 || c.penY != 22 {
-		t.Errorf("pen after recovery = (%d,%d), want (11,22)", c.penX, c.penY)
-	}
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatalf("feeding unknown opcode 0x4003 did not panic; the faithfulness gate must surface it")
+		}
+		if msg, ok := r.(string); !ok || !strings.Contains(msg, "0x4003") {
+			t.Fatalf("panic message %v does not describe the offending opcode 0x4003", r)
+		}
+	}()
+	feedWords(c, 0x4003) // not a recognised command → must hit the faithfulness gate
 }
 
 // TestDisplayStartPageFlip verifies the HD63484 Address-Register protocol decodes

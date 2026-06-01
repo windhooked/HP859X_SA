@@ -10,8 +10,32 @@
 package device
 
 import (
+	"fmt"
+
 	"github.com/windhooked/HP859X_SA/pkg/emu/bus"
 )
+
+// guardDisplayPort enforces the HD63484 MMIO-port faithfulness contract: the
+// command port (0x5FC) and data port (0x5FE) are word-only — that is the sole
+// width by which the firmware drives them and the only width the routing below
+// forwards to the controller. A byte/long access to either would bypass the
+// word-forwarding and be silently absorbed by the backing store, so surface it
+// deterministically instead. (Measured over a full 200M-cycle boot: 0x5FC=Word-W
+// only, 0x5FD=Byte-R only, 0x5FE=Word-R/Word-W only — see cmd/dispstream.) The
+// 0x5FD status byte is intentionally byte-accessed and modelled by the
+// sciStatusReady override, so it is not constrained here.
+func (m *HP8593AMMIO) guardDisplayPort(addr uint32, sz bus.Size, isWrite bool) {
+	switch addr {
+	case 0x5FC, 0x5FE:
+		if sz != bus.Word {
+			dir := "read"
+			if isWrite {
+				dir = "write"
+			}
+			panic(fmt.Sprintf("hd63484 MMIO faithfulness gate — non-word %s of display port %#05x (size=%d bytes): the command/data ports are word-only; a byte/long access would not reach the controller", dir, addr, int(sz)))
+		}
+	}
+}
 
 // ───────────────────────────────────────────────────────────────────────────
 // HP8593AMMIO — 4 KB MMIO window (0xFFF000–0xFFFFFF)
@@ -284,6 +308,9 @@ func (m *HP8593AMMIO) Read(addr uint32, sz bus.Size) uint32 {
 	if int(addr)+int(sz) > len(m.b) {
 		return 0
 	}
+	if addr >= 0x5FC && addr <= 0x5FE {
+		m.guardDisplayPort(addr, sz, false)
+	}
 	v := beRead(m.b[:], addr, sz)
 
 	// A16 data-path wrap: 0xFFF780..0xFFF7FF mirrors 0xFFF700..0xFFF77F (the
@@ -394,6 +421,9 @@ func (m *HP8593AMMIO) Read(addr uint32, sz bus.Size) uint32 {
 func (m *HP8593AMMIO) Write(addr uint32, sz bus.Size, val uint32) {
 	if int(addr)+int(sz) > len(m.b) {
 		return
+	}
+	if addr >= 0x5FC && addr <= 0x5FE {
+		m.guardDisplayPort(addr, sz, true)
 	}
 	beWrite(m.b[:], addr, sz, val)
 

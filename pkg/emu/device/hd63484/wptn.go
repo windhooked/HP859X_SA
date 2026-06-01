@@ -49,12 +49,13 @@ func (dec *decoder) feedGlyph(c *Chip, w uint16) {
 			if c.glyphLog != nil {
 				c.glyphLog.Record(c.penX, c.penY, dec.rows)
 			}
-			dec.trailIdx = 0
-			dec.st = stGlyphTrailer
-		}
-	case stGlyphTrailer:
-		dec.trailIdx++
-		if dec.trailIdx >= glyphTrailLen {
+			// WPTN count=0x000A is EXACTLY 10 data words (fg, bg, 8 rows);
+			// the packet ends here. The words that follow (0x0805 WPR5,
+			// 0xD000+arg — the firmware's per-glyph "trailer", see
+			// docs/research.md §7) are SEPARATE commands and are dispatched
+			// normally. (The former blind 4-word trailer-consume mis-framed
+			// these and desynced the parser ~73×/boot when the post-glyph
+			// command sequence wasn't exactly 4 words.)
 			dec.st = stCmd
 		}
 	}

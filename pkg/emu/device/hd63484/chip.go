@@ -110,6 +110,13 @@ type Chip struct {
 	dispSARHi uint16 // AR 0xCC — base start address, high word
 	dispSARLo uint16 // AR 0xCE — base start address, low word
 
+	// ctrlRegs is the full AR-addressed control-register file. Control-register
+	// writes (AR≠0) are decoded here rather than mis-fed to the command parser.
+	// Registers whose side-effects we faithfully model have explicit handlers in
+	// writeControlReg; the rest are store-only and must be on the strict
+	// allowlist (see strict.go) — anything else panics.
+	ctrlRegs [256]uint16
+
 	// Parameter register file (32 × 16-bit). See registers.go for slot
 	// meanings.
 	regs [32]uint16
@@ -354,17 +361,12 @@ func (c *Chip) WriteCmd(val uint16) {
 // is unchanged. See parser.go for the FIFO state machine.
 func (c *Chip) WriteData(w uint16) {
 	c.DataWords++
-	if c.addrReg >= 0xC8 && c.addrReg <= 0xCF {
-		switch c.addrReg {
-		case 0xC8:
-			c.dispRAR = w
-		case 0xCA:
-			c.dispMWR = w
-		case 0xCC:
-			c.dispSARHi = w
-		case 0xCE:
-			c.dispSARLo = w
-		}
+	if c.addrReg != 0 {
+		// Control-register access (AR≠0): the data word is the addressed
+		// register's value, NOT a command-FIFO word. Decode it (writeControlReg
+		// faithfully handles or strictly gates each register) and auto-increment
+		// the AR per the chip. AR==0 is the command-FIFO entry → the parser.
+		c.writeControlReg(c.addrReg, w)
 		c.addrReg += 2 // HD63484 AR auto-increment (per 16-bit word)
 		return
 	}
