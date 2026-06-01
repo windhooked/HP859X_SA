@@ -1,21 +1,28 @@
 // Command gui is a live Ebiten window for the virtual HP 8593A: it boots the
 // real Rev L firmware from reset, renders the HD63484 framebuffer in real time,
-// and maps the host keyboard onto the front-panel key matrix so you can probe
-// keys interactively and watch the display respond.
+// and provides two keyboard paths that mirror the real instrument:
 //
-// Run on a machine with a display (the firmware boots to its UI in ~1–2 s of
-// wall-clock):
+//  1. AT keyboard path (external keyboard, rear-panel EXT KEYBOARD connector):
+//     alphanumeric and function keys are translated to AT Set-2 scan codes and
+//     injected into the MC68230 PIT receiver (0xEF8002/0xEF8000), triggering
+//     IRQ4. The firmware decodes them and dispatches:
+//     - Letters/digits/punctuation: typed text (screen titles, HP-IB commands,
+//       DLP programs).
+//     - F1–F6: softkeys 1–6 of the current menu.
+//     - F7: prefix mode; F8: remote-commands mode.
+//     - F9: MKR menu; F10: SPAN menu; F11: AMPLITUDE menu; F12: title recall.
+//     - Escape: title mode; PrintScreen: copy screen.
+//     (See HP 8590 E/L-Series Programmer's Guide Table 5-8.)
+//
+//  2. Front-panel matrix path (direct key injection, IRQ3):
+//     Host function-key shortcuts for named front-panel keys whose matrix
+//     (byte,bit) positions have been probed. Tab cycles through probe bits
+//     (legacy matrix-sweep mode) when the named map has no binding. As bit
+//     positions are discovered with cmd/keymatrix they are filled into
+//     device.FrontPanelKeys and the shortcut works automatically.
+//     Current shortcuts: see fpBindings below.
 //
 //	DYLD_FALLBACK_LIBRARY_PATH=/usr/local/lib go run ./cmd/gui/
-//
-// Keys:
-//   - The first 48 host keys (1234567890-=, QWERTYUIOP[], ASDFGHJKL;', ZXCVBNM,./)
-//     map 1:1 onto the 48 front-panel matrix bits (byte 0 bit 0 .. byte 5 bit 7).
-//     Press one → that matrix bit is injected + IRQ3 fired; the active (byte,bit)
-//     is shown in the window title. This is the interactive sweep for locating a
-//     real key (e.g. PRESET) — watch which bit changes the display.
-//   - Backspace releases all keys.
-//   - The title bar shows cycles, PC, the front-panel state, and the last bit.
 package main
 
 import (
@@ -33,20 +40,79 @@ import (
 )
 
 const (
-	cyclesPerFrame = 2_000_000 // ~7× a 16 MHz CPU at 60 fps; boot reaches UI in ~1–2 s
+	cyclesPerFrame = 2_000_000
 	chunkCycles    = 2000
-	irqEvery       = 5   // inject an IRQ5 timer tick every N chunks
-	irqServiceCost = 400 // cycles for the IRQ handler to run
+	irqEvery       = 5
+	irqServiceCost = 400
+	irq4Cost       = 600 // IRQ4 handler is slightly heavier (transport + ring-buf)
 )
 
-// the 48 host keys mapped 1:1 to the front-panel matrix bits (byte0 bit0 first).
-var matrixKeys = []ebiten.Key{
-	ebiten.Key1, ebiten.Key2, ebiten.Key3, ebiten.Key4, ebiten.Key5, ebiten.Key6, ebiten.Key7, ebiten.Key8,
-	ebiten.Key9, ebiten.Key0, ebiten.KeyMinus, ebiten.KeyEqual, ebiten.KeyQ, ebiten.KeyW, ebiten.KeyE, ebiten.KeyR,
-	ebiten.KeyT, ebiten.KeyY, ebiten.KeyU, ebiten.KeyI, ebiten.KeyO, ebiten.KeyP, ebiten.KeyBracketLeft, ebiten.KeyBracketRight,
-	ebiten.KeyA, ebiten.KeyS, ebiten.KeyD, ebiten.KeyF, ebiten.KeyG, ebiten.KeyH, ebiten.KeyJ, ebiten.KeyK,
-	ebiten.KeyL, ebiten.KeySemicolon, ebiten.KeyQuote, ebiten.KeyZ, ebiten.KeyX, ebiten.KeyC, ebiten.KeyV, ebiten.KeyB,
-	ebiten.KeyN, ebiten.KeyM, ebiten.KeyComma, ebiten.KeyPeriod, ebiten.KeySlash, ebiten.KeyBackslash, ebiten.KeyTab, ebiten.KeyGraveAccent,
+// atBindings maps Ebiten keys to ATKey codes for the AT keyboard path.
+// Covers all alphanumeric, punctuation, and function keys the firmware handles.
+var atBindings = map[ebiten.Key]device.ATKey{
+	// Letters
+	ebiten.KeyA: device.ATKeyA, ebiten.KeyB: device.ATKeyB, ebiten.KeyC: device.ATKeyC,
+	ebiten.KeyD: device.ATKeyD, ebiten.KeyE: device.ATKeyE, ebiten.KeyF: device.ATKeyF,
+	ebiten.KeyG: device.ATKeyG, ebiten.KeyH: device.ATKeyH, ebiten.KeyI: device.ATKeyI,
+	ebiten.KeyJ: device.ATKeyJ, ebiten.KeyK: device.ATKeyK, ebiten.KeyL: device.ATKeyL,
+	ebiten.KeyM: device.ATKeyM, ebiten.KeyN: device.ATKeyN, ebiten.KeyO: device.ATKeyO,
+	ebiten.KeyP: device.ATKeyP, ebiten.KeyQ: device.ATKeyQ, ebiten.KeyR: device.ATKeyR,
+	ebiten.KeyS: device.ATKeyS, ebiten.KeyT: device.ATKeyT, ebiten.KeyU: device.ATKeyU,
+	ebiten.KeyV: device.ATKeyV, ebiten.KeyW: device.ATKeyW, ebiten.KeyX: device.ATKeyX,
+	ebiten.KeyY: device.ATKeyY, ebiten.KeyZ: device.ATKeyZ,
+	// Digits (top row)
+	ebiten.Key0: device.ATKey0, ebiten.Key1: device.ATKey1, ebiten.Key2: device.ATKey2,
+	ebiten.Key3: device.ATKey3, ebiten.Key4: device.ATKey4, ebiten.Key5: device.ATKey5,
+	ebiten.Key6: device.ATKey6, ebiten.Key7: device.ATKey7, ebiten.Key8: device.ATKey8,
+	ebiten.Key9: device.ATKey9,
+	// Numpad (maps to DATA keypad on the SA front panel when in numeric entry)
+	ebiten.KeyNumpad0: device.ATKeyNum0, ebiten.KeyNumpad1: device.ATKeyNum1,
+	ebiten.KeyNumpad2: device.ATKeyNum2, ebiten.KeyNumpad3: device.ATKeyNum3,
+	ebiten.KeyNumpad4: device.ATKeyNum4, ebiten.KeyNumpad5: device.ATKeyNum5,
+	ebiten.KeyNumpad6: device.ATKeyNum6, ebiten.KeyNumpad7: device.ATKeyNum7,
+	ebiten.KeyNumpad8: device.ATKeyNum8, ebiten.KeyNumpad9: device.ATKeyNum9,
+	ebiten.KeyNumpadDecimal: device.ATKeyNumDecimal,
+	ebiten.KeyNumpadEnter:   device.ATKeyNumEnter,
+	// Punctuation
+	ebiten.KeySpace:        device.ATKeySpace,
+	ebiten.KeyEnter:        device.ATKeyEnter,
+	ebiten.KeyBackspace:    device.ATKeyBackspace,
+	ebiten.KeyEscape:       device.ATKeyEscape,
+	ebiten.KeyPeriod:       device.ATKeyPeriod,
+	ebiten.KeyComma:        device.ATKeyComma,
+	ebiten.KeyMinus:        device.ATKeyMinus,
+	ebiten.KeyEqual:        device.ATKeyEquals,
+	ebiten.KeySemicolon:    device.ATKeySemicolon,
+	ebiten.KeySlash:        device.ATKeySlash,
+	ebiten.KeyBackslash:    device.ATKeyBackslash,
+	ebiten.KeyBracketLeft:  device.ATKeyBracketLeft,
+	ebiten.KeyBracketRight: device.ATKeyBracketRight,
+	ebiten.KeyGraveAccent:  device.ATKeyGrave,
+	ebiten.KeyApostrophe:   device.ATKeyApostrophe,
+	// Function keys → firmware Table 5-8 (Programmer's Guide):
+	//   F1–F6 = softkeys 1–6; F7 = prefix; F8 = remote cmds;
+	//   F9 = MKR; F10 = SPAN; F11 = AMPLITUDE; F12 = title recall
+	ebiten.KeyF1: device.ATKeyF1, ebiten.KeyF2: device.ATKeyF2,
+	ebiten.KeyF3: device.ATKeyF3, ebiten.KeyF4: device.ATKeyF4,
+	ebiten.KeyF5: device.ATKeyF5, ebiten.KeyF6: device.ATKeyF6,
+	ebiten.KeyF7: device.ATKeyF7, ebiten.KeyF8: device.ATKeyF8,
+	ebiten.KeyF9: device.ATKeyF9, ebiten.KeyF10: device.ATKeyF10,
+	ebiten.KeyF11: device.ATKeyF11, ebiten.KeyF12: device.ATKeyF12,
+	// Navigation / data entry
+	ebiten.KeyArrowUp:    device.ATKeyUp,
+	ebiten.KeyArrowDown:  device.ATKeyDown,
+	ebiten.KeyArrowLeft:  device.ATKeyLeft,
+	ebiten.KeyArrowRight: device.ATKeyRight,
+}
+
+// fpBindings maps Ebiten keys to named front-panel keys (matrix path, IRQ3).
+// The mapped key is injected as a matrix bit when Known(); stubs are no-ops
+// until the (byte,bit) is probed with cmd/keymatrix.
+// Keys here take priority over atBindings when both would fire.
+var fpBindings = map[ebiten.Key]device.FPKey{
+	// Instrument state — top row
+	// (assign host keys that don't clash with AT text-entry path)
+	// These will be effective once the matrix bits are probed.
 }
 
 type game struct {
@@ -55,14 +121,14 @@ type game struct {
 	fb       *ebiten.Image
 	chunks   int
 	cycles   uint64
-	lastBit  int // last matrix bit index injected (-1 = none)
+	lastKey  string
 	keyReads int
+	// probe mode: cycle through all 48 matrix bits to find key positions
+	probeMode bool
+	probeBit  int
 }
 
 func (g *game) Update() error {
-	// Free-run the CPU for one frame's worth of cycles, mirroring the boot
-	// cadence (LoopBreaker + periodic IRQ5) so the firmware reaches and stays
-	// in its operating loop.
 	for done := 0; done < cyclesPerFrame; done += chunkCycles {
 		g.m.CPU.Run(chunkCycles)
 		g.lb.Check(g.m.CPU.Reg(cpu.PC), g.m.CPU.SetReg)
@@ -77,28 +143,56 @@ func (g *game) Update() error {
 		g.m.DriveOneSweepChunk()
 	}
 
-	// Deliver the front-panel interrupt while a key event is pending so the
-	// firmware's IRQ3 handler latches it.
+	// ── Front-panel matrix path (IRQ3) ────────────────────────────────────────
+	// Named front-panel keys: fire when a binding has a known matrix position.
+	for k, fp := range fpBindings {
+		if inpututil.IsKeyJustPressed(k) && fp.Known() {
+			g.m.FrontPanel.SetBit(fp.Byte, fp.Bit)
+			g.lastKey = fp.Name
+		}
+	}
+	// Probe mode: Tab steps through all 48 matrix bits to locate unknown keys.
+	if inpututil.IsKeyJustPressed(ebiten.KeyTab) {
+		if g.probeMode {
+			g.probeBit = (g.probeBit + 1) % 48
+		}
+		g.probeMode = true
+		g.m.FrontPanel.SetBit(g.probeBit/8, g.probeBit%8)
+		g.lastKey = fmt.Sprintf("probe byte%d bit%d", g.probeBit/8, g.probeBit%8)
+	}
+	// Deliver IRQ3 while a front-panel event is pending.
 	if g.m.FrontPanel.Pending() {
 		g.m.CPU.SetIRQ(3)
 		g.m.CPU.Run(irqServiceCost)
 		g.m.CPU.SetIRQ(0)
 	}
-
-	// Host keyboard → front-panel matrix bit (edge-triggered).
-	for i, k := range matrixKeys {
-		if inpututil.IsKeyJustPressed(k) {
-			g.m.FrontPanel.SetBit(i/8, i%8)
-			g.lastBit = i
-		}
-	}
-	if inpututil.IsKeyJustPressed(ebiten.KeyBackspace) {
-		g.m.FrontPanel.Release()
-		g.lastBit = -1
-	}
 	if g.m.FrontPanel.Consumed() {
 		g.keyReads++
 	}
+
+	// ── AT keyboard path (IRQ4) ───────────────────────────────────────────────
+	// Inject AT scan codes for make (key-down) events.
+	for k, atk := range atBindings {
+		if inpututil.IsKeyJustPressed(k) {
+			if make := device.ATMake(atk); make != nil {
+				g.m.ATKeyboard.Enqueue(make...)
+				g.lastKey = fmt.Sprintf("AT%v", k)
+			}
+		}
+		// Break (key-up): inject the F0 release code.
+		if inpututil.IsKeyJustReleased(k) {
+			if brk := device.ATBreak(atk); brk != nil {
+				g.m.ATKeyboard.Enqueue(brk...)
+			}
+		}
+	}
+	// Fire IRQ4 while scan-code bytes are pending delivery.
+	for g.m.ATKeyboard.Pending() {
+		g.m.CPU.SetIRQ(4)
+		g.m.CPU.Run(irq4Cost)
+		g.m.CPU.SetIRQ(0)
+	}
+
 	return nil
 }
 
@@ -106,15 +200,10 @@ func (g *game) Draw(screen *ebiten.Image) {
 	img := g.m.MMIO.Display.RenderFrame()
 	g.fb.WritePixels(img.Pix)
 	screen.DrawImage(g.fb, nil)
-
-	bit := "none"
-	if g.lastBit >= 0 {
-		bit = fmt.Sprintf("byte%d bit%d", g.lastBit/8, g.lastBit%8)
-	}
 	ebiten.SetWindowTitle(fmt.Sprintf(
-		"HP 8593A  |  %.0fM cyc  PC=%#06x  bc67=%#02x  key=%s  consumed=%v(%d)",
+		"HP 8593A  |  %.0fM cyc  PC=%#06x  bc67=%#02x  key=%s  reads=%d",
 		float64(g.cycles)/1e6, g.m.CPU.Reg(cpu.PC),
-		byte(g.m.Bus.Read(0xFFBC67, 1)), bit, g.m.FrontPanel.Consumed(), g.keyReads))
+		byte(g.m.Bus.Read(0xFFBC67, 1)), g.lastKey, g.keyReads))
 }
 
 func (g *game) Layout(int, int) (int, int) { return device.DisplayWidth, device.DisplayHeight }
@@ -133,10 +222,9 @@ func main() {
 	m.MMIO.SweepActive = true
 
 	g := &game{
-		m:       m,
-		lb:      emutest.NewLoopBreaker(50),
-		fb:      ebiten.NewImage(device.DisplayWidth, device.DisplayHeight),
-		lastBit: -1,
+		m:  m,
+		lb: emutest.NewLoopBreaker(50),
+		fb: ebiten.NewImage(device.DisplayWidth, device.DisplayHeight),
 	}
 
 	ebiten.SetWindowSize(device.DisplayWidth*2, device.DisplayHeight*2)

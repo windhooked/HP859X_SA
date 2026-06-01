@@ -106,7 +106,13 @@ type Machine struct {
 	ROM        *bus.ROM
 	CalNVRAM   *device.CalNVRAM // A16A1 cal SRAM at 0x200000 (PAL LCAL)
 	CalRAM     *bus.RAM         // Cal-data working buffer at 0x2FC000 (16 KB)
-	PIT        *bus.RAM         // MC68230 PIT stub (zeroed RAM)
+	// ATKeyboard models the external AT keyboard receiver wired to the MC68230 PIT
+	// serial port (0xEF8000–0xEF80FF). Replaces the zeroed-RAM PIT stub: the
+	// firmware's IRQ4 handler polls 0xEF8002 for data-ready (bit 1) and reads the
+	// scan-code byte from 0xEF8000. Inject host key events by calling
+	// m.ATKeyboard.Enqueue(ATMake(k)) / Enqueue(ATBreak(k)), then fire IRQ4 while
+	// m.ATKeyboard.Pending() is true. See device.ATKeyboard and device.ATKey.
+	ATKeyboard *device.ATKeyboard
 	FrontPanel *device.FrontPanel
 	TestRAM    *bus.RAM
 	RAM        *bus.RAM
@@ -138,7 +144,7 @@ func New8593A(romImage []byte) (*Machine, error) {
 	calNVRAM := device.NewCalNVRAM()
 	calNVRAM.Synthesize() // embed valid checksum so the startup check passes
 	calRAM := bus.NewRAM(CalRAMSize)
-	pit := bus.NewRAM(PITSize)
+	atKbd := device.NewATKeyboard()
 	fp := device.NewFrontPanel()
 	testRAM := bus.NewRAM(TestRAMSize)
 	ram := bus.NewRAM(RAMSize)
@@ -147,7 +153,7 @@ func New8593A(romImage []byte) (*Machine, error) {
 	b.Map(ROMBase, uint32(len(romImage)), "ROM", rom)
 	b.Map(device.CalNVRAMBase, device.CalNVRAMSize, "CalNVRAM", calNVRAM)
 	b.Map(CalRAMBase, CalRAMSize, "CalRAM", calRAM)
-	b.Map(PITBase, PITSize, "PIT", pit)
+	b.Map(PITBase, PITSize, "PIT", atKbd)
 	b.Map(device.FrontPanelBase, device.FrontPanelSize, "FrontPanel", fp)
 	b.Map(DLPRAMBase, DLPRAMSize, "DLPRAM", bus.NewRAM(DLPRAMSize))
 	b.Map(TestRAMBase, TestRAMSize, "TestRAM", testRAM)
@@ -165,7 +171,7 @@ func New8593A(romImage []byte) (*Machine, error) {
 
 	return &Machine{
 		Bus: b, CPU: c, ROM: rom, CalNVRAM: calNVRAM, CalRAM: calRAM,
-		PIT: pit, FrontPanel: fp,
+		ATKeyboard: atKbd, FrontPanel: fp,
 		TestRAM: testRAM, RAM: ram, MMIO: mmio,
 	}, nil
 }
