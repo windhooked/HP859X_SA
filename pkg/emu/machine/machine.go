@@ -251,6 +251,17 @@ func (m *Machine) bootLoop(maxCycles int, lb *emutest.LoopBreaker) {
 // trace processes and draws, and the operating loop advances, the faithful way
 // (no flag-forcing). Data comes from m.MMIO.Sweep via SweepActive. See
 // docs/TRACE_DISPLAY_PATH.md "TWO-IRQ SWEEP MODEL".
+// DriveOneSweepChunk fires the sweep IRQs for one boot-chunk's worth of cycles.
+// GUI and other real-time drivers call this once per CPU chunk (after CPU.Run)
+// to keep the sweep progressing in lock-step. Equivalent to what bootLoop does
+// when SweepDrive=true, but exposed for callers that run their own loop.
+// No-ops when SweepDrive is false.
+func (m *Machine) DriveOneSweepChunk() {
+	if m.SweepDrive {
+		m.driveSweepCycle()
+	}
+}
+
 func (m *Machine) driveSweepCycle() {
 	bf34 := m.Bus.Read(0xFFBF34, bus.Long)
 	if bf34 != 0x40B8 && bf34 != 0x410A {

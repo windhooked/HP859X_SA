@@ -74,6 +74,7 @@ func (g *game) Update() error {
 			g.m.CPU.SetIRQ(0)
 			g.cycles += irqServiceCost
 		}
+		g.m.DriveOneSweepChunk()
 	}
 
 	// Deliver the front-panel interrupt while a key event is pending so the
@@ -128,6 +129,8 @@ func main() {
 		log.Fatal(err)
 	}
 	m.CPU.Reset()
+	m.SweepDrive = true
+	m.MMIO.SweepActive = true
 
 	g := &game{
 		m:       m,
