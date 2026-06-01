@@ -55,7 +55,7 @@ var allowedUnmodeled = map[string]string{
 	"cmd:0xd000": "Per-glyph attribute/terminator command (1 arg), emitted after every text glyph (docs/research.md §7 trailer 0805 0000 D000 0907). The argument tracks glyph content but has no observable effect on the 1bpp monochrome render. Framed (1 arg consumed) for stream sync; effect not modelled.",
 	"cmd:apll":  "APLL absolute polyline (count-prefixed: 1 count word + 2N coords). Framed correctly so the stream stays in sync, but the vertices are NOT rendered: they are ORG-origin-relative point-runs (fine detail / dotted grid) and drawing them without applying the ORG origin produces spurious segments. Render deferred to the ORG-relative-coordinate task.",
 	"cmd:rpll":  "RPLL relative polyline. Same framing + deferral as cmd:apll.",
-	"cmd:sclr-area": "SCLR selective area-clear (0x5C00|logical-op; 3 args: fill, ΔX, ΔY). Framed (3 args consumed) for stream sync; the region is ORG-relative and not rendered (same deferral as the polyline commands).",
+	"cmd:sclr-area": "SCLR-area (0x5C00|logical-op; 3 args: pattern, ΔX, ΔY). The pattern is a 50%-dither (0x5555/0xAAAA): this is a PATTERNED FILL (background dither / dotted gridlines), not a clear-to-dark — applying it as a region clear erases the trailing characters of labels (verified). Framed (3 args consumed) for stream sync; faithful dither rendering into the dim background plane is a separate task.",
 	"cmd:rpr":   "RPR read-parameter-register (0 args; the firmware reads back registers it wrote, e.g. WPR5). The chip read-FIFO is not modelled, so the read returns via the data-port stub (ReadData). The boot's visible render does not depend on the read-back value; framed (no args) for stream sync.",
 }
 

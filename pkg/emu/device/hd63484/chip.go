@@ -279,16 +279,19 @@ const drawYOrigin = 219
 // drawXOrigin is the X-axis drawing origin: the screen column where firmware
 // X=0 lands. The firmware lays its UI out across X ∈ [-40, +472] — the graticule
 // box at X=0..400, the left-margin annotations (PEAK / LOG / dB/ / REF .0) at
-// NEGATIVE X (down to -40, to the left of the box), and the right-side labels
-// (SPECTRUM ANALYZER / SYNC / units) out to X≈464. That span is exactly 512 px =
-// DisplayWidth, so the firmware's X=0 sits at screen column 40: a pixel drawn at
-// firmware X is stored at VRAM column `X + drawXOrigin`. Without this, X<0 (the
-// whole left margin) clipped off-screen and the box sat hard against the left
-// edge. +40 is the unique offset that fits both [-40 → col 0] and [472 → col 512]
-// into the visible window. (The HD63484 encodes this as its horizontal display
-// origin; 40 is derived here from the firmware's own content span.) Symmetric
-// with drawYOrigin.
-const drawXOrigin = 40
+// NEGATIVE X (to the left of the box), and the right-side labels (SPECTRUM
+// ANALYZER / SYNC / units) out to X≈464. A pixel drawn at firmware X is stored at
+// VRAM column `X + drawXOrigin`. Without this, X<0 (the whole left margin) clipped
+// off-screen and the box sat hard against the left edge.
+//
+// The lit-pixel extent (glyphs carry 1 px left padding + 2 px right padding in
+// their 8-px cell) is X ∈ [-39, +469], so the offset must satisfy 39 ≤ off ≤ 42
+// to keep both ends inside the 512-px visible window. We use 42 (the top of that
+// range) to give the left-margin labels a clean ~3 px gap from the screen edge
+// while the rightmost pixel still lands on the last column. (The HD63484 encodes
+// this as its horizontal display origin; the value is derived here from the
+// firmware's own content span.) Symmetric with drawYOrigin.
+const drawXOrigin = 42
 
 // vramByteAddr returns the byte offset within vram that holds pixel (x, y),
 // or -1 if the pixel is outside the paint area. The bit within that byte

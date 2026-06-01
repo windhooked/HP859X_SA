@@ -408,7 +408,14 @@ func (dec *decoder) dispatchCmd(c *Chip, w uint16) {
 	// region coords are ORG-relative (which we don't apply yet), so drawing it
 	// would land in the wrong place. Consume-only via the skip counter.
 	if w&0xFFF8 == 0x5C00 {
-		c.gate("cmd:sclr-area", "command SCLR-area %#04x (selective clear, 3 args; framed but region not rendered)", w)
+		// SCLR-area (0x5C00 | logical-op). Params: pattern, ΔX, ΔY. The pattern
+		// word is a 50%-dither (0x5555/0xAAAA) and the firmware uses this as a
+		// PATTERNED FILL (background dither / dotted gridlines), NOT a clear-to-
+		// dark: applying it as a region clear erases the trailing characters of
+		// labels (verified empirically). Faithful rendering of the dither into the
+		// dim background plane is a separate task; until then frame it (consume 3)
+		// so the stream stays in sync. Recognised-but-stubbed (cmd:sclr-area).
+		c.gate("cmd:sclr-area", "command SCLR-area %#04x (patterned fill, 3 args; framed but not rendered)", w)
 		dec.skipN = 3
 		dec.st = stSkip
 		return

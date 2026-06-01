@@ -77,6 +77,20 @@ func (dec *decoder) feedGlyph(c *Chip, w uint16) {
 // clear must come from a separate mechanism (likely partial raster bursts
 // at MAR addresses other than 0x4000/0x0000, which we don't model yet).
 func (c *Chip) blitGlyph(rows [glyphRows]uint16, fg, bg uint16) {
+	// Suppress the residual early-boot glyph the firmware blits at the exact
+	// drawing origin (0,0) — the graticule's bottom-left corner, where no real
+	// UI text is ever placed. The firmware emits it during the pre-operating-loop
+	// boot screen (it's the 2nd glyph drawn, before "EMPTY DLP MEM") and never
+	// clears it: its only screen-maintenance command, SCLR-area, is a patterned
+	// dither-FILL not a clear, and no later glyph redraws that cell. Without this
+	// it persists as a stray "7" in the corner; the real instrument does not show
+	// it. This is a TARGETED artifact suppression — the deeper root cause is the
+	// unmodeled per-command ORG / page-buffer mapping (the firmware draws this
+	// scratch glyph relative to ORG into what it treats as off-screen). See
+	// docs/HARDWARE.md §7.3.
+	if c.penX == 0 && c.penY == 0 {
+		return
+	}
 	bgLit := bg != 0
 	for i := 0; i < glyphRows; i++ {
 		row := rows[i]

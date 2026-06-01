@@ -286,12 +286,12 @@ IS the HD63484 command set.
   visible window with both annotation blocks on-screen. So REF/AT renders at the top, CENTER/SPAN
   at the bottom — matching the real instrument.
 - **X-axis origin:** the firmware lays its UI out across X ∈ [−40, +472] — the graticule box at
-  X=0..400, the **left-margin labels** (`PEAK`/`LOG`/`dB/`/`REF .0`) at NEGATIVE X, and the right
-  labels out to X≈464. That span is exactly 512 px = `DisplayWidth`, so firmware X=0 sits at screen
-  column 40: `vramX = firmwareX + drawXOrigin` (`drawXOrigin=40`). Without it the entire left margin
-  clipped off-screen and the box sat hard against the left edge. +40 is the unique offset that fits
-  both edges into the visible window (the chip's horizontal display origin; derived here from the
-  firmware's content span). Symmetric with `drawYOrigin`.
+  X=0..400, the **left-margin labels** (`LOG`/`dB/`/`REF .0`) at NEGATIVE X, and the right labels
+  out to X≈464: `vramX = firmwareX + drawXOrigin` (`drawXOrigin=42`). Without it the entire left
+  margin clipped off-screen and the box sat hard against the left edge. The lit-pixel extent is
+  X ∈ [−39, +469] (glyphs carry 1 px left / 2 px right cell padding), so the offset must satisfy
+  39 ≤ off ≤ 42 to fit the 512-px window; 42 gives the left margin a clean ~3 px gap. (The chip's
+  horizontal display origin; derived from the firmware's content span.) Symmetric with `drawYOrigin`.
 
 ### 7.2 Command port `0x5FC` / status `0x5FD` / data `0x5FE`
 
@@ -360,11 +360,12 @@ effect on the 1bpp monochrome output). Any un-allowlisted control register **pan
   off-screen). `RenderFrame()` samples the 512×256 visible window, ×1.5 vertical stretch → 512×384
   RGBA. Lit = amber `fgColor`; background dim.
 - **GAP:** the per-command **ORG drawing-origin is parsed but not applied** (only the global
-  `drawXOrigin`/`drawYOrigin` are). One visible consequence: a lone **"7" the firmware blits at
-  origin (0,0) early in boot** renders at the bottom-left box corner. On real hardware it is not
-  there — the inter-phase screen clear (an ORG-relative `SCLR`-area / `CLR`, currently consume-only)
-  wipes it before the operating UI; we don't apply that clear, so the stale glyph persists. The
-  **spectrum trace is also not drawn** (firmware DLP-blocked — §8).
+  `drawXOrigin`/`drawYOrigin` are). One visible consequence: the firmware blits a lone **"7" at
+  origin (0,0) early in boot** (it draws boot-screen scratch relative to ORG into what it treats as
+  off-screen) and never clears it — its only clear, `SCLR`-area, is a patterned dither-FILL, not a
+  clear-to-dark. We **suppress that single origin glyph** in `blitGlyph` (targeted; the corner is
+  never a real text position) so it doesn't show as a stray "7"; the deeper fix is full ORG /
+  page-buffer modeling. The **spectrum trace is also not drawn** (firmware DLP-blocked — §8).
 
 ---
 
