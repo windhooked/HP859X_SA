@@ -44,8 +44,8 @@ Cross-references: the real A16 board is documented in
 | `0x200000–0x20FFFF` | 64 KB | **CalNVRAM** (A16A1 battery-backed cal SRAM; U114 PAL `LCAL`) | `device.CalNVRAM` | MODELED (blank+checksum) |
 | `0x2FC000–0x2FFFFF` | 16 KB | **CalRAM** (cal-data working buffer / scratch) | `bus.RAM` | MODELED (RAM) |
 | `0x320000–0x32000F` | 16 B | **A16 write-address latch** (POST address-decoder readback) | `mmio.AddrLatch()` | MODELED |
-| `0xEF4000–0xEF401F` | 32 B | **FrontPanel** µC (keys + RPG; PAL `LRTC`; IRQ3) | `device.FrontPanel` | partial (see §6) |
-| `0xEF8000–0xEF80FF` | 256 B | **PIT stub** (MC68230; PAL `LKBD`; IRQ4 touches PGCR/PSRR) | `bus.RAM` (zeroed) | STUB |
+| `0xEF4000–0xEF401F` | 32 B | **FrontPanel** µC (keys + RPG + **BCD RTC** at `0x01–0x17`; PAL `LRTC`; IRQ3) | `device.FrontPanel` | partial (see §6.4) |
+| `0xEF8000–0xEF80FF` | 256 B | **ATKeyboard** / MC68230 PIT (AT scan codes; external keyboard; PAL `LKBD`; IRQ4) | `device.ATKeyboard` | MODELED (byte-inject) |
 | `0xFC0000–0xFEBFFF` | 176 KB | **DLPRAM** (DLP heap + symbol table; `$bb4e`/`$bb54`) | `bus.RAM` | MODELED (RAM) |
 | `0xFEC000–0xFEFFFF` | 16 KB | **TestRAM** (lower half of the march-test range) | `bus.RAM` | MODELED (RAM) |
 | `0xFF0000–0xFFEFFF` | 60 KB | **RAM** (stack `SP=0xFF948A` + firmware variables) | `bus.RAM` | MODELED (RAM) |
@@ -150,6 +150,30 @@ HP-IB, the two indirect analog buses, and the A16 strap/POST registers.
 | `0x140` | `HPIB.ReadByte(0xE)` (pops DIR; FP-port HP-IB data) | — | MODELED |
 
 Byte-width only; odd offsets / idx≥8 ignored. `0x610–0x61F` not routed.
+The firmware's actual HP-IB **TX** register is **`0x122`** (the option-board parallel
+interface, *not* the TMS9914A CDOR) — hooked via `MMIO.HPIBTx` (and `TMS9914A.OnTX`
+for the chip path) to capture responses.
+
+**HP-IB / RS-232 option board (Option 041/043) — `device.HP8593AMMIO.InstallHPIB()`.**
+HP-IB is an *add-on option*, detected via the I/O-board descriptor at `0x110`
+(16 bytes; byte `0x11E` → RAM `bf09`: 4=HP-IB, 8=RS-232, 0=none; read at ROM 0x2EA4).
+The option board has its own serial-interface chip at `0x120–0x14F`. When installed,
+the boot runs a handshake against it (ROM 0x3004+): writes command bytes to `0x148`
+and polls bit 0 "ack" (waits SET, e.g. 0x300A) + bit 1 "busy" (waits CLEAR, e.g.
+0x3070). Models (only when `HPIBInstalled`):
+
+| Offset | Behavior | Note |
+|---|---|---|
+| `0x11E` | `0x04` (HP-IB present) | sets `bf09=4` |
+| `0x148` | `0x01` (bit0 set "ack", bit1 clear "busy") | satisfies both poll types → handshake completes |
+| `0x142` | `HPIB.ReadByte(0xE)` | HP-IB data-in, IRQ4 receive path |
+| `0x120` | bit 0 forced clear | transmitter-ready |
+| `0x122` | `MMIO.HPIBTx(b)` | TX data out |
+
+Default OFF (bare instrument; golden boot unaffected). With it installed the boot
+reaches the operating loop (bf09=4, UI renders — the old "HP-IB regresses boot" issue
+is fixed). RECEIVE works; query RESPONSE (CAL DUMP/ID? output) still emits nothing —
+GAP. Uses IRQ4. See memory `hpib-option-board`.
 
 ### 5.4 Indirect analog ADC bus `0x75C` (select) / `0x75E` (data) — §6 analogBus
 
@@ -244,6 +268,20 @@ ROM `0x3AB52`), sets `pending`; `SetBit(byteIdx,bit)` presses one bit; `Release(
 `0x01–0x17`; `Pending()`=`pending && !consumed`. **GAP:** the semantic key-code map (which matrix
 bit = which physical key) is not decoded — injection is by raw bitmap.
 
+**RTC (multiplexed on the same nibble regs `0x01–0x17`).** The 12 nibble registers carry a
+battery-backed BCD real-time clock (LRTC = literal name; OKI MSM6242-class) read by ROM fcn.59E2C
+in timedate mode: hi/lo nibble pairs for year(`0x17/15`)/month(`0x13/11`)/day(`0x0F/0D`)/hour(`0x0B/09`)/
+min(`0x07/05`)/sec(`0x03/01`). When **no key is pending** the regs return `rtcNibble()` (BCD time);
+when a key event is pending they return the injected matrix. `SetRTC(time.Time)` sets the clock;
+default = Rev L build date 1998-06-15 12:00. MODELED. See memory `hardware-rtc-frontpanel`.
+
+### 6.4b ATKeyboard — external AT keyboard receiver (`atkeyboard.go`, `NewATKeyboard()`)
+Backs `0xEF8000–0xEF80FF` (MC68230 PIT serial), replacing the old zeroed-RAM PIT stub. Byte-inject
+AT Set-2 scan codes: `0xEF8002` bit 1 = data-ready (status); `0xEF8000` = scan-code byte (consumed
+on read). `Enqueue(ATMake(k)...)`/`ATBreak(k)` push make/break sequences; `Pending()` gates IRQ4.
+Full Set-2 table (`atSet2`) + `ATKey` enum (A-Z, 0-9, punctuation, F1-F12, arrows, numpad). MODELED.
+See memory `keyboard-dual-path`.
+
 ### 6.5 SweepEngine — video-ADC sweep model (`sweepengine.go`, `NewSweepEngine()`)
 Feeds `0xFFF200` (when `SweepActive`). Faithful semi-physical analog via `pkg/emu/analog`
 (`SpectrumModel` = thermal noise + 300 MHz CAL + injected tones; `Detector` = dBm→count).
@@ -252,12 +290,21 @@ Defaults: span **0..2.9 GHz**, **401 points**, ref **0 dBm**, **1 MHz RBW**, CAL
 - `levelToADC(dBm)` = clamp(`(dBm-(RefLevel-80))/80 * 0x1FF`, 0, 0x1FF) — 80 dB display window.
 - `bucketPeakDBm(p)` sub-samples 32 points across each point's frequency bucket (catches narrow CW).
 - `DetectADC()` returns the count for the current point and advances (wraps → continuous repeat).
-All **MODELED**; `cmd/tracedemo` renders it as an overlay (the firmware's own trace-draw is
-DLP-blocked — §8).
+- **Random noise floor (grass):** `NoiseFloorDBm` (default −72, ~10% up) + `NoiseAmpDB` (±6 dB) +
+  seeded RNG; `DetectADC` power-sums per-point random grass with the spectrum → classic noisy SA
+  baseline. The model's true −90 dBm floor is unchanged; grass is a display layer.
+- **`SetSignals([]Signal)`** — signal boundary/limit guard: drops tones outside the span
+  `[StartHz,StopHz]`, clamps amplitudes to `[RefLevel−80, RefLevel]`; returns dropped count.
+All **MODELED**. The firmware now draws the trace for real via the **two-IRQ sweep model**
+(`Machine.BootToOperatingWithSweep` / `driveSweepCycle`): fires IRQ1 (sweep step) + IRQ6 (capture)
+while a sweep is armed (`bf34∈{0x40B8,0x410A}`, `A5<bf30`), paced ~2300 cycles/point ≈ 58 ms/sweep.
+The firmware's own IRQ6 end-of-sweep handler raises `befa` bit13 — no flag-forcing. See
+docs/TRACE_DISPLAY_PATH.md "TWO-IRQ SWEEP MODEL" + memory `sweep-trace-path`.
 
 ### 6.6 SystemID — strap constants (`systemid.go`)
-Four `uint16` constants read at `0x73C/73E/77C/77E` (§5.6). MODELED for IDNUM=8593 only;
-option bits / I/O-board descriptor are GAP (not wired).
+Four `uint16` constants read at `0x73C/73E/77C/77E` (§5.6). MODELED for IDNUM=8593. The I/O-board
+descriptor at `0x110`/`0x11E` (HP-IB/RS-232 option) is now modeled via `MMIO.InstallHPIB()` (§5.3,
+default OFF). Other option bits not separately wired.
 
 ---
 
@@ -373,12 +420,12 @@ effect on the 1bpp monochrome output). Any un-allowlisted control register **pan
 
 | Area | Status | Note |
 |---|---|---|
-| Spectrum **trace draw** | GAP | The deep DLP blocker. Sweep mechanics + completion flag (`befa` bit13) work, but the firmware never enters continuous-sweep MEASURE mode (`0xB0EC`≠spectrum), so the sweep-trace DLP source (→ slot `0x12CA`→`0x5ECEE`→`__GTTDRW`) is never scheduled. Visual via `cmd/tracedemo` overlay. Full map: [DRIVETICK_BLOCKER.md](DRIVETICK_BLOCKER.md). |
-| ADC +2VREF cal | GAP | `analogBus` ch2 placeholder → ADC-TIME/2V/GND annunciators cosmetic. |
+| Spectrum **trace draw** | **MODELED** (sweep-driven boot) | `BootToOperatingWithSweep` drives the two-IRQ sweep cycle (IRQ1 step + IRQ6 capture) → real sweep cycles complete, `befa` bit13 fires the firmware's own way, the trace **draws**. `cmd/gui` uses it. The plain `BootToOperating` still doesn't sweep (golden boot unchanged). Full trail: [TRACE_DISPLAY_PATH.md](TRACE_DISPLAY_PATH.md). |
+| ADC +2VREF cal / ADC-TIME | GAP | ADC-TIME FAIL is the auto-cal verdict (`0x94e4==0xd2d2`, written only by the auto-cal sweep 0x5F046 which doesn't run at boot) — NOT NVRAM-restorable; coupled to the measurement flow. Cosmetic. |
 | A25 Counterlock freq | GAP | `a7IOBus` non-status registers are latches only → FREQ-related status approximate. |
-| Installed options / I/O-board | GAP | SystemID option bits + `0xFFF110` HP-IB descriptor not wired → boot banner shows model only. |
-| HP-IB bus protocol | GAP | TMS9914A is input-drain only; no talker/listener state machine or transmit. |
-| Front-panel key-code map | GAP | Matrix injection by raw bitmap; semantic key→bit map not decoded. |
+| HP-IB / RS-232 option board | **MODELED in** / RESPONSE GAP | `MMIO.InstallHPIB()` installs Option 041 (descriptor `0x11E`=4 → bf09=4) + the option-board serial-chip handshake (`0x148`) so the boot completes; RECEIVE works (IRQ4). Query **RESPONSE** (CAL DUMP/ID? output) still emits nothing. §5.3. |
+| HP-IB bus protocol | GAP | TMS9914A is input-drain only; no talker/listener state machine. Firmware HP-IB TX is via `0x122` (hooked, but responses not generated). |
+| Front-panel key-code map | GAP | Matrix injection by raw bitmap; named keys in `device.FrontPanelKeys` but (byte,bit) positions are stubs pending probe (cmd/keymatrix). |
 | PIT / PPI / sweep DAC regs | STUB | Backing-store only; enough to pass boot polls. |
 | Display ORG | GAP | Drawing-origin (ORG command) not applied; minor left-margin X offset. |
 | Dotted grid | MODELED | Per-line WPTN stipple applied in drawLine (0x1111 dotted minor lines, frame solid). |
@@ -391,6 +438,10 @@ effect on the 1bpp monochrome output). Any un-allowlisted control register **pan
   **`Machine.BootToOperating(maxCycles)`** (LoopBreaker + periodic IRQ5) is the canonical boot
   (~5.7M cycles to the operating region). **`BootToOperatingFaithful`** runs the real
   ROM-checksum + march-RAM test with no LoopBreaker.
+  **`BootToOperatingWithSweep(maxCycles)`** additionally drives the two-IRQ sweep cycle so the
+  firmware runs real sweeps and **draws the trace** + reaches the live operating UI (use this for an
+  interactive/sweeping instrument; budget ≥150–250M cycles). Optionally `m.MMIO.InstallHPIB()` for
+  the HP-IB option before booting.
 - Phase gates (in `internal/emutest` + `pkg/emu/machine`): DiffCores (Musashi==Unicorn prologue),
   boot milestones, `TestMachineBootScreen` (pixel-compares the 512×384 golden),
   `TestPOSTSelfTestPasses` (asserts POST `0x0000`).
