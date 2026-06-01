@@ -70,6 +70,11 @@ This is **swapped** vs the 17.12.90 build (lower was U23+U6, upper was U24+U7). 
 
 Goal: full virtual HP 8593A — CPU + bus + memory-mapped peripherals.
 
+> **Full register-level hardware reference: [docs/HARDWARE.md](docs/HARDWARE.md)** —
+> every modeled device, its address range, each MMIO register/offset and its read/write
+> behavior, the IRQ vector table, and a modeled/stub/gap status per register. Derived
+> from the device code. Start there for "what does address X do".
+
 ```
 pkg/emu/
   bus/          Bus + Device interfaces; 24-bit address-decode mapper; big-endian RAM/ROM
