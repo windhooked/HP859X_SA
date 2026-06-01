@@ -231,6 +231,18 @@ func (c *Chip) resetBounds() {
 	c.maxX, c.maxY = 0, 0
 }
 
+// drawYOrigin is the Y-axis flip origin. The firmware draws in a Y-UP
+// (Cartesian, bottom-left-origin) coordinate system: the reference-level /
+// top-status text is emitted at LARGE Y (≈205) and the bottom CENTER/SPAN/RES-BW
+// annotations at SMALL/negative Y (≈-22), with the 10×8 graticule between them
+// (grid lines Y=0..200). VRAM/render is Y-DOWN (raster: row 0 = top), so a pixel
+// drawn at firmware Y is stored at VRAM row `drawYOrigin - Y` to flip the axis.
+// The origin offsets the firmware Y range [-22, ~205] into the visible 256-line
+// window: Y=205 → row ~14 (top), Y=-22 → row ~241 (bottom). Tuned so both the
+// top REF line and the bottom annotation block land on-screen with the graticule
+// centred. See docs/CRT_GEOMETRY_DIAGNOSIS.md.
+const drawYOrigin = 219
+
 // vramByteAddr returns the byte offset within vram that holds pixel (x, y),
 // or -1 if the pixel is outside the paint area. The bit within that byte
 // (with bit 0 = leftmost) is (x & 7).
@@ -245,6 +257,7 @@ func (c *Chip) vramByteAddr(x, y int) int {
 // bounding box. Out-of-range coordinates are silently ignored — matches
 // the chip's hardware clipping behaviour.
 func (c *Chip) setVRAMPixel(x, y int) {
+	y = drawYOrigin - y // firmware Y-up → VRAM Y-down (raster)
 	addr := c.vramByteAddr(x, y)
 	if addr < 0 {
 		return
@@ -256,6 +269,7 @@ func (c *Chip) setVRAMPixel(x, y int) {
 // clearVRAMPixel turns off the pixel at (x, y) — used by glyph BG fills,
 // CLR, and SCLR.
 func (c *Chip) clearVRAMPixel(x, y int) {
+	y = drawYOrigin - y // firmware Y-up → VRAM Y-down (raster)
 	addr := c.vramByteAddr(x, y)
 	if addr < 0 {
 		return
@@ -266,6 +280,7 @@ func (c *Chip) clearVRAMPixel(x, y int) {
 // isVRAMPixelLit reports whether the pixel at (x, y) is currently set.
 // Returns false for out-of-range coordinates.
 func (c *Chip) isVRAMPixelLit(x, y int) bool {
+	y = drawYOrigin - y // firmware Y-up → VRAM Y-down (raster)
 	addr := c.vramByteAddr(x, y)
 	if addr < 0 {
 		return false

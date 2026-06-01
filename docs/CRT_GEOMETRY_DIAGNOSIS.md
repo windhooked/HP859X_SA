@@ -91,3 +91,30 @@ Still open (separate items, not CRT-geometry): vertical-stripe background (the u
 0x4400 fill — needs dot-texture decode), no trace line yet (trace-paint gap), and the
 parser desync (11285 unknown-opcode dispatches/boot, mostly in self-test phases — see
 above; affects robustness, not the now-correct graticule geometry).
+
+## Y-AXIS FLIP FIX (2026-06-01) — firmware draws Y-up
+
+Diagnosis (cmd glyph-log + LineLog, cross-checked vs the photo): the firmware draws
+in a **Y-UP (Cartesian, bottom-left-origin)** coordinate system. Decisive evidence —
+the firmware Y of two unambiguous text lines:
+- `0 dBm` / `AT 10 dB` (the REF-level + attenuation readout, **TOP** in the photo) is
+  emitted at **large Y ≈ 205**.
+- `CENTER…GHz / SPAN…GHz / RES BW…MHz / VBW…MHz / SWP…` (**BOTTOM** in the photo) is at
+  **small/negative Y ≈ -22/-12** (two lines).
+The 10×8 graticule (grid Y=0..200) sits between them. So large firmware-Y = top of
+screen ⇒ Y-up. Our renderer samples VRAM Y-down (raster, row 0 = top), so the image was
+rendered **vertically mirrored** — REF/AT landed at the bottom and CENTER/SPAN flipped to
+negative Y and clipped off the top (which is why CENTER/SPAN was missing). The glyph blit
+also enumerates rows bottom-to-top, corroborating Y-up.
+
+Fix (chip.go + wptn.go): a Y-axis flip at the pixel-write stage —
+`vramY = drawYOrigin - firmwareY` in setVRAMPixel/clearVRAMPixel/isVRAMPixelLit, with
+**`drawYOrigin = 219`** chosen so the firmware Y range [-22, ~205] maps into the visible
+256-line window (Y=205→row 14 top, Y=-22→row 241 bottom) with the graticule centred and
+BOTH annotation blocks on-screen. blitGlyph's row mapping changed `penY+(7-i)` → `penY+i`
+so glyphs render right-side-up after the flip. Result (`screens/crt_yflip.png`): `REF/AT`
+at the top, `CENTER/SPAN/RES BW/VBW/SWP` at the bottom, all text readable — matching the
+real 8593E. Golden updated.
+
+Implication for the (still-DLP-blocked) trace: it now plots right-side-up — high amplitude
+(reference level) maps to the top graticule line, as on the real instrument.

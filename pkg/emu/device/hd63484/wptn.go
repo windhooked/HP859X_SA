@@ -10,13 +10,15 @@ package hd63484
 //	0x0805, 0x0000, 0xD000, 0x0907   ← 4-word trailer
 //
 // The bitmap occupies the 8×16-pixel cell at (penX, penY) to (penX+15,
-// penY+7) — the pen is positioned at the TOP-LEFT of the character cell
-// (so penY=0 corresponds to the top row of the screen, matching the
-// firmware's annunciator MOVE coordinates of (0, 0), (8, 0), (16, 0)…).
+// penY+7) in the firmware's Y-UP coordinate system (penY = cell bottom-left;
+// the firmware draws bottom-up — see drawYOrigin in chip.go). The global
+// Y-up→Y-down flip lives in setVRAMPixel, so glyph placement is in firmware
+// coordinates here.
 //
 // Rows are sent BOTTOM-TO-TOP within the cell: row 0 is the bottom of the
-// glyph (lands at penY+7), row 7 is the top (lands at penY+0). This is
-// the standard 1970s/80s character-bitmap convention. Bit 0 of each row is
+// glyph, row 7 the top (standard 1970s/80s character-bitmap convention). We
+// place row i at firmware-Y penY+i; setVRAMPixel's flip then renders row 0 at
+// the cell bottom and row 7 at the top (right-side-up). Bit 0 of each row is
 // the leftmost pixel.
 //
 // FG / BG colour words: per the HD63484 glyph-blit semantics, FG is applied
@@ -77,7 +79,12 @@ func (c *Chip) blitGlyph(rows [glyphRows]uint16, fg, bg uint16) {
 	bgLit := bg != 0
 	for i := 0; i < glyphRows; i++ {
 		row := rows[i]
-		y := c.penY + (glyphRows - 1 - i)
+		// The firmware sends rows BOTTOM-to-TOP (row 0 = glyph bottom) in its
+		// Y-up coordinate system; place row i at firmware-Y penY+i. setVRAMPixel
+		// applies the global Y-up→Y-down flip (drawYOrigin - y), so after the
+		// flip row 0 (bottom) lands at the bottom of the rendered cell and row 7
+		// (top) at the top — i.e. the glyph renders right-side-up.
+		y := c.penY + i
 		for b := 0; b < 16; b++ {
 			x := c.penX + b
 			switch {
