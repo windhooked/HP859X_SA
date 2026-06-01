@@ -133,7 +133,7 @@ HP-IB, the two indirect analog buses, and the A16 strap/POST registers.
 |---|---|---|---|---|
 | `0x5FC` | command register | — | word → `Display.WriteCmd` | MODELED |
 | `0x5FD` | **status byte** | overridden to `sciStatusReady = 0x27` (bits 0,1,2,5 all "ready") | re-asserts ready bit | STUB (always ready) |
-| `0x5FE` | data / FIFO port | word → `Display.ReadData()` (block read-back; §7) | word → `Display.WriteData` (command/parameter stream) | MODELED |
+| `0x5FE` | data / FIFO port | word → `Display.ReadData()` (block read-back; §7) | word → `Display.WriteData`: AR=0 → command/parameter FIFO; AR 0xC8..0xCF → display-address register (RAR1/MWR1/SAR1, page-flip — §7.1) | MODELED |
 
 ### 5.3 TMS9914A HP-IB (offsets `0x600–0x60F` + FP data path) — §6
 
@@ -274,6 +274,12 @@ IS the HD63484 command set.
 - **Output framebuffer = 512×384** (`DisplayWidth=512`, `DisplayHeight=384`): the 256 raster
   lines are upscaled ×1.5 vertically — the analog CRT's 4:3 stretch. Off-screen VRAM (rows ≥256,
   e.g. the `0x4400` back-buffer fill at MAR `0x4000`) is not displayed.
+- **Display-start / page-flip:** RenderFrame scans VRAM from `displayStartRow()` = `RAR1/MWR1`
+  (the base raster-read address, decoded via the AR protocol — §7.2). The firmware sets RAR1=0
+  in the boot and never page-flips, so the display-start is static at row 0 (front buffer) and the
+  render is unchanged; if the firmware ever re-points RAR1 at the back-buffer the displayed buffer
+  follows. There is **no `CPY` / back-buffer→front copy** in the firmware stream — the back-buffer
+  content is prepared but never selected. MODELED (static here); locked by `TestDisplayStartPageFlip`.
 - **Y-axis flip:** the firmware draws **Y-up** (Cartesian, bottom-left origin: REF/AT at large Y,
   CENTER/SPAN at small/negative Y). The pixel-write path flips it to raster Y-down:
   `vramY = drawYOrigin - firmwareY` (`drawYOrigin=219`), mapping firmware Y[-22,~205] into the
@@ -330,7 +336,8 @@ IS the HD63484 command set.
 | HP-IB bus protocol | GAP | TMS9914A is input-drain only; no talker/listener state machine or transmit. |
 | Front-panel key-code map | GAP | Matrix injection by raw bitmap; semantic key→bit map not decoded. |
 | PIT / PPI / sweep DAC regs | STUB | Backing-store only; enough to pass boot polls. |
-| Display ORG / dotted grid | GAP | Origin not applied; grid solid instead of dotted. |
+| Display ORG | GAP | Drawing-origin (ORG command) not applied; minor left-margin X offset. |
+| Dotted grid | MODELED | Per-line WPTN stipple applied in drawLine (0x1111 dotted minor lines, frame solid). |
 
 ---
 
