@@ -49,3 +49,27 @@ func TestBootToOperatingWithSweep(t *testing.T) {
 		t.Errorf("only %d vectors drawn — trace not drawn (expected the sweep to draw)", lines)
 	}
 }
+
+// TestBootWithHPIBOption verifies the HP-IB option board (Option 041) can be
+// installed without regressing the boot. Previously, setting the I/O-board
+// descriptor to "HP-IB present" hung the boot in the option-board serial-chip
+// init handshake (it polls 0xFFF148 forever); the f148 status model fixes that.
+// With the option installed the firmware enters HP-IB mode (bf09=4) AND the boot
+// still reaches the operating loop and renders the UI.
+func TestBootWithHPIBOption(t *testing.T) {
+	if testing.Short() {
+		t.Skip("250M-cycle boot is slow; skipped under -short")
+	}
+	m := newMachine(t)
+	m.MMIO.InstallHPIB() // Option 041 present
+	m.BootToOperatingWithSweep(250_000_000)
+
+	if bf09 := byte(m.Bus.Read(0xFFBF09, bus.Byte)); bf09 != 0x04 {
+		t.Errorf("bf09 = %#02x, want 0x04 (HP-IB mode active)", bf09)
+	}
+	// The boot must still render the operating UI — the regression was a blank
+	// screen (Lines=0) stuck in the f148 handshake. >10k vectors confirms the UI.
+	if lines := m.MMIO.Display.Chip.Lines; lines < 10000 {
+		t.Errorf("only %d vectors drawn with HP-IB installed — boot regressed (handshake hang?)", lines)
+	}
+}

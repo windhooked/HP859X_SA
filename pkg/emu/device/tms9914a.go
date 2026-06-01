@@ -66,6 +66,12 @@ type TMS9914A struct {
 	// one byte from the head; when the buffer is non-empty IS0.BI is
 	// set, modelling the chip's "byte in available" behaviour.
 	inputBuf []byte
+
+	// OnTX, if non-nil, is called whenever the firmware writes a byte to
+	// CDOR (register 7, MMIO offset 0xE) — the chip's "send byte" register.
+	// This is the HP-IB transmit path the firmware uses to respond to queries
+	// like CAL DUMP, MEAS?, etc. Hook it to capture the response stream.
+	OnTX func(b byte)
 }
 
 // TMS9914 register offsets (from chip base; both read and write).
@@ -180,6 +186,10 @@ func (t *TMS9914A) WriteByte(off uint32, val byte) {
 		return
 	}
 	t.wregs[idx] = val
+
+	if idx == tms9914Reg7 && t.OnTX != nil { // CDOR — transmit byte to HP-IB bus
+		t.OnTX(val)
+	}
 
 	if idx == tms9914Reg2 { // AUXCR
 		// AUXCR encoding: bit 7 = SET (1) / CLEAR (0); bits 0..4 = command.

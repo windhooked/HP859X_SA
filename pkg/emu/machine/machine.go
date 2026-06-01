@@ -101,11 +101,11 @@ const (
 
 // Machine is a wired HP 8593A: ROM + RAM + MMIO devices + Musashi M68K CPU.
 type Machine struct {
-	Bus        *bus.Bus
-	CPU        *musashi.CPU
-	ROM        *bus.ROM
-	CalNVRAM   *device.CalNVRAM // A16A1 cal SRAM at 0x200000 (PAL LCAL)
-	CalRAM     *bus.RAM         // Cal-data working buffer at 0x2FC000 (16 KB)
+	Bus      *bus.Bus
+	CPU      *musashi.CPU
+	ROM      *bus.ROM
+	CalNVRAM *device.CalNVRAM // A16A1 cal SRAM at 0x200000 (PAL LCAL)
+	CalRAM   *bus.RAM         // Cal-data working buffer at 0x2FC000 (16 KB)
 	// ATKeyboard models the external AT keyboard receiver wired to the MC68230 PIT
 	// serial port (0xEF8000–0xEF80FF). Replaces the zeroed-RAM PIT stub: the
 	// firmware's IRQ4 handler polls 0xEF8002 for data-ready (bit 1) and reads the

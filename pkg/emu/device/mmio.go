@@ -176,6 +176,14 @@ type HP8593AMMIO struct {
 	// the IRQ4 handler when HP-IB activity occurs. See tms9914a.go.
 	HPIB *TMS9914A
 
+	// HPIBTx, if non-nil, is called whenever the firmware writes a data byte
+	// to the secondary HP-IB output register at 0xFFF122 (separate from the
+	// TMS9914A CDOR at 0x60E — the real firmware TX path is through the parallel
+	// interface at 0xFFF120–0xFFF12F). Use this to capture HP-IB responses like
+	// CAL DUMP, CF?, ID?. The TMS9914A's OnTX covers the TMS chip path; this
+	// covers the actual data-output register the firmware uses in practice.
+	HPIBTx func(b byte)
+
 	// SweepActive enables the detector-ADC model at 0xFFF200. The IRQ6
 	// sample-capture handler reads 0xFFF200 ("sweep-start latch / detector
 	// ADC" per docs/research.md) once per ADC_SYNC to get the detected video
@@ -197,6 +205,18 @@ type HP8593AMMIO struct {
 	// Sweep is the analog-model sweep engine backing the 0xFFF200 video-ADC
 	// reads (faithful spectrum: CAL peak + noise floor). See sweepengine.go.
 	Sweep *SweepEngine
+
+	// HPIBInstalled models the HP-IB / parallel I/O option board (Option 041)
+	// as present. The firmware reads the I/O-board descriptor at 0xFFF110 (byte
+	// 0xFFF11E → bf09: 4=HP-IB) to decide whether the option exists. When the
+	// option is present the boot runs an init handshake against the option-board
+	// serial-interface chip (0xFFF120–0xFFF14F): it writes command bytes to 0xF148
+	// and polls status bits 0 (ack) and 1 (ready) until set, reading responses at
+	// 0xF140. We model the descriptor byte (0xF11E=4) and the always-ready status
+	// (0xF148=0x03) so the handshake completes and HP-IB activates. Off by
+	// default — the option is not installed, matching the bare instrument and
+	// keeping the golden-screen boot unaffected. Set via InstallHPIB().
+	HPIBInstalled bool
 
 	// addrLatch is the A16 write-address diagnostic latch read back at
 	// 0x320000. The POST address-decoder test (ROM 0x4AA0) writes 0x2555 to
@@ -254,6 +274,15 @@ func (m *HP8593AMMIO) readSweepADC() uint16 {
 	v := sweepDetector(m.sweepPoint, m.SweepPoints)
 	m.sweepPoint++
 	return v
+}
+
+// InstallHPIB marks the HP-IB option board (Option 041) as present: it sets the
+// I/O-board descriptor byte at 0xFFF11E = 4 (so bf09 = 4 = HP-IB mode) and arms
+// the option-board serial-chip handshake model (0xFFF148 = always-ready). Call
+// before booting. See the HPIBInstalled field.
+func (m *HP8593AMMIO) InstallHPIB() {
+	m.HPIBInstalled = true
+	m.b[0x11E] = 0x04 // I/O-board descriptor: HP-IB option present
 }
 
 // ResetSweep rewinds the detector position to the start of the sweep (sweep
@@ -329,6 +358,16 @@ func (m *HP8593AMMIO) Read(addr uint32, sz bus.Size) uint32 {
 		return uint32(m.HPIB.ReadByte(addr - 0x600))
 	}
 
+	// HP-IB parallel interface status register at 0x120. The firmware writes
+	// command/mode bytes here (0x3F = init, 0xE6/0xE7 = start transmit) and
+	// reads bit 0 as "transmitter busy" — the real IC clears bit 0 when the
+	// transmitter is ready to accept the next byte. We model this as always-
+	// ready (bit 0 = 0) so the firmware's transmit path proceeds immediately:
+	// reads return the last written value with bit 0 forced clear.
+	if addr == 0x120 && sz == bus.Byte {
+		return uint32(m.b[0x120]) &^ 0x01
+	}
+
 	// HP-IB data path via the front-panel μC ports (Rev L Empirically
 	// derived from the IRQ4 handler at PC 0x2642+):
 	//   $f160 (read) — HP-IB status byte. Bit 0 = "I/O active", bit 1
@@ -351,6 +390,26 @@ func (m *HP8593AMMIO) Read(addr uint32, sz bus.Size) uint32 {
 		case 0x140:
 			// Pop one byte from the chip's input buffer when read.
 			return uint32(m.HPIB.ReadByte(0xE)) // chip's DIR
+		case 0x142:
+			// Option-board HP-IB data-in register. The IRQ4 handler reads
+			// received command bytes from here when the HP-IB option is
+			// installed (bf09=4, ROM 0x2226). Route to the same input buffer
+			// the SendHPIB/Push API feeds.
+			if m.HPIBInstalled {
+				return uint32(m.HPIB.ReadByte(0xE))
+			}
+		case 0x148:
+			// Option-board serial-interface chip status. The boot init
+			// handshake (ROM 0x3004+) writes command bytes here and polls two
+			// status bits: bit 0 = "ready/ack" (polls wait for it SET, e.g.
+			// 0x300A: `#1 & f148; bne`), bit 1 = "busy" (polls wait for it
+			// CLEAR, e.g. 0x3070: `#2 & f148; cmp #2; bne`). Returning 0x01
+			// (bit 0 set, bit 1 clear) satisfies BOTH poll types, so the chip
+			// always reads "ready, not busy" and the handshake completes.
+			// Only when the option is installed — else fall through (returns 0).
+			if m.HPIBInstalled {
+				return 0x01
+			}
 		}
 	}
 
@@ -472,6 +531,14 @@ func (m *HP8593AMMIO) Write(addr uint32, sz bus.Size, val uint32) {
 	// TMS9914A HP-IB controller writes (byte-only).
 	if addr >= 0x600 && addr <= 0x60F && sz == bus.Byte {
 		m.HPIB.WriteByte(addr-0x600, byte(val))
+	}
+
+	// HP-IB output data registers (secondary parallel interface at 0x120–0x12F).
+	// 0xFFF122 is the actual data-byte output port the firmware uses to send
+	// HP-IB response bytes (ID?, CF?, CAL DUMP, etc.) — distinct from TMS9914A
+	// CDOR. 0xFFF120 carries control/mode bytes.
+	if addr == 0x122 && sz == bus.Byte && m.HPIBTx != nil {
+		m.HPIBTx(byte(val))
 	}
 }
 
