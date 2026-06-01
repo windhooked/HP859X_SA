@@ -274,6 +274,11 @@ IS the HD63484 command set.
 - **Output framebuffer = 512×384** (`DisplayWidth=512`, `DisplayHeight=384`): the 256 raster
   lines are upscaled ×1.5 vertically — the analog CRT's 4:3 stretch. Off-screen VRAM (rows ≥256,
   e.g. the `0x4400` back-buffer fill at MAR `0x4000`) is not displayed.
+- **Y-axis flip:** the firmware draws **Y-up** (Cartesian, bottom-left origin: REF/AT at large Y,
+  CENTER/SPAN at small/negative Y). The pixel-write path flips it to raster Y-down:
+  `vramY = drawYOrigin - firmwareY` (`drawYOrigin=219`), mapping firmware Y[-22,~205] into the
+  visible window with both annotation blocks on-screen. So REF/AT renders at the top, CENTER/SPAN
+  at the bottom — matching the real instrument.
 
 ### 7.2 Command port `0x5FC` / status `0x5FD` / data `0x5FE`
 - **Status `0x5FD`** = constant `0x27` (bits 0,1,2,5 ready) — STUB (instant-complete chip).
