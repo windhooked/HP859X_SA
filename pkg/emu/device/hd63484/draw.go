@@ -15,13 +15,20 @@ func (c *Chip) setPixel(x, y int, set bool) {
 	}
 }
 
-// drawLine rasterises a line from (x0,y0) to (x1,y1) using Bresenham. The
-// HD63484 hardware actually walks the line via a coordinate ALU with
-// per-step pattern matching for dotted/dashed styles — but the firmware
-// uses solid-line style for the graticule, so we render solid.
+// drawLine rasterises a line from (x0,y0) to (x1,y1) using Bresenham, applying
+// the chip's 16-bit line stipple (c.linePattern). The HD63484 walks the line via
+// a coordinate ALU with per-step pattern matching for dotted/dashed styles; the
+// 8593 firmware programs the pattern per line via WPTN (0xFFFF solid, 0x1111
+// dotted minor-division, 0xCCCC dash, 0x0001 sparse). We walk the same pattern
+// (bit i&15 along the line) and skip pixels whose bit is 0, so the internal
+// graticule grid renders dotted as on the real CRT. A 0 pattern → solid.
 func (c *Chip) drawLine(x0, y0, x1, y1 int, set bool) {
 	if c.LineLog != nil {
 		c.LineLog = append(c.LineLog, LineRec{x0, y0, x1, y1})
+	}
+	pat := c.linePattern
+	if pat == 0 {
+		pat = 0xFFFF
 	}
 	dx, dy := x1-x0, y1-y0
 	if dx < 0 {
@@ -39,7 +46,9 @@ func (c *Chip) drawLine(x0, y0, x1, y1 int, set bool) {
 	}
 	err := dx - dy
 	for i := 0; i < lineIterCap; i++ {
-		c.setPixel(x0, y0, set)
+		if pat&(1<<uint(i&15)) != 0 {
+			c.setPixel(x0, y0, set)
+		}
 		if x0 == x1 && y0 == y1 {
 			return
 		}

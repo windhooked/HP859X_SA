@@ -63,7 +63,7 @@ func TestMachineBootScreen(t *testing.T) {
 	// below the 256-line display) so it no longer stripes the visible area. The
 	// exact image is locked by the golden PNG; this floor is a blank-screen
 	// backstop.
-	if lit := litPixels(got); lit < 7_000 {
+	if lit := litPixels(got); lit < 3_500 {
 		t.Fatalf("display far below expected (%d lit pixels, PC=%#06X) — "+
 			"PAINT/raster pipeline likely broken", lit, m.CPU.Reg(cpu.PC))
 	}

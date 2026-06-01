@@ -141,6 +141,14 @@ type Chip struct {
 	penX, penY int    // current pen position (pixels)
 	colorReg   uint16 // current foreground colour selector
 
+	// linePattern is the 16-bit line stipple the firmware programs via WPTN
+	// (pattern RAM) before drawing vector lines. The 8593 firmware draws the
+	// graticule with PER-LINE patterns: 0xFFFF solid (frame/major), 0xCCCC dash,
+	// 0x1111 dotted (minor divisions), 0x0001 sparse. drawLine walks this pattern
+	// along the line and skips pixels whose bit is 0, so the internal grid
+	// renders dotted/dashed as on the real CRT (a 0 pattern is treated as solid).
+	linePattern uint16
+
 	// Last-set Memory Address Register pair (parameter regs 0x0C / 0x0D).
 	// Captured whenever the firmware writes BOTH registers in sequence;
 	// subsequent raster-burst or area commands start from this address.
@@ -220,6 +228,7 @@ func (c *Chip) EnableDotLog() { c.DotLog = make([]DotRec, 0, 4096) }
 func New() *Chip {
 	c := &Chip{
 		UnknownCmdHist: make(map[uint16]int),
+		linePattern:    0xFFFF, // solid until the firmware programs a stipple
 	}
 	c.resetBounds()
 	c.glyphLog = newGlyphLoggerFromEnv()

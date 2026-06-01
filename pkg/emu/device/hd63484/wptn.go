@@ -122,6 +122,12 @@ func (dec *decoder) feedRaster(c *Chip, w uint16) {
 		if dec.wptnPos < len(c.pattern) {
 			c.pattern[dec.wptnPos] = w
 		}
+		if dec.wptnPos == 0 {
+			// The first pattern word is the active line stipple the firmware
+			// uses for subsequent vector lines (graticule frame/grid). 0xFFFF
+			// solid, 0x1111 dotted, 0xCCCC dash, etc. See drawLine.
+			c.linePattern = w
+		}
 		dec.wptnPos++
 		dec.wptnCount--
 		if dec.wptnCount == 0 {
