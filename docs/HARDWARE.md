@@ -285,6 +285,13 @@ IS the HD63484 command set.
   `vramY = drawYOrigin - firmwareY` (`drawYOrigin=219`), mapping firmware Y[-22,~205] into the
   visible window with both annotation blocks on-screen. So REF/AT renders at the top, CENTER/SPAN
   at the bottom — matching the real instrument.
+- **X-axis origin:** the firmware lays its UI out across X ∈ [−40, +472] — the graticule box at
+  X=0..400, the **left-margin labels** (`PEAK`/`LOG`/`dB/`/`REF .0`) at NEGATIVE X, and the right
+  labels out to X≈464. That span is exactly 512 px = `DisplayWidth`, so firmware X=0 sits at screen
+  column 40: `vramX = firmwareX + drawXOrigin` (`drawXOrigin=40`). Without it the entire left margin
+  clipped off-screen and the box sat hard against the left edge. +40 is the unique offset that fits
+  both edges into the visible window (the chip's horizontal display origin; derived here from the
+  firmware's content span). Symmetric with `drawYOrigin`.
 
 ### 7.2 Command port `0x5FC` / status `0x5FD` / data `0x5FE`
 
@@ -352,8 +359,12 @@ effect on the 1bpp monochrome output). Any un-allowlisted control register **pan
 - `vram` (foreground: graticule, glyphs, dots) + `bgVram` (background `0x4400` dot texture, routed
   off-screen). `RenderFrame()` samples the 512×256 visible window, ×1.5 vertical stretch → 512×384
   RGBA. Lit = amber `fgColor`; background dim.
-- **GAP:** ORG drawing-origin not applied; dotted line-style attribute not modeled (grid renders
-  solid); the **spectrum trace is not drawn** (firmware DLP-blocked — §8).
+- **GAP:** the per-command **ORG drawing-origin is parsed but not applied** (only the global
+  `drawXOrigin`/`drawYOrigin` are). One visible consequence: a lone **"7" the firmware blits at
+  origin (0,0) early in boot** renders at the bottom-left box corner. On real hardware it is not
+  there — the inter-phase screen clear (an ORG-relative `SCLR`-area / `CLR`, currently consume-only)
+  wipes it before the operating UI; we don't apply that clear, so the stale glyph persists. The
+  **spectrum trace is also not drawn** (firmware DLP-blocked — §8).
 
 ---
 

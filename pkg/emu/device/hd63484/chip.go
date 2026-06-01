@@ -276,6 +276,20 @@ func (c *Chip) resetBounds() {
 // centred. See docs/CRT_GEOMETRY_DIAGNOSIS.md.
 const drawYOrigin = 219
 
+// drawXOrigin is the X-axis drawing origin: the screen column where firmware
+// X=0 lands. The firmware lays its UI out across X ∈ [-40, +472] — the graticule
+// box at X=0..400, the left-margin annotations (PEAK / LOG / dB/ / REF .0) at
+// NEGATIVE X (down to -40, to the left of the box), and the right-side labels
+// (SPECTRUM ANALYZER / SYNC / units) out to X≈464. That span is exactly 512 px =
+// DisplayWidth, so the firmware's X=0 sits at screen column 40: a pixel drawn at
+// firmware X is stored at VRAM column `X + drawXOrigin`. Without this, X<0 (the
+// whole left margin) clipped off-screen and the box sat hard against the left
+// edge. +40 is the unique offset that fits both [-40 → col 0] and [472 → col 512]
+// into the visible window. (The HD63484 encodes this as its horizontal display
+// origin; 40 is derived here from the firmware's own content span.) Symmetric
+// with drawYOrigin.
+const drawXOrigin = 40
+
 // vramByteAddr returns the byte offset within vram that holds pixel (x, y),
 // or -1 if the pixel is outside the paint area. The bit within that byte
 // (with bit 0 = leftmost) is (x & 7).
@@ -290,6 +304,7 @@ func (c *Chip) vramByteAddr(x, y int) int {
 // bounding box. Out-of-range coordinates are silently ignored — matches
 // the chip's hardware clipping behaviour.
 func (c *Chip) setVRAMPixel(x, y int) {
+	x += drawXOrigin    // firmware X → VRAM column (left-margin origin)
 	y = drawYOrigin - y // firmware Y-up → VRAM Y-down (raster)
 	addr := c.vramByteAddr(x, y)
 	if addr < 0 {
@@ -302,6 +317,7 @@ func (c *Chip) setVRAMPixel(x, y int) {
 // clearVRAMPixel turns off the pixel at (x, y) — used by glyph BG fills,
 // CLR, and SCLR.
 func (c *Chip) clearVRAMPixel(x, y int) {
+	x += drawXOrigin    // firmware X → VRAM column (left-margin origin)
 	y = drawYOrigin - y // firmware Y-up → VRAM Y-down (raster)
 	addr := c.vramByteAddr(x, y)
 	if addr < 0 {
@@ -313,6 +329,7 @@ func (c *Chip) clearVRAMPixel(x, y int) {
 // isVRAMPixelLit reports whether the pixel at (x, y) is currently set.
 // Returns false for out-of-range coordinates.
 func (c *Chip) isVRAMPixelLit(x, y int) bool {
+	x += drawXOrigin    // firmware X → VRAM column (left-margin origin)
 	y = drawYOrigin - y // firmware Y-up → VRAM Y-down (raster)
 	addr := c.vramByteAddr(x, y)
 	if addr < 0 {
