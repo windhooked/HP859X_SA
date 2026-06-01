@@ -316,18 +316,24 @@ func (dec *decoder) feed(c *Chip, w uint16) {
 		dec.moveX = int(int16(w))
 		dec.st = stPolyY
 	case stPolyY:
-		// One polyline vertex consumed. We FRAME these correctly (1 + 2N words)
-		// so the stream stays in sync — that's the desync fix. We do NOT draw
-		// them yet: the firmware's APLL/RPLL vertices are tiny ORG-relative
-		// point-runs (e.g. (1,0),(2,0),(3,0)… — the dotted-grid / fine detail),
-		// and drawing them as pen-connected lines without applying the ORG
-		// origin produces spurious radiating segments. Rendering them correctly
-		// (as ORG-offset dots) is the dotted-grid task; until then, consume and
-		// keep the pen at the last vertex so any trailing relative cmd is sane.
+		// One polyline vertex. APLL/RPLL draw a connected line through the
+		// vertex list (pen → v1 → v2 → …). Now that the ORG drawing-origin is
+		// faithfully applied (setVRAMPixel uses c.orgCol/c.orgRow), the vertices
+		// land in the right place — so we DRAW each segment. This renders the
+		// firmware's vector content that uses polylines, e.g. the italic "hp"
+		// logo in the top-left status line.
 		ex, ey := dec.moveX, int(int16(w))
 		if dec.polyRel {
 			ex, ey = c.penX+dec.moveX, c.penY+int(int16(w))
 		}
+		// Polylines (the italic "hp" logo, vector glyphs) are SOLID strokes — the
+		// dotted-grid stipple (c.linePattern) applies to the graticule ALINE/RLINE
+		// grid, not to polyline area-outline draws. Force solid for the segment.
+		savedPat := c.linePattern
+		c.linePattern = 0xFFFF
+		c.drawLine(c.penX, c.penY, ex, ey, true)
+		c.linePattern = savedPat
+		c.Lines++
 		c.penX, c.penY = ex, ey
 		dec.polyN--
 		if dec.polyN <= 0 {
@@ -401,13 +407,11 @@ func (dec *decoder) dispatchCmd(c *Chip, w uint16) {
 	// vertex-count word then 2×N coordinate words, NOT a fixed 2. Masking with
 	// 0xFC00 keeps APLL/RPLL distinct from ARCT(0x9000)/RRCT(0x9400).
 	switch w & 0xFC00 {
-	case 0x9800: // APLL — absolute polyline
-		c.gate("cmd:apll", "command APLL %#04x (absolute polyline; framed but vertices not rendered)", w)
+	case 0x9800: // APLL — absolute polyline (rendered: pen → v1 → v2 → …)
 		dec.polyRel = false
 		dec.st = stPolyCount
 		return
-	case 0x9C00: // RPLL — relative polyline
-		c.gate("cmd:rpll", "command RPLL %#04x (relative polyline; framed but vertices not rendered)", w)
+	case 0x9C00: // RPLL — relative polyline (rendered)
 		dec.polyRel = true
 		dec.st = stPolyCount
 		return
