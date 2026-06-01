@@ -27,7 +27,10 @@ package main
 
 import (
 	"fmt"
+	"image/png"
 	"log"
+	"os"
+	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
@@ -38,6 +41,23 @@ import (
 	"github.com/windhooked/HP859X_SA/pkg/emu/machine"
 	"github.com/windhooked/HP859X_SA/pkg/emu/romloader"
 )
+
+// saveScreen writes the current HD63484 framebuffer to screens/gui_<timestamp>.png
+// and returns the path, or an error message.
+func saveScreen(m *machine.Machine) string {
+	img := m.MMIO.Display.Chip.RenderFrame()
+	ts := time.Now().Format("20060102_150405")
+	path := fmt.Sprintf("screens/gui_%s.png", ts)
+	f, err := os.Create(path)
+	if err != nil {
+		return "save error: " + err.Error()
+	}
+	defer f.Close()
+	if err := png.Encode(f, img); err != nil {
+		return "encode error: " + err.Error()
+	}
+	return "saved " + path
+}
 
 const (
 	cyclesPerFrame = 2_000_000
@@ -122,6 +142,7 @@ type game struct {
 	chunks   int
 	cycles   uint64
 	lastKey  string
+	lastMsg  string // status message shown in title bar (e.g. save result)
 	keyReads int
 	// probe mode: cycle through all 48 matrix bits to find key positions
 	probeMode bool
@@ -141,6 +162,16 @@ func (g *game) Update() error {
 			g.cycles += irqServiceCost
 		}
 		g.m.DriveOneSweepChunk()
+	}
+
+	// ── Host-side screen save (Ctrl+S) ──────────────────────────────────────
+	// Saves the current framebuffer to screens/gui_<timestamp>.png.
+	// Distinct from the firmware's PrintScreen (which sends a scan code to the
+	// plotter); this is a host-side convenience that doesn't touch the firmware.
+	if ebiten.IsKeyPressed(ebiten.KeyControlLeft) || ebiten.IsKeyPressed(ebiten.KeyControlRight) {
+		if inpututil.IsKeyJustPressed(ebiten.KeyS) {
+			g.lastMsg = saveScreen(g.m)
+		}
 	}
 
 	// ── Front-panel matrix path (IRQ3) ────────────────────────────────────────
@@ -172,7 +203,12 @@ func (g *game) Update() error {
 
 	// ── AT keyboard path (IRQ4) ───────────────────────────────────────────────
 	// Inject AT scan codes for make (key-down) events.
+	// Skip when Ctrl is held — those are host shortcuts (Ctrl+S = save screen).
+	ctrlHeld := ebiten.IsKeyPressed(ebiten.KeyControlLeft) || ebiten.IsKeyPressed(ebiten.KeyControlRight)
 	for k, atk := range atBindings {
+		if ctrlHeld {
+			break
+		}
 		if inpututil.IsKeyJustPressed(k) {
 			if make := device.ATMake(atk); make != nil {
 				g.m.ATKeyboard.Enqueue(make...)
@@ -200,10 +236,14 @@ func (g *game) Draw(screen *ebiten.Image) {
 	img := g.m.MMIO.Display.RenderFrame()
 	g.fb.WritePixels(img.Pix)
 	screen.DrawImage(g.fb, nil)
+	msg := ""
+	if g.lastMsg != "" {
+		msg = "  |  " + g.lastMsg
+	}
 	ebiten.SetWindowTitle(fmt.Sprintf(
-		"HP 8593A  |  %.0fM cyc  PC=%#06x  bc67=%#02x  key=%s  reads=%d",
+		"HP 8593A  |  %.0fM cyc  PC=%#06x  bc67=%#02x  key=%s  reads=%d%s",
 		float64(g.cycles)/1e6, g.m.CPU.Reg(cpu.PC),
-		byte(g.m.Bus.Read(0xFFBC67, 1)), g.lastKey, g.keyReads))
+		byte(g.m.Bus.Read(0xFFBC67, 1)), g.lastKey, g.keyReads, msg))
 }
 
 func (g *game) Layout(int, int) (int, int) { return device.DisplayWidth, device.DisplayHeight }
