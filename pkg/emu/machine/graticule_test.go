@@ -32,14 +32,18 @@ func TestGraticuleGridVisible(t *testing.T) {
 	m.BootToOperatingWithSweep(10_000_000)
 
 	img := m.MMIO.Display.Chip.RenderFrame()
-	// Upper graph interior (display coords; DisplayWidth=544, DisplayHeight=384).
-	const x0, x1 = 60, 430
+	// Graph span incl. the box frame edges (graph left edge ≈ display x48, right
+	// ≈ x448). Display coords; DisplayWidth=544, DisplayHeight=384.
+	const x0, x1 = 40, 460
 	const y0, y1 = 45, 240
 	height := y1 - y0
 
-	// Per-column lit count; a "grid column" is lit over a good fraction of the
-	// height (a vertical line, distinct from the wiggly trace which lives lower).
-	gridCols := 0
+	// Per-column count of near-full-height vertical lines. The accurate graticule is
+	// the firmware's VECTOR frame (box left/right edges + a few dotted divisions) —
+	// NOT the dense 0x4400 dither (suppressed by decision; it time-averages to a
+	// faint CRT glow, and as hard stripes it was inaccurate). So we expect a SMALL
+	// number of frame columns, not the old ~25 dither bars.
+	frameCols := 0
 	for x := x0; x < x1; x++ {
 		lit := 0
 		for y := y0; y < y1; y++ {
@@ -47,8 +51,8 @@ func TestGraticuleGridVisible(t *testing.T) {
 				lit++
 			}
 		}
-		if lit >= height/3 {
-			gridCols++
+		if lit >= height/2 {
+			frameCols++
 		}
 	}
 
@@ -58,9 +62,13 @@ func TestGraticuleGridVisible(t *testing.T) {
 		f.Close()
 	}
 
-	t.Logf("vertical grid columns detected in graph interior: %d (need >=6)", gridCols)
-	if gridCols < 6 {
-		t.Errorf("graticule vertical grid not rendered: only %d lit columns in the graph interior "+
-			"(the 0x4400 grid pattern is routed off-screen). Expected the dim vertical grid (>=6 columns).", gridCols)
+	t.Logf("near-full-height graticule frame columns in graph interior: %d", frameCols)
+	// At least the box left edge must render (frame present); and we must NOT see the
+	// dense dither back (which produced ~25 such columns).
+	if frameCols < 1 {
+		t.Errorf("graticule frame not rendered: no near-full-height vertical line in the graph interior")
+	}
+	if frameCols > 10 {
+		t.Errorf("dense dither appears to be back: %d near-full-height columns (expected the vector frame, a handful)", frameCols)
 	}
 }
