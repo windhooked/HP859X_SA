@@ -147,5 +147,9 @@ func (c *Chip) fillVRAM(word uint16) {
 		c.vram[i] = lo
 		c.vram[i+1] = hi
 	}
+	// Mirror into the faithful core (full-screen fill/clear).
+	for i := range c.core.ram {
+		c.core.ram[i] = word
+	}
 	c.resetBounds()
 }

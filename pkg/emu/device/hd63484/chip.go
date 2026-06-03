@@ -456,6 +456,11 @@ func New() *Chip {
 		maskReg:        0xFFFF, // all bits affected until WPR 0x04 narrows the mask
 	}
 	c.activePlane = &c.vram // default draw target == graticule plane
+	// Faithful core defaults so the unified buffer addresses correctly before the
+	// firmware programs ORG/MWR at runtime (drives unit tests that draw directly).
+	// Matches the 8593's display-init: ORG 0x4003,0xa450 → dn=1, dpa=0x3a45; MWR1=64.
+	c.core.setORG(0x4003, 0xa450)
+	c.core.mwr[1] = 64
 	c.resetBounds()
 	c.glyphLog = newGlyphLoggerFromEnv()
 	return c
@@ -572,13 +577,8 @@ func (c *Chip) ClearTracePlane() {
 // isVRAMPixelLit reports whether the pixel at (x, y) is currently set.
 // Returns false for out-of-range coordinates.
 func (c *Chip) isVRAMPixelLit(x, y int) bool {
-	x = c.orgCol + x    // firmware X → VRAM column via ORG
-	y = c.orgRow - y    // firmware Y-up → VRAM Y-down via ORG
-	addr := c.vramByteAddr(x, y)
-	if addr < 0 {
-		return false
-	}
-	return c.vram[addr]&(1<<uint(x&7)) != 0
+	// Core-direct: read the unified buffer at the firmware logical coordinate.
+	return c.core.getDot(int16(x), int16(y)) != 0
 }
 
 // isBgPixelLit reports whether the DIM background plane (bgVram) pixel at firmware
