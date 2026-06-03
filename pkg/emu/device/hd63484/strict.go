@@ -102,6 +102,7 @@ func (c *Chip) writeControlReg(ar, value uint16) {
 	if c.cmdCapOn && len(c.ctrlCap) < cap(c.ctrlCap) {
 		c.ctrlCap = append(c.ctrlCap, [2]uint16{ar, value})
 	}
+	c.regWatch(ar, value) // surface registers we don't fully model (regwatch.go)
 	// Control-register file, ported from MAME hd63484.cpp video_registers_w. The
 	// Memory-Width and Start-Address registers are banked: bank = (ar & 0x18) >> 3
 	// (0xC2→0, 0xCA→1, 0xD2→2, 0xDA→3 for MWR; 0xC4/0xC6→0 … 0xDC/0xDE→3 for SAR).

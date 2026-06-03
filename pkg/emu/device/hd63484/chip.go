@@ -3,6 +3,7 @@ package hd63484
 import (
 	"image"
 	"image/color"
+	"os"
 )
 
 // Display geometry. The HD63484's PAINT/VRAM area (per the firmware's
@@ -160,6 +161,10 @@ type Chip struct {
 	// RegionWrites counts pen pixels landing in each of the 5 display regions
 	// (indexed by the region* consts) — for asserting writes hit the right region.
 	RegionWrites [numRegions]int
+
+	// regwatch.go: env-gated surfacing of control registers we don't model.
+	regDump  *os.File
+	regPanic bool
 
 	// ctrlRegs is the full AR-addressed control-register file. Control-register
 	// writes (AR≠0) are decoded here rather than mis-fed to the command parser.
@@ -471,6 +476,7 @@ func New() *Chip {
 	c.core.mwr[1] = 64
 	c.resetBounds()
 	c.glyphLog = newGlyphLoggerFromEnv()
+	c.initRegWatch()
 	return c
 }
 

@@ -201,20 +201,18 @@ func (c *Chip) CoreWriteHist() []int {
 	return h
 }
 
-// RenderMemoryAreasCollage renders the two ACRTC memory areas the 8593 firmware
-// actually configures — the Base Screen (SAR1) and the Window Screen (SAR3) —
-// each scanned straight from the frame buffer the way the display controller
-// reads it: word = SAR + line*MWR + col, 64 words (1024 px) per line × 256 lines,
-// scaled ×1/2. Laid out side by side (LEFT = Base SAR1, RIGHT = Window SAR3) for
-// inspection. A coloured header bar tags each (Base=blue, Window=amber).
+// RenderMemoryAreasCollage renders the FOUR ACRTC logical-screen memory areas —
+// SAR0 Upper, SAR1 Base, SAR2 Lower, SAR3 Window — each scanned straight from the
+// frame buffer the way the display controller reads it: word = SAR + line*MWR +
+// col, 64 words (1024 px) per line × 256 lines, ×1/2. 2×2 grid, coloured header
+// per area. Naming: top-left Upper(SAR0), top-right Base(SAR1), bottom-left
+// Lower(SAR2), bottom-right Window(SAR3).
 func (c *Chip) RenderMemoryAreasCollage() *image.RGBA {
-	type area struct {
-		sar uint32
-		hdr color.RGBA
-	}
-	areas := []area{
-		{c.core.sar[1], color.RGBA{0x20, 0x60, 0xFF, 0xFF}}, // Base   SAR1
-		{c.core.sar[3], color.RGBA{0xFF, 0xB0, 0x00, 0xFF}}, // Window SAR3
+	hdrs := [4]color.RGBA{
+		{0xFF, 0x30, 0x30, 0xFF}, // SAR0 Upper  red
+		{0x20, 0x60, 0xFF, 0xFF}, // SAR1 Base   blue
+		{0x20, 0xC0, 0x40, 0xFF}, // SAR2 Lower  green
+		{0xFF, 0xB0, 0x00, 0xFF}, // SAR3 Window amber
 	}
 	mwr := uint32(c.core.mwr[1])
 	if mwr == 0 {
@@ -222,29 +220,28 @@ func (c *Chip) RenderMemoryAreasCollage() *image.RGBA {
 	}
 	const tileW, tileH = 512, 128 // 1024×256 source at ×1/2
 	const hdr, gap = 6, 10
-	out := image.NewRGBA(image.Rect(0, 0, tileW*2+gap, tileH+hdr))
-	for i := range out.Pix {
-		out.Pix[i] = 0x08
+	out := image.NewRGBA(image.Rect(0, 0, tileW*2+gap, (tileH+hdr)*2+gap))
+	for i := 0; i < len(out.Pix); i += 4 {
+		out.Pix[i], out.Pix[i+1], out.Pix[i+2], out.Pix[i+3] = 0x08, 0x08, 0x08, 0xFF
 	}
-	for ai, a := range areas {
-		ox := ai * (tileW + gap)
-		// header bar
+	for s := 0; s < 4; s++ {
+		ox := (s & 1) * (tileW + gap)
+		oy0 := (s >> 1) * (tileH + hdr + gap)
 		for y := 0; y < hdr; y++ {
 			for x := 0; x < tileW; x++ {
-				out.SetRGBA(ox+x, y, a.hdr)
+				out.SetRGBA(ox+x, oy0+y, hdrs[s])
 			}
 		}
 		for oy := 0; oy < tileH; oy++ {
 			line := uint32(oy * 2)
 			for ox2 := 0; ox2 < tileW; ox2++ {
 				col := uint32(ox2 * 2)
-				word := (a.sar + line*mwr + col/16) & acrtcRAMMask
-				lit := c.core.ram[word]&(1<<uint(col&15)) != 0
+				word := (c.core.sar[s] + line*mwr + col/16) & acrtcRAMMask
 				cc := color.RGBA{0x00, 0x00, 0x00, 0xFF}
-				if lit {
+				if c.core.ram[word]&(1<<uint(col&15)) != 0 {
 					cc = color.RGBA{0xFF, 0xB0, 0x00, 0xFF}
 				}
-				out.SetRGBA(ox+ox2, hdr+oy, cc)
+				out.SetRGBA(ox+ox2, oy0+hdr+oy, cc)
 			}
 		}
 	}
