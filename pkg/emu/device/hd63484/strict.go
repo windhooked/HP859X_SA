@@ -121,18 +121,21 @@ func (c *Chip) writeControlReg(ar, value uint16) {
 	case 0xC2, 0xCA, 0xD2, 0xDA: // Memory Width Registers (pitch, words/line)
 		bank := (ar & 0x18) >> 3
 		c.mwr[bank] = value & 0x0fff
+		c.core.mwr[bank] = value & 0x0fff // faithful core (Phase 2)
 		if bank == 1 {
 			c.dispMWR = c.mwr[1]
 		}
 	case 0xC4, 0xCC, 0xD4, 0xDC: // Start Address Register, high (bits 16-19)
 		bank := (ar & 0x18) >> 3
 		c.sar[bank] = (uint32(value&0x000f) << 16) | (c.sar[bank] & 0xffff)
+		c.core.sar[bank] = c.sar[bank] // faithful core (Phase 2)
 		if bank == 1 {
 			c.dispSARHi = value
 		}
 	case 0xC6, 0xCE, 0xD6, 0xDE: // Start Address Register, low (bits 0-15)
 		bank := (ar & 0x18) >> 3
 		c.sar[bank] = (uint32(value) & 0xffff) | (c.sar[bank] & 0xf0000)
+		c.core.sar[bank] = c.sar[bank] // faithful core (Phase 2)
 		if bank == 1 {
 			c.dispSARLo = value
 		}

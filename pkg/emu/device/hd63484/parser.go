@@ -245,6 +245,9 @@ func (dec *decoder) feed(c *Chip, w uint16) {
 		}
 		c.orgCol = (xw%mwr)*16 + xd
 		c.orgRow = xw / mwr
+		// Faithful core (Phase 2): decode ORG from the raw (XW, XD) params per the
+		// MAME COMMAND_ORG formula — dpa/dpd/dn, the unified physical origin.
+		c.core.setORG(uint16(xw), w)
 		c.regs[0x1F] = uint16(xw) // stash XW for register-read diagnostics
 		c.OrgLog = append(c.OrgLog, [2]int{xw, int(w)})
 		dec.st = stCmd

@@ -146,6 +146,13 @@ type Chip struct {
 	dcr uint16    // Display Control Register — AR 0x06
 	sp  [3]uint16 // Split-screen widths SP0/SP1/SP2 — AR 0x8C/0x8A/0x8E
 
+	// core is the faithful flat-address ACRTC model (acrtc.go) being migrated in
+	// per docs/HD63484_REBUILD_PROMPT.md. Phase 2 DUAL-WRITES pen pixels into it
+	// (alongside the legacy vram path) so it accumulates the same content in the
+	// real address space; Phase 4 switches rendering onto it and deletes the
+	// legacy planes + coordinate hacks.
+	core acrtc
+
 	// ctrlRegs is the full AR-addressed control-register file. Control-register
 	// writes (AR≠0) are decoded here rather than mis-fed to the command parser.
 	// Registers whose side-effects we faithfully model have explicit handlers in
@@ -404,6 +411,24 @@ func (c *Chip) DispMWR() uint16 { return c.dispMWR }
 // as the internal displayStartRow helper — exposed for probing).
 func (c *Chip) DisplayStartRow() int { return c.displayStartRow() }
 
+// CoreORG returns the faithful core's decoded ORG (layer, dpa word address) and
+// MWR1, for verifying the Phase-2 dual-write wiring (acrtc.go).
+func (c *Chip) CoreORG() (layer int, dpa uint32, mwr1 uint16) {
+	return c.core.orgDN, c.core.orgDPA, c.core.mwr[1]
+}
+
+// CoreLitWords counts non-zero words in the faithful core buffer (drawn content
+// accumulated via dual-write).
+func (c *Chip) CoreLitWords() int {
+	n := 0
+	for _, w := range c.core.ram {
+		if w != 0 {
+			n++
+		}
+	}
+	return n
+}
+
 // SAR returns Start Address Register n (20-bit word address), for probing the
 // chip's display-area / split-screen layer bases.
 func (c *Chip) SAR(n int) uint32 {
@@ -485,6 +510,14 @@ func (c *Chip) vramByteAddr(x, y int) int {
 // bounding box. Out-of-range coordinates are silently ignored — matches
 // the chip's hardware clipping behaviour.
 func (c *Chip) setVRAMPixel(x, y int) {
+	// Faithful core (Phase 2 dual-write): the pen draws in firmware logical coords,
+	// which is exactly what calcOffset/setDot consume — so mirror the pixel into the
+	// unified address space alongside the legacy path. Glyphs/trace route to their
+	// own legacy planes (activePlane != &vram); only the base vram content is
+	// mirrored for now so the core matches what Phase 4 will scan out.
+	if c.activePlane == nil || c.activePlane == &c.vram {
+		c.core.setDot(int16(x), int16(y), 1)
+	}
 	x = c.orgCol + x    // firmware X → VRAM column via ORG
 	y = c.orgRow - y    // firmware Y-up → VRAM Y-down via ORG
 	addr := c.vramByteAddr(x, y)
