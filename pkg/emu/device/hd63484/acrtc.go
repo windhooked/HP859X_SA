@@ -39,6 +39,10 @@ type acrtc struct {
 
 	ccr  uint16 // control reg; GBM (graphic bit mode) in bits 8-10 selects bpp
 	mask uint16 // WPR 0x04 write-mask: which bits a logical op may change
+
+	// writeHist buckets every writeword by 0x200-word (1 KB) page — a histogram of
+	// which controller memory regions the firmware actually populates.
+	writeHist [acrtcRAMWords >> 9]int
 }
 
 // getBpp returns bits-per-logical-pixel from the GBM field (CCR bits 8-10):
@@ -90,8 +94,11 @@ func (a *acrtc) calcOffset(x, y int16) (offset uint32, bitPos uint8) {
 	return o, uint8(bp * bpp)
 }
 
-func (a *acrtc) readword(off uint32) uint16     { return a.ram[off&acrtcRAMMask] }
-func (a *acrtc) writeword(off uint32, v uint16) { a.ram[off&acrtcRAMMask] = v }
+func (a *acrtc) readword(off uint32) uint16 { return a.ram[off&acrtcRAMMask] }
+func (a *acrtc) writeword(off uint32, v uint16) {
+	a.ram[off&acrtcRAMMask] = v
+	a.writeHist[(off&acrtcRAMMask)>>9]++ // 0x200-word (1 KB) page buckets
+}
 
 // getDot reads the logical pixel value at (x,y) (MAME get_dot).
 func (a *acrtc) getDot(x, y int16) uint16 {

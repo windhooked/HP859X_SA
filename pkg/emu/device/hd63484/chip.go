@@ -157,6 +157,10 @@ type Chip struct {
 	// legacy planes + coordinate hacks.
 	core acrtc
 
+	// RegionWrites counts pen pixels landing in each of the 5 display regions
+	// (indexed by the region* consts) — for asserting writes hit the right region.
+	RegionWrites [numRegions]int
+
 	// ctrlRegs is the full AR-addressed control-register file. Control-register
 	// writes (AR≠0) are decoded here rather than mis-fed to the command parser.
 	// Registers whose side-effects we faithfully model have explicit handlers in
@@ -532,6 +536,7 @@ func (c *Chip) setVRAMPixel(x, y int) {
 	// mirrored for now so the core matches what Phase 4 will scan out.
 	if c.activePlane == nil || c.activePlane == &c.vram {
 		c.core.setDot(int16(x), int16(y), 1)
+		c.RegionWrites[regionOf(x, y)]++
 	}
 	x = c.orgCol + x    // firmware X → VRAM column via ORG
 	y = c.orgRow - y    // firmware Y-up → VRAM Y-down via ORG
