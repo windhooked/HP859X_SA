@@ -31,6 +31,14 @@ const (
 	graphCoreRowBot = 233
 	graphCorePxL    = 80
 	graphCorePxR    = 480
+
+	// coreXOrigin is the core pixel that maps to display column 0. The firmware's
+	// ORG puts logical x at core pixel 80+x (dpa column = 5 words = px 80); the
+	// screen's left edge is the leftmost content (the hp logo / REF labels at
+	// firmware x≈−48 → core px 32). Scanning from here frames the logo at the left
+	// and brings the right-side softkeys (firmware x≈408-495 → core px 488-575)
+	// back inside the 544-px output.
+	coreXOrigin = 32
 )
 
 // coreBit reads a single 1bpp pixel from the core at (coreRow, px) — row-major,
@@ -56,16 +64,18 @@ func (c *Chip) RenderCore() *image.RGBA {
 		// Map output row to a core content row (CRT stretch: VisibleHeight→DisplayHeight).
 		coreRow := y * VisibleHeight / DisplayHeight
 		dstBase := y * stride
+		gridRowOff := gridPageWords / int(coreMWR(c)) // +0x4000 words = +256 rows
 		for x := 0; x < DisplayWidth; x++ {
 			off := dstBase + x*4
+			corePx := coreXOrigin + x
 			var col color.RGBA
-			content := c.coreBit(coreRow, x)
+			content := c.coreBit(coreRow, corePx)
 			inGraph := coreRow >= graphCoreRowTop && coreRow <= graphCoreRowBot &&
-				x >= graphCorePxL && x <= graphCorePxR
+				corePx >= graphCorePxL && corePx <= graphCorePxR
 			switch {
 			case content:
 				col = fgColor // bright foreground (box/trace/text)
-			case inGraph && c.coreBit(coreRow+gridPageWords/int(coreMWR(c)), x):
+			case inGraph && c.coreBit(coreRow+gridRowOff, corePx):
 				col = bgPaintColor // dim recessive grid (superimposed page)
 			default:
 				col = color.RGBA{0, 0, 0, 0xFF}
