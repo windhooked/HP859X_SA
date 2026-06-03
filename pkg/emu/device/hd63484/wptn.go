@@ -162,12 +162,18 @@ func (dec *decoder) feedRaster(c *Chip, w uint16) {
 		c.bgVram[c.memPos] = byte(w & 0xFF)
 		c.bgVram[c.memPos+1] = byte(w >> 8)
 	}
-	// The 0x4400 raster burst is the 1-bit GRID DITHER. We render the graticule
-	// from the firmware's VECTOR content (box + dotted lines), not this dither (it
-	// time-averages to a faint CRT glow; as hard stripes it's inaccurate), so it is
-	// intentionally NOT mirrored into the core. Mirroring it also wrapped the second
-	// burst into the content page (words < 0x4000), painting garbage in the rows
-	// above the graph — gone now that the grid stays in the legacy bgVram plane only.
+	// The 0x4400 raster burst is the graticule GRID pattern. Mirror it into the
+	// core's GRID PAGE (words 0x4000..0x7fff) so the scanout can superimpose it as a
+	// faint recessive grid. CLAMP to the grid page: the firmware writes two bursts
+	// (double-buffer); without the clamp the second burst's address ran past
+	// 0x8000 and wrapped into the CONTENT page (words < 0x4000), painting garbage in
+	// the rows above the graph. Folding it back to 0x4000 makes the second burst
+	// overwrite the first instead.
+	gw := c.memPos >> 1
+	if gw >= gridPageWords {
+		gw = gridPageWords + ((gw - gridPageWords) & (gridPageWords - 1))
+	}
+	c.core.writeword(uint32(gw), w)
 	c.memPos += 2
 	c.PaintWords++
 	// Each WPR-triggered raster burst is exactly 16384 words (see the 8593

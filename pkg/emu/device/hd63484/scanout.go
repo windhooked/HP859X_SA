@@ -64,17 +64,23 @@ func (c *Chip) RenderCore() *image.RGBA {
 		// Map output row to a core content row (CRT stretch: VisibleHeight→DisplayHeight).
 		coreRow := y * VisibleHeight / DisplayHeight
 		dstBase := y * stride
+		gridRow := coreRow + gridPageWords/64 // grid page is +0x4000 words = +256 rows
 		for x := 0; x < DisplayWidth; x++ {
 			off := dstBase + x*4
 			corePx := coreXOrigin + x
 			var col color.RGBA
-			// The graticule is the firmware's VECTOR content (box + dotted grid
-			// lines). The 0x4400 raster page is a 1-bit DITHER that time-averages to
-			// a faint CRT glow — rendering it as hard vertical stripes is inaccurate,
-			// so it is intentionally NOT superimposed (decision: suppress entirely).
-			if c.coreBit(coreRow, corePx) {
-				col = fgColor // bright foreground (box/dotted grid/trace/text)
-			} else {
+			inGraph := coreRow >= graphCoreRowTop && coreRow <= graphCoreRowBot &&
+				corePx >= graphCorePxL && corePx <= graphCorePxR
+			switch {
+			case c.coreBit(coreRow, corePx):
+				col = fgColor // bright foreground (box / trace / text / ticks)
+			case inGraph && c.coreBit(gridRow, corePx) && (coreRow&3) == 0:
+				// Graticule grid: the 0x4400 page superimposed as a FAINT, DOTTED,
+				// recessive grid — dotted via the row-stride gate (only every 4th
+				// scanline), faint via gridColor, so it reads as the real CRT's dim
+				// dotted graticule rather than hard bright stripes.
+				col = gridDimColor
+			default:
 				col = color.RGBA{0, 0, 0, 0xFF}
 			}
 			pix[off] = col.R

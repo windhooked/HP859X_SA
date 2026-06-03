@@ -71,6 +71,10 @@ var (
 	textColor      = color.RGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0xFF} // glyphs → white
 	traceColor     = color.RGBA{R: 0x20, G: 0xFF, B: 0x40, A: 0xFF} // spectrum trace → green
 	graticuleColor = color.RGBA{R: 0x55, G: 0x55, B: 0x55, A: 0xFF} // grid/box → dim grey
+	// gridDimColor is the faint recessive amber for the dotted graticule grid
+	// (the 0x4400 page superimposed under the bright foreground) — dim enough to
+	// read as the real CRT's faint dotted grid, not hard bright stripes.
+	gridDimColor = color.RGBA{R: 0x3A, G: 0x28, B: 0x00, A: 0xFF}
 	ditherColor    = color.RGBA{R: 0x0E, G: 0x0E, B: 0x0E, A: 0xFF} // bg dither → near-black
 )
 
