@@ -247,3 +247,7 @@ func (c *Chip) RenderMemoryAreasCollage() *image.RGBA {
 	}
 	return out
 }
+
+// SP returns split-screen width n (0=Upper,1=Base,2=Lower). CoreMWR1 returns MWR1.
+func (c *Chip) SP(n int) uint16 { if n<0||n>=len(c.sp){return 0}; return c.sp[n] }
+func (c *Chip) CoreMWR1() uint16 { return c.core.mwr[1] }

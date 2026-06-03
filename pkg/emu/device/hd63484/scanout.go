@@ -98,3 +98,38 @@ func coreMWR(c *Chip) uint16 {
 	}
 	return 64
 }
+
+// RenderScanout produces the display raster DERIVED ENTIRELY from the firmware's
+// timing/screen registers — no magic offsets. Vertical extent = SP1 (Base split
+// width) rasters; horizontal extent = MWR1 words/line (16 px each); the frame
+// buffer address per displayed raster = SAR1 + line*MWR1 (with wraparound). This
+// is the chip's actual scan (draw_graphics_line) for the Base screen; the output
+// is the literal Base-screen image (1024 × SP1), to be mapped to the CRT output
+// and superimposed with the Window screen in later steps.
+func (c *Chip) RenderScanout() *image.RGBA {
+	lines := int(c.sp[1])
+	if lines == 0 {
+		lines = VisibleHeight
+	}
+	mwr := int(c.core.mwr[1])
+	if mwr == 0 {
+		mwr = 64
+	}
+	sar := c.core.sar[1]
+	w := mwr * 16
+	img := image.NewRGBA(image.Rect(0, 0, w, lines))
+	for dl := 0; dl < lines; dl++ {
+		base := (sar + uint32(dl*mwr)) & acrtcRAMMask
+		for word := 0; word < mwr; word++ {
+			v := c.core.ram[(base+uint32(word))&acrtcRAMMask]
+			for b := 0; b < 16; b++ {
+				col := color.RGBA{0, 0, 0, 0xFF}
+				if v&(1<<uint(b)) != 0 {
+					col = fgColor
+				}
+				img.SetRGBA(word*16+b, dl, col)
+			}
+		}
+	}
+	return img
+}
