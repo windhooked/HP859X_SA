@@ -162,11 +162,12 @@ func (dec *decoder) feedRaster(c *Chip, w uint16) {
 		c.bgVram[c.memPos] = byte(w & 0xFF)
 		c.bgVram[c.memPos+1] = byte(w >> 8)
 	}
-	// Faithful core (Phase 3): the raster burst writes the chip's frame buffer at
-	// the MAR WORD address (memPos is a byte offset → /2). The 0x4400 grid fill thus
-	// lands at core word 0x4000 — its real address, no off-screen redirect. Phase 4's
-	// scanout reads it from SAR1 like everything else.
-	c.core.writeword(uint32(c.memPos>>1), w)
+	// The 0x4400 raster burst is the 1-bit GRID DITHER. We render the graticule
+	// from the firmware's VECTOR content (box + dotted lines), not this dither (it
+	// time-averages to a faint CRT glow; as hard stripes it's inaccurate), so it is
+	// intentionally NOT mirrored into the core. Mirroring it also wrapped the second
+	// burst into the content page (words < 0x4000), painting garbage in the rows
+	// above the graph — gone now that the grid stays in the legacy bgVram plane only.
 	c.memPos += 2
 	c.PaintWords++
 	// Each WPR-triggered raster burst is exactly 16384 words (see the 8593

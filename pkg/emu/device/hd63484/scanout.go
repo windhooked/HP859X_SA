@@ -64,20 +64,17 @@ func (c *Chip) RenderCore() *image.RGBA {
 		// Map output row to a core content row (CRT stretch: VisibleHeight→DisplayHeight).
 		coreRow := y * VisibleHeight / DisplayHeight
 		dstBase := y * stride
-		gridRowOff := gridPageWords / int(coreMWR(c)) // +0x4000 words = +256 rows
 		for x := 0; x < DisplayWidth; x++ {
 			off := dstBase + x*4
 			corePx := coreXOrigin + x
 			var col color.RGBA
-			content := c.coreBit(coreRow, corePx)
-			inGraph := coreRow >= graphCoreRowTop && coreRow <= graphCoreRowBot &&
-				corePx >= graphCorePxL && corePx <= graphCorePxR
-			switch {
-			case content:
-				col = fgColor // bright foreground (box/trace/text)
-			case inGraph && c.coreBit(coreRow+gridRowOff, corePx):
-				col = bgPaintColor // dim recessive grid (superimposed page)
-			default:
+			// The graticule is the firmware's VECTOR content (box + dotted grid
+			// lines). The 0x4400 raster page is a 1-bit DITHER that time-averages to
+			// a faint CRT glow — rendering it as hard vertical stripes is inaccurate,
+			// so it is intentionally NOT superimposed (decision: suppress entirely).
+			if c.coreBit(coreRow, corePx) {
+				col = fgColor // bright foreground (box/dotted grid/trace/text)
+			} else {
 				col = color.RGBA{0, 0, 0, 0xFF}
 			}
 			pix[off] = col.R
