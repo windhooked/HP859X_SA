@@ -86,6 +86,13 @@ func (c *Chip) writeRegister(reg, value uint16) {
 		c.penY = int(int16(value))
 	case PRColor:
 		c.colorReg = value
+	case PRMemWidth: // 0x04 — really the area-op MASK register (MAME: WPR 0x04)
+		c.maskReg = value
+	case PRMARLow: // 0x0C — Read/Write Pointer High: bank select + high byte
+		c.rwpDn = int((value & 0xc000) >> 14)
+		c.rwp[c.rwpDn] = (c.rwp[c.rwpDn] & 0x00fff) | ((uint32(value) & 0x00ff) << 12)
+	case PRMARHigh: // 0x0D — Read/Write Pointer Low: low 12 bits
+		c.rwp[c.rwpDn] = (c.rwp[c.rwpDn] & 0xff000) | ((uint32(value) & 0xfff0) >> 4)
 	}
 }
 

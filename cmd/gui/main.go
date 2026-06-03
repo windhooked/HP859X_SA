@@ -56,6 +56,37 @@ func saveScreen(m *machine.Machine) string {
 	if err := png.Encode(f, img); err != nil {
 		return "encode error: " + err.Error()
 	}
+	// Also dump the captured HD63484 command-FIFO stream (16-bit words, hex, one
+	// per line) so the draw/clear commands behind the current screen can be
+	// decoded. Prefer the armed LINEAR capture (Ctrl+R, records a transition from
+	// the arm point); fall back to the steady-state ring (last 16K words).
+	trace := m.MMIO.Display.Chip.CmdCapture()
+	kind := "capture"
+	if len(trace) == 0 {
+		trace, kind = m.MMIO.Display.Chip.CmdTrace(), "ring"
+	}
+	// Dump AR-addressed control-register writes (RAR/MWR/SAR display-window
+	// switches etc.) captured during the armed window — these never appear in the
+	// command-FIFO stream.
+	if ctrl := m.MMIO.Display.Chip.CtrlCapture(); len(ctrl) > 0 {
+		cpath := fmt.Sprintf("screens/crt_%s_ctrl.txt", ts)
+		if cf, cerr := os.Create(cpath); cerr == nil {
+			for _, p := range ctrl {
+				fmt.Fprintf(cf, "AR=%02x %04x\n", p[0]&0xff, p[1])
+			}
+			cf.Close()
+		}
+	}
+	if len(trace) > 0 {
+		tpath := fmt.Sprintf("screens/crt_%s.txt", ts)
+		if tf, terr := os.Create(tpath); terr == nil {
+			for _, w := range trace {
+				fmt.Fprintf(tf, "%04x\n", w)
+			}
+			tf.Close()
+			return fmt.Sprintf("saved %s + %s (%d cmd words, %s; +ctrl)", path, tpath, len(trace), kind)
+		}
+	}
 	return "saved " + path
 }
 
@@ -172,6 +203,13 @@ func (g *game) Update() error {
 		if inpututil.IsKeyJustPressed(ebiten.KeyS) {
 			g.lastMsg = saveScreen(g.m)
 		}
+		// Ctrl+R: arm a one-shot linear capture of the HD63484 command stream —
+		// press it just before an event (e.g. the Enter that renders CAL DISP;) so
+		// the transition's draw/clear commands are recorded, then Ctrl+S dumps them.
+		if inpututil.IsKeyJustPressed(ebiten.KeyR) {
+			g.m.MMIO.Display.Chip.StartCmdCapture(262144)
+			g.lastMsg = "cmd capture armed — do the action, then Ctrl+S"
+		}
 	}
 
 	// ── Front-panel matrix path (IRQ3) ────────────────────────────────────────
@@ -260,6 +298,11 @@ func main() {
 	m.CPU.Reset()
 	m.SweepDrive = true
 	m.MMIO.SweepActive = true
+
+	// Capture the last N HD63484 command-FIFO words so Ctrl+S dumps the live draw
+	// stream (e.g. the CAL DISP; cal-display render) next to the screenshot, for
+	// offline decoding of which clear/draw commands the firmware issues.
+	m.MMIO.Display.Chip.EnableCmdTrace(16384)
 
 	g := &game{
 		m:  m,

@@ -26,6 +26,13 @@ import "fmt"
 // to a tallied record so a probe run can capture the full stream. TEMP.
 var probeNoPanic = false
 
+// SetProbeNoPanic toggles the command-position faithfulness panic for diagnostic
+// probes that drive command execution (which may emit display opcodes we don't
+// yet model). When true, unmodelled command-position opcodes are tallied/dropped
+// instead of panicking, so a probe can run a full HP-IB command end-to-end. Do
+// NOT use in production paths — the panic is the faithfulness contract.
+func SetProbeNoPanic(v bool) { probeNoPanic = v }
+
 var allowedUnmodeled = map[string]string{
 	// ── AR control registers (store-only value latches) ───────────────────────
 	// The 8593 drives a 1-bit monochrome CRT; our drawing engine renders a single
@@ -92,20 +99,52 @@ func (c *Chip) gate(key, format string, args ...interface{}) bool {
 // no control-register access is ever silently mis-parsed as a draw command.
 func (c *Chip) writeControlReg(ar, value uint16) {
 	c.ctrlRegs[ar&0xFF] = value
+	if c.cmdCapOn && len(c.ctrlCap) < cap(c.ctrlCap) {
+		c.ctrlCap = append(c.ctrlCap, [2]uint16{ar, value})
+	}
+	// Control-register file, ported from MAME hd63484.cpp video_registers_w. The
+	// Memory-Width and Start-Address registers are banked: bank = (ar & 0x18) >> 3
+	// (0xC2→0, 0xCA→1, 0xD2→2, 0xDA→3 for MWR; 0xC4/0xC6→0 … 0xDC/0xDE→3 for SAR).
 	switch ar {
-	case 0xC8: // RAR1 — base raster/read address (display start; page-flip)
-		c.dispRAR = value
-	case 0xCA: // MWR1 — base memory width (words per raster line)
-		c.dispMWR = value
-	case 0xCC: // SAR1 high — base start address
-		c.dispSARHi = value
-	case 0xCE: // SAR1 low
-		c.dispSARLo = value
+	case 0x02: // Control register / IRQ (CCR) — stored only
+	case 0x04: // Operation Mode Register
+		c.omr = value
+	case 0x06: // Display Control Register
+		c.dcr = value
+	case 0x82, 0x84, 0x86, 0x88, 0x92, 0x94, 0x96: // sync / display / window — stored only
+	case 0x8A: // Split Screen Width 1
+		c.sp[1] = value & 0x0fff
+	case 0x8C: // Split Screen Width 0
+		c.sp[0] = value & 0x0fff
+	case 0x8E: // Split Screen Width 2
+		c.sp[2] = value & 0x0fff
+	case 0xC2, 0xCA, 0xD2, 0xDA: // Memory Width Registers (pitch, words/line)
+		bank := (ar & 0x18) >> 3
+		c.mwr[bank] = value & 0x0fff
+		if bank == 1 {
+			c.dispMWR = c.mwr[1]
+		}
+	case 0xC4, 0xCC, 0xD4, 0xDC: // Start Address Register, high (bits 16-19)
+		bank := (ar & 0x18) >> 3
+		c.sar[bank] = (uint32(value&0x000f) << 16) | (c.sar[bank] & 0xffff)
+		if bank == 1 {
+			c.dispSARHi = value
+		}
+	case 0xC6, 0xCE, 0xD6, 0xDE: // Start Address Register, low (bits 0-15)
+		bank := (ar & 0x18) >> 3
+		c.sar[bank] = (uint32(value) & 0xffff) | (c.sar[bank] & 0xf0000)
+		if bank == 1 {
+			c.dispSARLo = value
+		}
+	case 0xC0, 0xC8, 0xD0, 0xD8: // Raster Address Registers (RAR0-3) — latch
+		if ar == 0xC8 {
+			c.dispRAR = value
+		}
 	default:
-		// Store-only control register: faithful as a value latch, but its
-		// side-effect (if any) is not modelled. Permitted only if explicitly
-		// allowlisted with a reason; otherwise panic.
+		// Remaining AR registers (cursors, light pen, zoom, etc.) — stored in
+		// ctrlRegs above; no display side-effect modelled. Permitted as a faithful
+		// latch under the strict gate.
 		c.gate(fmt.Sprintf("ar:0x%02x", ar),
-			"control-register write AR=%#04x value=%#04x (side-effect not modelled)", ar, value)
+			"control-register write AR=%#04x value=%#04x (latched, side-effect not modelled)", ar, value)
 	}
 }

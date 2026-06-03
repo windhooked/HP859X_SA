@@ -147,6 +147,11 @@ type decoder struct {
 	// CLR working storage.
 	clrData uint16
 	clrDX   int
+	// areaCR/isArea capture an in-flight 0x5C00-family SCLR (the real
+	// RWP-addressed area fill): areaCR is the command word (logical-op + mode
+	// bits), isArea routes stCLRDY to execClear instead of the legacy drawFilledRect.
+	areaCR uint16
+	isArea bool
 
 	// Polyline working storage (APLL/RPLL): remaining vertex count and whether
 	// the coordinates are relative (RPLL) or absolute (APLL).
@@ -272,6 +277,13 @@ func (dec *decoder) feed(c *Chip, w uint16) {
 		// data=0 means "clear to dark"; non-zero means "fill lit". Real
 		// hardware uses the fill word as a pattern, but the firmware only
 		// uses 0/all-ones, so a binary lit/dark mapping is faithful.
+		if dec.isArea {
+			// Real RWP-addressed SCLR: pattern=clrData, ΔX=clrDX, ΔY=w.
+			c.execClear(dec.areaCR, dec.clrData, int16(dec.clrDX), int16(w))
+			dec.isArea = false
+			dec.st = stCmd
+			break
+		}
 		dy := int(int16(w))
 		ex := c.penX + dec.clrDX
 		ey := c.penY + dy
@@ -416,22 +428,16 @@ func (dec *decoder) dispatchCmd(c *Chip, w uint16) {
 		dec.st = stPolyCount
 		return
 	}
-	// SCLR (selective clear, 0x5C00 | logical-op in low 3 bits): 3-word
-	// parameter layout (fill word, ΔX, ΔY). Frame it (consume 3) so the stream
-	// stays in sync — 0x5C02 was a desync source — but do NOT render it: the
-	// region coords are ORG-relative (which we don't apply yet), so drawing it
-	// would land in the wrong place. Consume-only via the skip counter.
-	if w&0xFFF8 == 0x5C00 {
-		// SCLR-area (0x5C00 | logical-op). Params: pattern, ΔX, ΔY. The pattern
-		// word is a 50%-dither (0x5555/0xAAAA) and the firmware uses this as a
-		// PATTERNED FILL (background dither / dotted gridlines), NOT a clear-to-
-		// dark: applying it as a region clear erases the trailing characters of
-		// labels (verified empirically). Faithful rendering of the dither into the
-		// dim background plane is a separate task; until then frame it (consume 3)
-		// so the stream stays in sync. Recognised-but-stubbed (cmd:sclr-area).
-		c.gate("cmd:sclr-area", "command SCLR-area %#04x (patterned fill, 3 args; framed but not rendered)", w)
-		dec.skipN = 3
-		dec.st = stSkip
+	// SCLR (0x5C00 | logical-op in low 2 bits) — the real HD63484 selective area
+	// clear/fill (MAME). Params: pattern, ΔX, ΔY. It writes WORD-granular at the
+	// Read/Write Pointer (WPR 0x0C/0x0D), MWR words per raster line, applying the
+	// pattern through the logical op (cr&3) under maskReg. The cal-data display
+	// (CAL DISP;) repaints the screen with this (`5c02 5555 ΔX 00d1`). Collected
+	// via the CLR states; stCLRDY dispatches execClear (see area_ops.go).
+	if w&0xFFFC == 0x5C00 {
+		dec.areaCR = w
+		dec.isArea = true
+		dec.st = stCLRData
 		return
 	}
 	// Strict exact-match dispatch. The family-mask approach (each top-6-
@@ -482,7 +488,8 @@ func (dec *decoder) dispatchCmd(c *Chip, w uint16) {
 		dec.st = stPAINTSeed
 	case cmdSCLR, 0xF401: // 0xF400 / 0xF401 — SCLR without/with attr
 		dec.st = stSCLRArg
-	case cmdCLR, 0xF001: // 0xF000 / 0xF001 — CLR without/with attr
+	case cmdCLR, 0xF001: // 0xF000 / 0xF001 — CLR without/with attr (legacy path)
+		dec.isArea = false
 		dec.st = stCLRData
 	case cmdCPY, 0xF801, cmdSCPY, 0xFC01:
 		c.gate("cmd:cpy", "command CPY/SCPY %#04x (area copy, 4 args; consumed but not performed)", w)

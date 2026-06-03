@@ -125,6 +125,20 @@ type Chip struct {
 	dispSARHi uint16 // AR 0xCC — base start address, high word
 	dispSARLo uint16 // AR 0xCE — base start address, low word
 
+	// HD63484 control-register file (ported from MAME video_registers_w). The
+	// display is split into up to four vertical layers, each scanned from its own
+	// Start Address Register sar[layer] (20-bit word address) at mwr[layer] words
+	// per line — draw_graphics_line: srcWord = sar[layer] + line*mwr[layer]. The
+	// firmware PAGE-FLIPS / switches modes by re-pointing SAR; that is the
+	// mechanism the cal-data display (CAL DISP;) uses to replace the spectrum
+	// screen. omr/dcr are the operation-mode and display-control registers; sp[]
+	// are the split-screen heights.
+	sar [4]uint32 // Start Address Registers (banks via AR 0xC4/0xCC/0xD4/0xDC + 0xC6/.../0xDE)
+	mwr [4]uint16 // Memory Width Registers (pitch, words/line) — AR 0xC2/0xCA/0xD2/0xDA
+	omr uint16    // Operation Mode Register — AR 0x04
+	dcr uint16    // Display Control Register — AR 0x06
+	sp  [3]uint16 // Split-screen widths SP0/SP1/SP2 — AR 0x8C/0x8A/0x8E
+
 	// ctrlRegs is the full AR-addressed control-register file. Control-register
 	// writes (AR≠0) are decoded here rather than mis-fed to the command parser.
 	// Registers whose side-effects we faithfully model have explicit handlers in
@@ -193,6 +207,17 @@ type Chip struct {
 	// subsequent raster-burst or area commands start from this address.
 	marLow, marHigh uint16
 
+	// HD63484 Read/Write Pointer engine (the chip's memory-address logic for the
+	// word-granular area ops CLR/SCLR, distinct from the pen used by line/rect
+	// drawing). Per MAME hd63484.cpp: rwp[4] are 20-bit word pointers selected by
+	// rwpDn; WPR 0x0C sets the bank + high byte, WPR 0x0D the low 12 bits. maskReg
+	// (WPR 0x04) gates which bits a logical-op area write affects. These drive the
+	// real SCLR (0x5C00) the cal-data display (CAL DISP;) uses to repaint the
+	// screen — see area_ops.go.
+	rwp     [4]uint32
+	rwpDn   int
+	maskReg uint16
+
 	// Glyph-blit colour state (captured between the WPTN header and the
 	// bitmap rows). FG is applied to bits set in the row; BG is applied to
 	// bits clear in the row (per HD63484 fill semantics). 0 means "do not
@@ -247,6 +272,27 @@ type Chip struct {
 	// for the CRT-geometry diagnostic (cmd/crtdiag) to show what origin the
 	// firmware expects the chip to add to subsequent draw coordinates.
 	OrgLog [][2]int
+
+	// cmdRing is a fixed-size circular log of the last cmdRingCap command-FIFO
+	// words fed to the parser (AR==0 path). Enabled with EnableCmdTrace(n); used
+	// to capture the live HD63484 draw stream around an event (e.g. the CAL DISP;
+	// cal-display render) for offline decoding without the full-frame firehose.
+	cmdRing    []uint16
+	cmdRingPos int
+	cmdRingHas bool // ring has wrapped (all cmdRingCap slots valid)
+
+	// cmdCap is a LINEAR capture armed on demand (StartCmdCapture): it records
+	// every command word from the arm point until full. Use it to grab a one-shot
+	// transition (e.g. the cal-display mode switch and its foreground clear) that
+	// the steady-state ring would overwrite. Separate from cmdRing.
+	cmdCap   []uint16
+	cmdCapOn bool
+
+	// ctrlCap records AR-addressed control-register writes (the addrReg≠0 path:
+	// RAR/MWR/SAR display-window registers etc.) during an armed capture, as
+	// (AR, value) pairs. The cal-data display may switch the displayed VRAM
+	// window via these, which the command-FIFO capture (cmdCap) never sees.
+	ctrlCap [][2]uint16
 }
 
 // LineRec is one captured line segment (see Chip.LineLog).
@@ -260,6 +306,67 @@ type DotRec struct{ X, Y int }
 
 // EnableDotLog turns on per-dot position capture into Chip.DotLog.
 func (c *Chip) EnableDotLog() { c.DotLog = make([]DotRec, 0, 4096) }
+
+// EnableCmdTrace arms the command-FIFO ring buffer to keep the last n words
+// written to the chip's command stream (AR==0 path). Call CmdTrace() to read
+// them back in chronological order. n<=0 disables.
+func (c *Chip) EnableCmdTrace(n int) {
+	if n <= 0 {
+		c.cmdRing = nil
+		return
+	}
+	c.cmdRing = make([]uint16, n)
+	c.cmdRingPos = 0
+	c.cmdRingHas = false
+}
+
+// recordCmd appends one command-FIFO word to the ring (called from WriteData).
+func (c *Chip) recordCmd(w uint16) {
+	if c.cmdCapOn && len(c.cmdCap) < cap(c.cmdCap) {
+		c.cmdCap = append(c.cmdCap, w)
+	}
+	if c.cmdRing == nil {
+		return
+	}
+	c.cmdRing[c.cmdRingPos] = w
+	c.cmdRingPos++
+	if c.cmdRingPos >= len(c.cmdRing) {
+		c.cmdRingPos = 0
+		c.cmdRingHas = true
+	}
+}
+
+// StartCmdCapture arms a fresh LINEAR capture of up to max command words from
+// now until full — use it to record a one-shot transition (arm just before the
+// event). Read it back with CmdCapture().
+func (c *Chip) StartCmdCapture(max int) {
+	c.cmdCap = make([]uint16, 0, max)
+	c.ctrlCap = make([][2]uint16, 0, 4096)
+	c.cmdCapOn = true
+}
+
+// CmdCapture returns the words recorded since the last StartCmdCapture (nil if
+// never armed).
+func (c *Chip) CmdCapture() []uint16 { return c.cmdCap }
+
+// CtrlCapture returns the AR-addressed control-register writes (AR,value pairs)
+// recorded since the last StartCmdCapture.
+func (c *Chip) CtrlCapture() [][2]uint16 { return c.ctrlCap }
+
+// CmdTrace returns the captured command-FIFO words in chronological order
+// (oldest first). Empty if EnableCmdTrace was never called.
+func (c *Chip) CmdTrace() []uint16 {
+	if c.cmdRing == nil {
+		return nil
+	}
+	if !c.cmdRingHas {
+		return append([]uint16(nil), c.cmdRing[:c.cmdRingPos]...)
+	}
+	out := make([]uint16, 0, len(c.cmdRing))
+	out = append(out, c.cmdRing[c.cmdRingPos:]...)
+	out = append(out, c.cmdRing[:c.cmdRingPos]...)
+	return out
+}
 
 // DispRAR returns the current RAR1 (display-start word address).
 func (c *Chip) DispRAR() uint16 { return c.dispRAR }
@@ -280,6 +387,7 @@ func New() *Chip {
 		linePattern:    0xFFFF, // solid until the firmware programs a stipple
 		orgCol:         defaultOrgCol,
 		orgRow:         defaultOrgRow,
+		maskReg:        0xFFFF, // all bits affected until WPR 0x04 narrows the mask
 	}
 	c.resetBounds()
 	c.glyphLog = newGlyphLoggerFromEnv()
@@ -417,6 +525,7 @@ func (c *Chip) WriteData(w uint16) {
 		c.addrReg += 2 // HD63484 AR auto-increment (per 16-bit word)
 		return
 	}
+	c.recordCmd(w)
 	c.dec.feed(c, w)
 }
 

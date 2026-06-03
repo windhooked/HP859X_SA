@@ -12,18 +12,24 @@ import "image"
 // bits directly. RenderFrame is a pure read of that state, so calls are
 // idempotent and reflect exactly what the firmware has painted as of the
 // most recent command word.
-// displayStartRow returns the VRAM row the display scans from, derived from the
-// HD63484 base raster/read address RAR1 (AR 0xC8) divided by the memory width
-// MWR1 (AR 0xCA, words per raster line). This is the page-flip selector: in the
-// boot the firmware sets RAR1=0 (→ row 0, the front buffer) and never changes it,
-// so the render is unchanged; if it ever re-points RAR1 at the back-buffer (e.g.
-// the word address of row 256), the display follows. Wrapped to PaintHeight.
+// displayStartRow returns the VRAM row the display scans from. Per MAME's
+// draw_graphics_line the base screen layer is scanned from the Start Address
+// Register SAR[1] (AR 0xCC:0xCE) at MWR1 words/line: srcWord = SAR[1] +
+// line*MWR1, so the first displayed row = SAR[1] / MWR1. This is the page-flip /
+// mode-switch selector — re-pointing SAR[1] swaps which buffer is shown (the
+// mechanism the cal-data display uses). Falls back to the legacy RAR1 (AR 0xC8)
+// when the firmware hasn't programmed SAR[1], so the boot (which leaves SAR[1]=0)
+// is unchanged. Wrapped to PaintHeight.
 func (c *Chip) displayStartRow() int {
 	wpr := int(c.dispMWR)
 	if wpr <= 0 {
 		wpr = PaintRowBytes / 2 // 64 words/line (1024 bits ÷ 16) default
 	}
-	row := (int(c.dispRAR) / wpr) % PaintHeight
+	src := int(c.sar[1])
+	if src == 0 {
+		src = int(c.dispRAR) // legacy fallback when SAR1 unprogrammed
+	}
+	row := (src / wpr) % PaintHeight
 	if row < 0 {
 		row += PaintHeight
 	}
