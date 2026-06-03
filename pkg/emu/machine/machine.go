@@ -126,6 +126,26 @@ type Machine struct {
 	// driveSweepCycle and docs/TRACE_DISPLAY_PATH.md "TWO-IRQ SWEEP MODEL".
 	SweepDrive bool
 	sweepAccum int // cycle accumulator that paces sweep points (see driveSweepCycle)
+
+	// Timer is the autonomous periodic-interrupt source: it synthesises the
+	// firmware's IRQ5 timer tick that real hardware (the MC68230 PIT, a zeroed
+	// stub here) raises on its own. Every driver advances the CPU through
+	// pumpTimer/RunTimed so the firmware's timer-driven delay loops (the bf12
+	// free-run counter and the befb.7 countdown, both incremented by the IRQ5
+	// ISR at ROM 0x3ECE) resolve uniformly — without each call site hand-pulsing
+	// IRQ5. See docs/HPIB_E2E_FLOW.md "CORRECTION (2026-06-02)".
+	Timer Timer
+}
+
+// Timer models the periodic IRQ5 timer-tick source. Period is the number of
+// mainline CPU cycles between ticks; ServiceCost is the cycle budget given to
+// the handler to run once asserted. accum carries the running cycle count so a
+// tick fires every whole Period regardless of how callers chunk their Run()s.
+type Timer struct {
+	Period      int  // mainline cycles between IRQ5 ticks
+	ServiceCost int  // cycles allowed for the IRQ5 handler to run
+	Enabled     bool // when false, pumpTimer is a no-op (legacy/manual driving)
+	accum       int  // executed-cycle accumulator toward the next tick
 }
 
 // New8593A creates a Machine loaded with romImage. The image must be exactly
@@ -164,6 +184,15 @@ func New8593A(romImage []byte) (*Machine, error) {
 	// write here. Backed by the MMIO's addrLatch. See device/mmio.go.
 	b.Map(0x320000, 0x10, "A16AddrLatch", mmio.AddrLatch())
 
+	// HP-IB address: the firmware loads its own HP-IB primary address from the
+	// battery-backed config at CalRAM 0x2FC000 (ROM 0x3a22: `move.b 0x2fc000,
+	// befc`), masks it to 5 bits, and programs it into the option board so the
+	// board knows which bus address to answer. On a fresh (zeroed) CalRAM that
+	// address is 0 (uninitialised), which the firmware shows as "ADDRESS 0" and
+	// which prevents HP-IB talk/listen addressing from ever matching. Seed the
+	// HP default (18) so the instrument has a valid address out of the box.
+	calRAM.Write(0, bus.Byte, uint32(DefaultHPIBAddress))
+
 	c, err := musashi.New(b)
 	if err != nil {
 		return nil, err
@@ -173,7 +202,23 @@ func New8593A(romImage []byte) (*Machine, error) {
 		Bus: b, CPU: c, ROM: rom, CalNVRAM: calNVRAM, CalRAM: calRAM,
 		ATKeyboard: atKbd, FrontPanel: fp,
 		TestRAM: testRAM, RAM: ram, MMIO: mmio,
+		Timer: Timer{Period: bootChunkCycles * bootIRQPeriod, ServiceCost: bootIRQServiceCost, Enabled: true},
 	}, nil
+}
+
+// DefaultHPIBAddress is the HP factory-default instrument HP-IB primary address
+// (18), seeded into the battery-backed config (CalRAM 0x2FC000) at construction.
+const DefaultHPIBAddress = 18
+
+// SetHPIBAddress writes the instrument's HP-IB primary address into the
+// battery-backed config (CalRAM 0x2FC000) that the firmware loads at boot
+// (befc, ROM 0x3a22). Call before booting. addr is masked to the valid 5-bit
+// HP-IB range (0–30).
+func (m *Machine) SetHPIBAddress(addr byte) {
+	m.CalRAM.Write(0, bus.Byte, uint32(addr&0x1f))
+	if m.MMIO.GPIB != nil {
+		m.MMIO.GPIB.PrimaryAddr = addr & 0x1f
+	}
 }
 
 // Boot-loop tuning (see package doc for why each is needed).
@@ -186,6 +231,47 @@ const (
 	sweepStepCost       = 400  // cycles allowed for the IRQ1 sweep-step handler to run
 	sweepCaptureCost    = 250  // cycles allowed for the IRQ6 capture handler to run
 )
+
+// pumpTimer advances the autonomous timer by ranCycles of just-executed mainline
+// CPU time, firing the IRQ5 tick (assert → service → clear) once per whole Period
+// that has elapsed. This is the single place IRQ5 is synthesised; every driver
+// funnels through it (directly or via RunTimed) so timer-driven firmware delays
+// resolve no matter how the caller chunks execution. No-op when the timer is
+// disabled.
+//
+// Servicing must give the handler real cycles to run: a bare SetIRQ with only a
+// single Step (or an immediate clear) never lets the 68000 take the autovector
+// exception, so the ISR never runs and bf12/befb never advance — the failure
+// mode that masqueraded as "the firmware is frozen". See docs/HPIB_E2E_FLOW.md.
+func (m *Machine) pumpTimer(ranCycles int) {
+	if !m.Timer.Enabled || m.Timer.Period <= 0 {
+		return
+	}
+	m.Timer.accum += ranCycles
+	for m.Timer.accum >= m.Timer.Period {
+		m.Timer.accum -= m.Timer.Period
+		m.CPU.SetIRQ(5)
+		m.CPU.Run(m.Timer.ServiceCost)
+		m.CPU.SetIRQ(0)
+	}
+}
+
+// RunTimed advances the CPU by approximately `cycles` mainline cycles while the
+// autonomous timer raises IRQ5 at its programmed period. This is the universal
+// "advance the machine" primitive — new drivers (command execution, the GUI,
+// probes) should call it instead of hand-pulsing IRQ5, which guarantees the
+// firmware's timer-wait loops keep ticking. It runs in bootChunkCycles sub-steps
+// so a long request still produces correctly-spaced ticks.
+func (m *Machine) RunTimed(cycles int) {
+	for done := 0; done < cycles; done += bootChunkCycles {
+		n := bootChunkCycles
+		if rem := cycles - done; rem < n {
+			n = rem
+		}
+		ran := m.CPU.Run(n)
+		m.pumpTimer(ran)
+	}
+}
 
 // BootToOperating runs the firmware to its operating loop using the fast path:
 // the LoopBreaker force-exits the long ROM-checksum / march-RAM-test /
@@ -231,17 +317,11 @@ func (m *Machine) BootToOperatingWithSweep(maxCycles int) {
 // SweepDrive is set it also drives the sweep interrupts (see driveSweepCycle).
 func (m *Machine) bootLoop(maxCycles int, lb *emutest.LoopBreaker) {
 	for done := 0; done < maxCycles; done += bootChunkCycles {
-		m.CPU.Run(bootChunkCycles)
+		ran := m.CPU.Run(bootChunkCycles)
 		if lb != nil {
 			lb.Check(m.CPU.Reg(cpu.PC), m.CPU.SetReg)
 		}
-
-		if (done/bootChunkCycles)%bootIRQPeriod == 0 {
-			m.CPU.SetIRQ(5)
-			m.CPU.Run(bootIRQServiceCost)
-			m.CPU.SetIRQ(0)
-		}
-
+		m.pumpTimer(ran)
 		if m.SweepDrive {
 			m.driveSweepCycle()
 		}
@@ -328,7 +408,14 @@ const OperatingTickDeepBlock = uint32(0x018ADC)
 // documented elsewhere — pair SendHPIB with DriveOperatingTick for
 // end-to-end execution.
 func (m *Machine) SendHPIB(bytes []byte, maxCycles int) int {
-	m.MMIO.HPIB.Push(bytes)
+	// Feed the option-board controller when the HP-IB option is installed
+	// (its register model owns the receive path); otherwise fall back to the
+	// TMS9914A input buffer used by the bare-instrument receive tests.
+	if m.MMIO.GPIB != nil && m.MMIO.GPIB.Installed {
+		m.MMIO.GPIB.Push(bytes)
+	} else {
+		m.MMIO.HPIB.Push(bytes)
+	}
 
 	// The IRQ4 handler at PC 0x2642 gates on `btst #0, $b05f.w` —
 	// it routes to the f160-reading data path only when b05f bit 0
@@ -342,23 +429,91 @@ func (m *Machine) SendHPIB(bytes []byte, maxCycles int) int {
 	// route) into bf05, then bc12.
 	for done := 0; done < maxCycles; done += bootChunkCycles {
 		// Inject IRQ4 if the chip has data pending.
-		if m.MMIO.HPIB.PendingInput() == 0 {
+		if m.hpibPending() == 0 {
 			break
 		}
 		m.CPU.SetIRQ(4)
 		m.CPU.Run(bootIRQServiceCost)
 		m.CPU.SetIRQ(0)
-		m.CPU.Run(bootChunkCycles)
+		ran := m.CPU.Run(bootChunkCycles)
+		// Autonomous timer ticks between IRQ4 deliveries so timer waits
+		// inside the receive/parse path advance.
+		m.pumpTimer(ran)
+	}
+	return m.hpibPending()
+}
 
-		// IRQ5 between IRQ4 ticks so timer waits inside the handler
-		// can advance.
-		if (done/bootChunkCycles)%bootIRQPeriod == 0 {
-			m.CPU.SetIRQ(5)
-			m.CPU.Run(bootIRQServiceCost)
-			m.CPU.SetIRQ(0)
-		}
+// hpibPending reports how many received HP-IB bytes are still queued in the
+// active receive buffer (option-board controller when installed, else the
+// TMS9914A).
+func (m *Machine) hpibPending() int {
+	if m.MMIO.GPIB != nil && m.MMIO.GPIB.Installed {
+		return m.MMIO.GPIB.PendingInput()
 	}
 	return m.MMIO.HPIB.PendingInput()
+}
+
+// driveHPIB runs the operating loop for maxCycles, injecting IRQ4 (HP-IB
+// service), IRQ5 (timer) and the sweep clock each chunk so the firmware's
+// receive/parse/output paths make progress. Stops early when stop() is true.
+func (m *Machine) driveHPIB(maxCycles int, stop func() bool) {
+	for done := 0; done < maxCycles; done += bootChunkCycles {
+		ran := m.CPU.Run(bootChunkCycles)
+		m.CPU.SetIRQ(4)
+		m.CPU.Run(bootIRQServiceCost)
+		m.CPU.SetIRQ(0)
+		m.pumpTimer(ran)
+		m.DriveOneSweepChunk()
+		if stop != nil && stop() {
+			return
+		}
+	}
+}
+
+// GPIBSend delivers an HP-IB program message (e.g. "CF 1.5GHZ;") to the
+// instrument as if a bus controller addressed it as listener and sent the
+// bytes, then lets the firmware parse and execute it. The option board must be
+// installed (InstallHPIB). It does not collect a response — use GPIBQuery for
+// queries. maxCycles bounds the drive time.
+func (m *Machine) GPIBSend(msg string, maxCycles int) {
+	if m.MMIO.GPIB == nil || !m.MMIO.GPIB.Installed {
+		return
+	}
+	m.MMIO.GPIB.AddressListener()
+	m.SendHPIB([]byte(msg), maxCycles/2)
+	// Let the parser/executor run to completion.
+	m.driveHPIB(maxCycles/2, func() bool { return m.hpibPending() == 0 })
+}
+
+// GPIBQuery delivers a query (e.g. "ID?") as listener, then addresses the
+// instrument as talker and collects the response the firmware emits onto the
+// HP-IB output port (captured by the option-board controller). Returns the
+// response bytes. The option board must be installed.
+func (m *Machine) GPIBQuery(query string, maxCycles int) []byte {
+	if m.MMIO.GPIB == nil || !m.MMIO.GPIB.Installed {
+		return nil
+	}
+	m.MMIO.GPIB.ResetTX()
+
+	// Stage 1: addressed as listener, send the query text; let it parse.
+	m.MMIO.GPIB.AddressListener()
+	m.SendHPIB([]byte(query), maxCycles/3)
+	m.driveHPIB(maxCycles/3, func() bool { return m.hpibPending() == 0 })
+
+	// Stage 2: addressed as talker — the firmware should format and drain the
+	// response onto the output port. Drive until output stops growing.
+	m.MMIO.GPIB.AddressTalker()
+	last, stable := 0, 0
+	m.driveHPIB(maxCycles/3, func() bool {
+		n := len(m.MMIO.GPIB.TX())
+		if n == last {
+			stable++
+		} else {
+			stable, last = 0, n
+		}
+		return n > 0 && stable > 8 // output settled
+	})
+	return m.MMIO.GPIB.TX()
 }
 
 // DriveOperatingTick pre-arms the RAM flags that the operating tick's
@@ -434,12 +589,8 @@ func (m *Machine) DriveOperatingTickUntil(pred func() bool, maxCycles int) (pc u
 
 	m.CPU.SetReg(cpu.PC, OperatingTickDeepBlock)
 	for done := 0; done < maxCycles; done += bootChunkCycles {
-		m.CPU.Run(bootChunkCycles)
-		if (done/bootChunkCycles)%bootIRQPeriod == 0 {
-			m.CPU.SetIRQ(5)
-			m.CPU.Run(bootIRQServiceCost)
-			m.CPU.SetIRQ(0)
-		}
+		ran := m.CPU.Run(bootChunkCycles)
+		m.pumpTimer(ran)
 		if pred != nil && pred() {
 			return m.CPU.Reg(cpu.PC), done + bootChunkCycles
 		}
@@ -483,12 +634,8 @@ func (m *Machine) DriveOperatingTickUntil(pred func() bool, maxCycles int) (pc u
 func (m *Machine) ForceOperatingTick(maxCycles int) uint32 {
 	m.CPU.SetReg(cpu.PC, OperatingTickEntry)
 	for done := 0; done < maxCycles; done += bootChunkCycles {
-		m.CPU.Run(bootChunkCycles)
-		if (done/bootChunkCycles)%bootIRQPeriod == 0 {
-			m.CPU.SetIRQ(5)
-			m.CPU.Run(bootIRQServiceCost)
-			m.CPU.SetIRQ(0)
-		}
+		ran := m.CPU.Run(bootChunkCycles)
+		m.pumpTimer(ran)
 	}
 	return m.CPU.Reg(cpu.PC)
 }
@@ -520,14 +667,9 @@ func (m *Machine) PressKeyMatrix(matrix [6]byte, maxCycles int) bool {
 
 	lb := emutest.NewLoopBreaker(bootBreakThresh)
 	for done := 0; done < maxCycles; done += bootChunkCycles {
-		m.CPU.Run(bootChunkCycles)
+		ran := m.CPU.Run(bootChunkCycles)
 		lb.Check(m.CPU.Reg(cpu.PC), m.CPU.SetReg)
-
-		if (done/bootChunkCycles)%bootIRQPeriod == 0 {
-			m.CPU.SetIRQ(5)
-			m.CPU.Run(bootIRQServiceCost)
-			m.CPU.SetIRQ(0)
-		}
+		m.pumpTimer(ran)
 		if m.FrontPanel.Consumed() {
 			return true
 		}

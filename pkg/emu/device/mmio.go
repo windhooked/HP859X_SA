@@ -176,6 +176,12 @@ type HP8593AMMIO struct {
 	// the IRQ4 handler when HP-IB activity occurs. See tms9914a.go.
 	HPIB *TMS9914A
 
+	// GPIB is the Option 041 "GPIB + Parallel" I/O-board model (the smart
+	// option-board microcontroller at 0xFFF100–0xFFF160). It owns the HP-IB
+	// receive/transmit/addressing register contract; installed by InstallHPIB.
+	// See gpib.go + docs/HPIB_E2E_FLOW.md.
+	GPIB *GPIBController
+
 	// HPIBTx, if non-nil, is called whenever the firmware writes a data byte
 	// to the secondary HP-IB output register at 0xFFF122 (separate from the
 	// TMS9914A CDOR at 0x60E — the real firmware TX path is through the parallel
@@ -217,6 +223,13 @@ type HP8593AMMIO struct {
 	// default — the option is not installed, matching the bare instrument and
 	// keeping the golden-screen boot unaffected. Set via InstallHPIB().
 	HPIBInstalled bool
+
+	// f160Override forces the option-board status register (0xFFF160) to a fixed
+	// value when f160OverrideOn — a diagnostic hook for cmd/caldump to sweep the
+	// status the option-board I/O microcontroller reports, identifying the talker-
+	// addressed status the firmware needs to open the query-response path.
+	f160Override   byte
+	f160OverrideOn bool
 
 	// addrLatch is the A16 write-address diagnostic latch read back at
 	// 0x320000. The POST address-decoder test (ROM 0x4AA0) writes 0x2555 to
@@ -280,9 +293,20 @@ func (m *HP8593AMMIO) readSweepADC() uint16 {
 // I/O-board descriptor byte at 0xFFF11E = 4 (so bf09 = 4 = HP-IB mode) and arms
 // the option-board serial-chip handshake model (0xFFF148 = always-ready). Call
 // before booting. See the HPIBInstalled field.
+// SetF160Override forces the 0xFFF160 option-board status read to v while on is
+// true (diagnostic; see f160Override).
+func (m *HP8593AMMIO) SetF160Override(v byte, on bool) {
+	m.f160Override = v
+	m.f160OverrideOn = on
+}
+
 func (m *HP8593AMMIO) InstallHPIB() {
 	m.HPIBInstalled = true
 	m.b[0x11E] = 0x04 // I/O-board descriptor: HP-IB option present
+	if m.GPIB == nil {
+		m.GPIB = NewGPIBController()
+	}
+	m.GPIB.Installed = true
 }
 
 // ResetSweep rewinds the detector position to the start of the sweep (sweep
@@ -296,7 +320,7 @@ func (m *HP8593AMMIO) ResetSweep() {
 
 // NewHP8593AMMIO returns an initialised MMIO stub with an attached SCIDisplay.
 func NewHP8593AMMIO() *HP8593AMMIO {
-	m := &HP8593AMMIO{Display: NewSCIDisplay(), HPIB: NewTMS9914A(), Sweep: NewSweepEngine()}
+	m := &HP8593AMMIO{Display: NewSCIDisplay(), HPIB: NewTMS9914A(), GPIB: NewGPIBController(), Sweep: NewSweepEngine()}
 
 	// SCI/display controller: pre-assert all ready bits so every firmware
 	// polling pattern (bits 0, 1, and 2) returns immediately.
@@ -380,35 +404,28 @@ func (m *HP8593AMMIO) Read(addr uint32, sz bus.Size) uint32 {
 	// will receive them via this hardware path (which is how the
 	// 8593A wires up HP-IB inside the box).
 	if sz == bus.Byte {
-		switch addr {
-		case 0x160:
-			// Report bits 0+1 set when bytes are pending.
-			if m.HPIB.PendingInput() > 0 {
-				return 0x03
+		// The f160 diagnostic override (cmd/caldump status sweep) wins.
+		if addr == 0x160 && m.f160OverrideOn {
+			return uint32(m.f160Override)
+		}
+		// Delegate the option-board register range (0x120–0x160) to the
+		// GPIBController model when the HP-IB option is installed.
+		if m.GPIB != nil && m.GPIB.Installed && addr >= 0x120 && addr <= 0x160 {
+			if v, ok := m.GPIB.ReadReg(addr); ok {
+				return v
 			}
-			return 0
-		case 0x140:
-			// Pop one byte from the chip's input buffer when read.
-			return uint32(m.HPIB.ReadByte(0xE)) // chip's DIR
-		case 0x142:
-			// Option-board HP-IB data-in register. The IRQ4 handler reads
-			// received command bytes from here when the HP-IB option is
-			// installed (bf09=4, ROM 0x2226). Route to the same input buffer
-			// the SendHPIB/Push API feeds.
-			if m.HPIBInstalled {
+		} else {
+			// Bare-instrument fallback (option NOT installed): the original
+			// TMS9914A-backed receive path used by the chip-level receive
+			// tests — 0x160 reports data-pending, 0x140 pops the input buffer.
+			switch addr {
+			case 0x160:
+				if m.HPIB.PendingInput() > 0 {
+					return 0x03
+				}
+				return 0
+			case 0x140:
 				return uint32(m.HPIB.ReadByte(0xE))
-			}
-		case 0x148:
-			// Option-board serial-interface chip status. The boot init
-			// handshake (ROM 0x3004+) writes command bytes here and polls two
-			// status bits: bit 0 = "ready/ack" (polls wait for it SET, e.g.
-			// 0x300A: `#1 & f148; bne`), bit 1 = "busy" (polls wait for it
-			// CLEAR, e.g. 0x3070: `#2 & f148; cmp #2; bne`). Returning 0x01
-			// (bit 0 set, bit 1 clear) satisfies BOTH poll types, so the chip
-			// always reads "ready, not busy" and the handshake completes.
-			// Only when the option is installed — else fall through (returns 0).
-			if m.HPIBInstalled {
-				return 0x01
 			}
 		}
 	}
@@ -533,12 +550,16 @@ func (m *HP8593AMMIO) Write(addr uint32, sz bus.Size, val uint32) {
 		m.HPIB.WriteByte(addr-0x600, byte(val))
 	}
 
-	// HP-IB output data registers (secondary parallel interface at 0x120–0x12F).
-	// 0xFFF122 is the actual data-byte output port the firmware uses to send
-	// HP-IB response bytes (ID?, CF?, CAL DUMP, etc.) — distinct from TMS9914A
-	// CDOR. 0xFFF120 carries control/mode bytes.
-	if addr == 0x122 && sz == bus.Byte && m.HPIBTx != nil {
-		m.HPIBTx(byte(val))
+	// Option-board register writes (0x120–0x160): the firmware writes outgoing
+	// HP-IB response bytes to the data ports (0x120 in the IRQ output-drain at
+	// ROM 0x2340, 0x122 in the alt path) plus command/clear strobes. Delegate
+	// to the GPIBController, which captures the genuine response stream.
+	if m.GPIB != nil && m.GPIB.Installed && sz == bus.Byte && addr >= 0x120 && addr <= 0x160 {
+		if m.GPIB.WriteReg(addr, byte(val)) {
+			if (addr == 0x120 || addr == 0x122) && m.HPIBTx != nil {
+				m.HPIBTx(byte(val)) // legacy hook (diagnostics)
+			}
+		}
 	}
 }
 

@@ -1,5 +1,21 @@
 # DriveOperatingTick — Rev L Verification (skip rationale)
 
+> ## ✅ 2026-06-02 — CORRECTED: the parser/0x18F3E IS reached; commands DO execute
+>
+> The core claim below — that the operating tick's parser dispatch at PC `0x18F3E`
+> (slot `0x69A` → `fcn.58C2E`) is "never reached", so HP-IB commands never execute —
+> is **WRONG for the live, sweep-driven operating level**. Verified strictly natural
+> (no forced PC), `cmd/caldump` pre-flight + `cmd/gdbserver -operating -hpib`:
+> after `BootToOperatingWithSweep` + an **LF-terminated** command, the gdb-`continue`
+> loop (single-step + IRQ5) reaches `0x18F3E` and `fcn.58C2E`, consumes the whole
+> command (`bc12` read-idx 0→8), runs the lookup `fcn.320fe` (×18) + DLP dispatch
+> (×578), and executes **2034** command-handler PCs. The earlier "never reached"
+> finding was an artifact of (a) `;`-terminated commands (wrong terminator — must be
+> LF/0x0A) and (b) the forced-PC `DriveOperatingTick` substitute, which lacks the
+> live operating-loop context the DLP dispatch needs. Full writeup:
+> docs/HPIB_E2E_FLOW.md § "THE BUS RESPONDS". The skip rationale below is retained
+> for history but is superseded for the HP-IB command path.
+
 > ## ⚠ 2026-05-29 — Path B finding REFRAMES this whole blocker
 >
 > The long-run integration probe (`cmd/naturalkey`, the "Path B" approach

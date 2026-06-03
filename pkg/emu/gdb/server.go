@@ -225,8 +225,25 @@ func (s *Server) monitor(hexCmd string) string {
 				return monMsg(fmt.Sprintf("pulsed IRQ%d\n", lvl))
 			}
 		}
+	case "hpib":
+		// Deliver an HP-IB command over the real receive path (controller
+		// addresses the instrument as listener, sends LF-terminated bytes via
+		// IRQ4 → bc12 FIFO). Then `continue` to see if the live operating loop
+		// drains + executes it. Installs the Option 041 board on first use.
+		if s.m.MMIO.GPIB == nil || !s.m.MMIO.GPIB.Installed {
+			s.m.MMIO.InstallHPIB()
+		}
+		cmd := strings.TrimSpace(strings.Join(fields[1:], " "))
+		if cmd == "" {
+			return monMsg("usage: monitor hpib <command>  (LF appended = the HP-IB terminator)\n")
+		}
+		s.m.MMIO.GPIB.AddressListener()
+		pending := s.m.SendHPIB([]byte(cmd+"\n"), 5_000_000)
+		return monMsg(fmt.Sprintf("sent %q+LF; chip-pending=%d; bc12 read/write idx=%04X/%04X — now `continue` and watch fcn.320FE / parser 0x58C2E\n",
+			cmd, pending,
+			s.m.Bus.Read(0xFFBC26, bus.Word), s.m.Bus.Read(0xFFBC28, bus.Word)))
 	}
-	return monMsg("unknown monitor command\n")
+	return monMsg("unknown monitor command (boot <cycles> | irq <n> | hpib <cmd>)\n")
 }
 
 // fastForward runs the firmware with the LoopBreaker + periodic IRQ5, the way

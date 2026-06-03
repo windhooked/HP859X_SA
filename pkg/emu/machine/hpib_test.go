@@ -5,6 +5,7 @@ import (
 
 	"github.com/windhooked/HP859X_SA/pkg/emu/bus"
 	"github.com/windhooked/HP859X_SA/pkg/emu/device"
+	"github.com/windhooked/HP859X_SA/pkg/emu/machine"
 )
 
 // TestHPIBChipPresent verifies the TMS9914A chip is attached to the
@@ -265,5 +266,81 @@ func TestHPIBNaturalDispatchReachesFcn1D58(t *testing.T) {
 	bbbcAfter := m.Bus.Read(0xFFBBBC, bus.Word)
 	if bbbcAfter < bbbc+1 {
 		t.Errorf("bbbc regressed from %#04X to %#04X after IRQ4 ticks", bbbc+1, bbbcAfter)
+	}
+}
+
+// TestGPIBControllerInstalled verifies the option-board controller is wired in
+// when InstallHPIB is called and owns the receive path (no firmware boot — a
+// fast structural check that the device.GPIBController is attached and active).
+func TestGPIBControllerInstalled(t *testing.T) {
+	m := newMachine(t)
+	m.MMIO.InstallHPIB()
+	if m.MMIO.GPIB == nil || !m.MMIO.GPIB.Installed {
+		t.Fatalf("InstallHPIB did not install the GPIBController")
+	}
+	// SendHPIB routes through the controller's receive buffer.
+	m.MMIO.GPIB.Push([]byte("ID?"))
+	if got := m.MMIO.GPIB.PendingInput(); got != 3 {
+		t.Errorf("controller PendingInput = %d, want 3", got)
+	}
+}
+
+// TestGPIBQueryIDRoundTrip is the end-to-end acceptance test: install the
+// option, boot, GPIBQuery("ID?"), and expect the firmware's own formatters to
+// emit a non-empty response.
+//
+// SKIPPED — but the blocker is now NARROW and localized (2026-06-02). The
+// GPIBController + GPIBQuery API + the HP-IB address fix (DefaultHPIBAddress=18,
+// seeded into CalRAM 0x2FC000) have moved this most of the way:
+//   - the instrument now has a valid HP-IB address (18, not the uninitialised 0
+//     that prevented all addressing — it even rendered "HP-IB ADRS: 0");
+//   - the operating loop fcn.18568 IS live during sweep mode (it runs the C UI
+//     loop continuously);
+//   - with the address valid, b1f8 bit12 (HP-IB has work) sets naturally, and
+//     with the sweep quieted (so befa bit13 doesn't keep diverting the loop to
+//     sweep processing — fcn.11da8) the loop REACHES the HP-IB service:
+//     0x18942 gate → 0x18968 → jsr 0x358 → fcn.3c7d4 (the HP-IB command
+//     processor) all execute (cmd/caldump).
+// The ONE remaining piece: the addressing-command path that makes fcn.3c7d4
+// commit the talk-address into a480 (ROM 0x3c828) so b1ee←a480 yields the
+// talker state — i.e. delivering the MTA (My-Talk-Address) through the
+// option-board command path, plus time-sharing the loop between sweep and
+// HP-IB. Full trail: docs/HPIB_E2E_FLOW.md (§ controller + § address fix).
+func TestGPIBQueryIDRoundTrip(t *testing.T) {
+	t.Skip("Multi-session subsystem under Rev L. DONE: HP-IB address fix " +
+		"(DefaultHPIBAddress=18), live operating loop reaches the HP-IB service, " +
+		"the option-board addressing-command path (fcn.2444→0x2580→bef7 talk flag) " +
+		"is traced + exercised. CORRECTION (2026-06-02): the ROM 0x58C98 'talker " +
+		"gate' (b1ee=0x60/0x61 + bc64.13) is the DLP-variable-EDIT path (set by " +
+		"fcn.59718, strings 'EDITNAME'/'Edit item'), NOT the simple-query output " +
+		"path — and bus addressing (bef7) is decoupled from it. So ID?/CAL DUMP " +
+		"output routes via a separate command-handler mechanism still to be located. " +
+		"See docs/HPIB_E2E_FLOW.md.")
+
+	m := newMachine(t)
+	m.MMIO.InstallHPIB()
+	m.MMIO.SweepActive = true
+	m.SweepDrive = true
+	m.BootToOperatingWithSweep(250_000_000)
+
+	resp := m.GPIBQuery("ID?", 30_000_000)
+	if len(resp) == 0 {
+		t.Errorf("GPIBQuery(\"ID?\") returned no response bytes")
+	}
+}
+
+// TestHPIBAddressDefault verifies the instrument boots with a valid HP-IB
+// primary address (the HP default 18) rather than the uninitialised 0 that
+// blocked all HP-IB addressing. The address is loaded by the firmware from the
+// battery-backed config at CalRAM 0x2FC000 (ROM 0x3a22 → befc).
+func TestHPIBAddressDefault(t *testing.T) {
+	if testing.Short() {
+		t.Skip("250M-cycle boot is slow; skipped under -short")
+	}
+	m := newMachine(t)
+	m.MMIO.InstallHPIB()
+	m.BootToOperatingWithSweep(250_000_000)
+	if befc := byte(m.Bus.Read(0xFFBEFC, bus.Byte)); befc != machine.DefaultHPIBAddress {
+		t.Errorf("HP-IB address (befc) = %d, want %d", befc, machine.DefaultHPIBAddress)
 	}
 }
