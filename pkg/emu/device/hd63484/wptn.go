@@ -77,6 +77,15 @@ func (dec *decoder) feedGlyph(c *Chip, w uint16) {
 // clear must come from a separate mechanism (likely partial raster bursts
 // at MAR addresses other than 0x4000/0x0000, which we don't model yet).
 func (c *Chip) blitGlyph(rows [glyphRows]uint16, fg, bg uint16) {
+	// In Colorized mode glyphs land in the dedicated text plane (white, never
+	// dithered). In mono they stay in vram: the SCLR's per-cycle graph dither
+	// clears them to the dim background and they redraw solid, so they read as
+	// crisp (not prominently dithered) without the text-plane machinery.
+	if c.Colorized {
+		prev := c.activePlane
+		c.activePlane = &c.textPlane
+		defer func() { c.activePlane = prev }()
+	}
 	// Suppress the residual early-boot glyph the firmware blits at the exact
 	// drawing origin (0,0). With ORG_row=256 and displayScanStart=23 the ORG
 	// origin maps to VRAM row 256 — just below the visible window (rows 23..278),

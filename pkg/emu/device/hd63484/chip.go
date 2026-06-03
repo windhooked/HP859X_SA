@@ -65,6 +65,13 @@ const (
 var (
 	fgColor      = color.RGBA{R: 0xFF, G: 0xB0, B: 0x00, A: 0xFF}
 	bgPaintColor = color.RGBA{R: 0x40, G: 0x2C, B: 0x00, A: 0xFF}
+
+	// Colorized-mode per-plane colours (debug visualization only; the real CRT is
+	// monochrome amber). Used by RenderFrame when Colorized is set.
+	textColor      = color.RGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0xFF} // glyphs → white
+	traceColor     = color.RGBA{R: 0x20, G: 0xFF, B: 0x40, A: 0xFF} // spectrum trace → green
+	graticuleColor = color.RGBA{R: 0x55, G: 0x55, B: 0x55, A: 0xFF} // grid/box → dim grey
+	ditherColor    = color.RGBA{R: 0x0E, G: 0x0E, B: 0x0E, A: 0xFF} // bg dither → near-black
 )
 
 // Status-byte bit layout (read from address+1 / offset 0x5FD in the 8593 MMIO).
@@ -167,6 +174,25 @@ type Chip struct {
 	// swamp the screen with full-brightness vertical stripes. Same bit-packing
 	// and geometry as vram.
 	bgVram [VRAMSize]byte
+
+	// Colorized is a debug-visualization toggle (default false → byte-identical
+	// monochrome amber render, so all goldens/tests are unaffected). When true,
+	// RenderFrame composites the per-content planes below with distinct colours
+	// (white text / green trace / dim-grey graticule / near-black dither).
+	Colorized bool
+
+	// textPlane / tracePlane are content-type planes used only in Colorized mode.
+	// Glyphs route to textPlane (never dithered, so text stays crisp); solid
+	// trace lines route to tracePlane (cleared each sweep so the trace doesn't
+	// pile up). graticulePlane IS vram (the default activePlane target), so the
+	// bulk of vector draws and VRAM() are unchanged.
+	textPlane  [VRAMSize]byte
+	tracePlane [VRAMSize]byte
+
+	// activePlane is the destination for the next pixel write (setVRAMPixel /
+	// clearVRAMPixel). The decoder points it at the right plane per command;
+	// defaults to &vram. nil is treated as &vram for zero-value safety.
+	activePlane *[VRAMSize]byte
 
 	// Memory-access pointer for raster bursts (advances after each data-
 	// port write in raster mode). BYTE offset into vram.
@@ -378,6 +404,15 @@ func (c *Chip) DispMWR() uint16 { return c.dispMWR }
 // as the internal displayStartRow helper — exposed for probing).
 func (c *Chip) DisplayStartRow() int { return c.displayStartRow() }
 
+// SAR returns Start Address Register n (20-bit word address), for probing the
+// chip's display-area / split-screen layer bases.
+func (c *Chip) SAR(n int) uint32 {
+	if n < 0 || n >= len(c.sar) {
+		return 0
+	}
+	return c.sar[n]
+}
+
 // New constructs a chip with a cleared VRAM + zeroed state. If the
 // HD63484_GLYPHLOG environment variable is set, a GlyphLogger is attached
 // (see glyph_logger.go).
@@ -389,6 +424,7 @@ func New() *Chip {
 		orgRow:         defaultOrgRow,
 		maskReg:        0xFFFF, // all bits affected until WPR 0x04 narrows the mask
 	}
+	c.activePlane = &c.vram // default draw target == graticule plane
 	c.resetBounds()
 	c.glyphLog = newGlyphLoggerFromEnv()
 	return c
@@ -422,6 +458,13 @@ func (c *Chip) resetBounds() {
 // present). So:
 //   displayScanStart = 23
 //   effective drawYOrigin = ORG_row - displayScanStart = 256 - 23 = 233
+//
+// NOTE (2026-06-03): the firmware's RWP-addressed SCLR area-clear targets the
+// EFFECTIVE position (≈ vram row 233 for the graph bottom), while the pen STORES
+// content at ORG_row=256. So the SCLR's word→vram mapping adds displayScanStart
+// rows to land on the stored content (see wordByteAddr in area_ops.go). This is
+// localized to the SCLR so orgRow/render/background are untouched. Pinned by
+// TestCRTSclrDithersGlyph.
 const (
 	defaultOrgCol    = 48  // ORG_col derived from XW=0x4003, MWR1=64, XD=0
 	defaultOrgRow    = 256 // ORG_row derived from XW=0x4003, MWR1=64
@@ -448,7 +491,11 @@ func (c *Chip) setVRAMPixel(x, y int) {
 	if addr < 0 {
 		return
 	}
-	c.vram[addr] |= 1 << uint(x&7)
+	p := c.activePlane
+	if p == nil {
+		p = &c.vram
+	}
+	p[addr] |= 1 << uint(x&7)
 	c.expandBounds(x, y)
 }
 
@@ -461,7 +508,23 @@ func (c *Chip) clearVRAMPixel(x, y int) {
 	if addr < 0 {
 		return
 	}
-	c.vram[addr] &^= 1 << uint(x&7)
+	p := c.activePlane
+	if p == nil {
+		p = &c.vram
+	}
+	p[addr] &^= 1 << uint(x&7)
+}
+
+// ClearTracePlane zeroes the trace plane — called by the sweep driver at the
+// start of each sweep so only the latest trace shows (no pile-up). No-op when
+// not colorized (the trace lives in vram then).
+func (c *Chip) ClearTracePlane() {
+	if !c.Colorized {
+		return
+	}
+	for i := range c.tracePlane {
+		c.tracePlane[i] = 0
+	}
 }
 
 // isVRAMPixelLit reports whether the pixel at (x, y) is currently set.
@@ -474,6 +537,32 @@ func (c *Chip) isVRAMPixelLit(x, y int) bool {
 		return false
 	}
 	return c.vram[addr]&(1<<uint(x&7)) != 0
+}
+
+// isBgPixelLit reports whether the DIM background plane (bgVram) pixel at firmware
+// (x, y) is set. The SCLR reads vram and writes bgVram at the SAME byte address
+// (its wordByteAddr already folds in displayScanStart), so bgVram uses the same
+// ORG mapping as vram.
+func (c *Chip) isBgPixelLit(x, y int) bool {
+	x = c.orgCol + x
+	y = c.orgRow - y
+	addr := c.vramByteAddr(x, y)
+	if addr < 0 {
+		return false
+	}
+	return c.bgVram[addr]&(1<<uint(x&7)) != 0
+}
+
+// isTextPixelLit reports whether the TEXT plane (glyphs) pixel at firmware (x, y)
+// is set. Glyphs are drawn through the same ORG transform as the pen.
+func (c *Chip) isTextPixelLit(x, y int) bool {
+	x = c.orgCol + x
+	y = c.orgRow - y
+	addr := c.vramByteAddr(x, y)
+	if addr < 0 {
+		return false
+	}
+	return c.textPlane[addr]&(1<<uint(x&7)) != 0
 }
 
 // expandBounds widens the drawn-content bbox to include (x, y). Visible-
@@ -583,3 +672,7 @@ func (c *Chip) Reg(n int) uint16 {
 	}
 	return c.regs[n]
 }
+
+// OMR returns the Operation Mode Register (AR 0x04). GBM (bits 10-8) selects
+// bits-per-pixel: 000=1bpp mono, 001=2bpp, 010=4bpp, etc.
+func (c *Chip) OMR() uint16 { return c.omr }

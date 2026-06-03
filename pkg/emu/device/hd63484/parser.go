@@ -191,7 +191,7 @@ func (dec *decoder) feed(c *Chip, w uint16) {
 		dec.st = stLineY
 	case stLineY:
 		ly := int(int16(w))
-		c.drawLine(c.penX, c.penY, dec.moveX, ly, true)
+		c.drawLineRouted(c.penX, c.penY, dec.moveX, ly)
 		c.penX, c.penY = dec.moveX, ly
 		c.Lines++
 		dec.st = stCmd
@@ -201,7 +201,7 @@ func (dec *decoder) feed(c *Chip, w uint16) {
 	case stRLineY:
 		ex := c.penX + dec.moveX
 		ey := c.penY + int(int16(w))
-		c.drawLine(c.penX, c.penY, ex, ey, true)
+		c.drawLineRouted(c.penX, c.penY, ex, ey)
 		c.penX, c.penY = ex, ey
 		c.Lines++
 		dec.st = stCmd

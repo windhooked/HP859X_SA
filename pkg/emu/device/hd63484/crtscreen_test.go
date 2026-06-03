@@ -22,6 +22,75 @@ func fillRect(c *Chip, x0, y0, x1, y1 uint16) {
 	feedWords(c, cmdAFRCT, x1, y1)
 }
 
+// drawSolidGlyph blits a solid 16×8 glyph cell at firmware pen (x,y) via the
+// WPTN glyph packet (fg=0xFFFF lights every bit).
+func drawSolidGlyph(c *Chip, x, y uint16) {
+	feedWords(c, cmdAMOVE, x, y)
+	feedWords(c, cmdWPTN, glyphWPTNCount, 0xFFFF, 0x0000) // fg, bg
+	for i := 0; i < glyphRows; i++ {
+		feedWords(c, 0xFFFF) // all 16 columns lit
+	}
+}
+
+// setRWP sets the Read/Write Pointer to word offset `off` via WPR 0x0C/0x0D,
+// using the chip's exact encoding (0x0C = bank+high byte, 0x0D = low 12 bits).
+func setRWP(c *Chip, off uint32) {
+	hi := uint16((off >> 12) & 0xff) // bank 0
+	lo := uint16((off & 0xfff) << 4)
+	feedWords(c, 0x0800|PRMARLow, hi)
+	feedWords(c, 0x0800|PRMARHigh, lo)
+}
+
+// setAreaDef programs the area-definition clip rect (WPR 0x08-0x0B).
+func setAreaDef(c *Chip, xmin, ymin, xmax, ymax uint16) {
+	feedWords(c, 0x0800|0x08, xmin)
+	feedWords(c, 0x0800|0x09, ymin)
+	feedWords(c, 0x0800|0x0a, xmax)
+	feedWords(c, 0x0800|0x0b, ymax)
+}
+
+// TestCRTSclrClearsGlyph is the core alignment test the user asked for: draw a
+// single glyph, then issue the firmware's SCLR (0x5C02 = AND with a 0x5555
+// checkerboard) over its region, and assert the glyph is CLEANLY CLEARED — gone
+// from the foreground with nothing left in the background plane. We don't
+// reproduce the 1-bit dither (see area_ops.go "NO DITHERING"); the SCLR is read
+// as "clear this region". This pins the SCLR-clears-content alignment with
+// pixel-level assertions, in isolation from the full-boot render. The SCLR is
+// addressed by the Read/Write Pointer, so the RWP must map to the SAME vram words
+// the pen drew the glyph into; if the RWP↔pen mapping is off, the glyph won't be
+// touched and this fails.
+func TestCRTSclrClearsGlyph(t *testing.T) {
+	c := New()
+	const gx, gy = 64, 100 // firmware pen position, inside a typical graph
+	drawSolidGlyph(c, gx, gy)
+
+	// Sanity: the solid glyph lit the cell.
+	if !isLit(c, gx, gy) || !isLit(c, gx+1, gy) {
+		t.Fatalf("solid glyph not drawn at (%d,%d)", gx, gy)
+	}
+
+	// The glyph cell occupies vram (orgCol+gx .. +15, orgRow-gy .. orgRow-gy-7).
+	// The firmware addresses the SCLR by the RWP in EFFECTIVE-position coordinates
+	// (ORG_row - displayScanStart); wordByteAddr adds displayScanStart back to land
+	// on the stored content. So compute the RWP at the effective origin.
+	off := uint32((c.orgRow-displayScanStart-gy)*(PaintRowBytes/2) + (c.orgCol+gx)/16)
+	setAreaDef(c, 0, 0, 400, 209)
+	feedWords(c, 0x0800|PRMemWidth, 0xFFFF) // mask = all bits
+	setRWP(c, off)
+	feedWords(c, 0x5C02, 0x5555, 0x0001, 0x0008) // SCLR AND 0x5555, ax=1, ay=8
+
+	// The glyph is cleanly cleared from the foreground; nothing lingers in the
+	// background plane (no dither dots).
+	for dx := 0; dx < 2; dx++ {
+		if isLit(c, gx+dx, gy) {
+			t.Errorf("foreground (%d,%d) should be cleanly cleared", gx+dx, gy)
+		}
+		if isLitBg(c, gx+dx, gy) {
+			t.Errorf("background (%d,%d) should be empty — we don't dither", gx+dx, gy)
+		}
+	}
+}
+
 // TestCRTAreaFillLitThenScreenClear: a filled rectangle lights its interior,
 // and a full SCLR (screen clear, fill word 0) returns the whole screen to dark.
 func TestCRTAreaFillLitThenScreenClear(t *testing.T) {

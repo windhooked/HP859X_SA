@@ -1,5 +1,6 @@
 package hd63484
 
+
 // area_ops.go is a faithful port of the HD63484's RWP-addressed memory engine
 // from MAME (src/devices/video/hd63484.cpp) — specifically the CLR (0x5800) and
 // SCLR (0x5C00) area-fill commands. Unlike the pen-based line/rect/glyph
@@ -35,7 +36,11 @@ func (c *Chip) wordByteAddr(off, mwr int) int {
 	if off < 0 || mwr <= 0 {
 		return -1
 	}
-	row := off / mwr
+	// The firmware's RWP addresses the EFFECTIVE display position; the pen stores
+	// content at ORG_row (displayScanStart rows lower in vram). Shift the SCLR's
+	// target down by displayScanStart so it lands on the stored content rather
+	// than 23 rows above it (the "partially clears / misaligned" bug).
+	row := off/mwr + displayScanStart
 	col := off % mwr
 	if row < 0 || row >= PaintHeight || col < 0 || col >= PaintRowBytes/2 {
 		return -1
@@ -72,15 +77,38 @@ func (c *Chip) execClear(cr, pattern uint16, ax, ay int16) {
 	mm := cr & 0x03
 	logical := cr&0x0400 != 0 // BIT(cr,10)
 
-	// Plane routing: a REPLACE fill (bit10=0) is a foreground clear/fill — it
-	// wipes the bright graticule/text plane (vram). A logical-op fill (bit10=1,
-	// e.g. the cal/boot AND-0x5555 dither) is BACKGROUND texture — route it to the
-	// dim bgVram plane so it never fades foreground text (matches the 0x4400
-	// background-fill architecture; render.go composites bgVram dim under vram).
-	plane := c.vram[:]
-	if logical {
-		plane = c.bgVram[:]
-	}
+	// === NO DITHERING ===
+	// On the real instrument the display is 1-BIT: every pixel is on or off, one
+	// colour. The firmware DITHERS — ANDs the graph with a 0x5555/0xAAAA
+	// checkerboard (SCLR, bit10=1) — purely to work around that 1-bit tube: a 50%
+	// checkerboard time-averages on the phosphor into "half bright" (the recessive
+	// graticule) and the complementary 0x5555/0xAAAA pair fades old content away
+	// (its "erase to grey", since a 1-bit tube has no erase-to-dim primitive).
+	//
+	// We render into a true-colour RGBA framebuffer and have NONE of those
+	// constraints, so we do NOT reproduce the dither. Replicating it pixel-for-
+	// pixel froze one checkerboard phase at full brightness — that was the "trace
+	// never clears" ghost. Instead we read the firmware's INTENT through the
+	// command and render it cleanly:
+	//   • SCLR (logical AND-checkerboard) over the graph  → the intent is CLEAR
+	//     → clean foreground erase (no dots).
+	//   • CLR (REPLACE, bit10=0)                          → a genuine pattern fill
+	//     → write the pattern (real content / explicit erase).
+	// The bgVram "dim background" plane the dither used to feed is therefore no
+	// longer written here (it survives only for the off-screen 0x4400 raster
+	// prepare in wptn.go). The logical-op math (OR/EOR/masked-REPLACE) is kept as
+	// labelled, intentionally-empty handlers below: this firmware only ever uses
+	// the AND-checkerboard on the graph, but the cases are documented so the
+	// handler is present if a future path needs one.
+
+	// AREA-DEFINITION clip rect (WPR 0x08-0x0b). The cal/operating display sets it
+	// to the graph (0,0)-(400,209) before its SCLR, so the clear is confined to the
+	// graph and never touches the static annunciators outside it.
+	xmin := int(int16(c.regs[0x08]))
+	ymin := int(int16(c.regs[0x09]))
+	xmax := int(int16(c.regs[0x0a]))
+	ymax := int(int16(c.regs[0x0b]))
+	clip := logical && xmax > xmin && ymax > ymin
 
 	d0inc := int16(1)
 	if ax < 0 {
@@ -95,23 +123,45 @@ func (c *Chip) execClear(cr, pattern uint16, ax, ay int16) {
 		for d0 := int16(0); d0 != ax+d0inc; d0 += d0inc {
 			off := base - int(d1)*mwr + int(d0)
 			a := c.wordByteAddr(off, mwr)
-			var res uint16
-			if logical {
-				data := readPlaneWord(plane, a)
-				switch mm {
-				case 0: // replace
-					res = (data &^ c.maskReg) | (pattern & c.maskReg)
-				case 1: // OR
-					res = (data &^ c.maskReg) | ((data | pattern) & c.maskReg)
-				case 2: // AND
-					res = (data &^ c.maskReg) | ((data & pattern) & c.maskReg)
-				case 3: // EOR
-					res = (data &^ c.maskReg) | ((data ^ pattern) & c.maskReg)
+			if clip {
+				// Map the word's byte address back to firmware drawing coords
+				// (inverse of setVRAMPixel) and skip words outside the graph rect.
+				if a < 0 {
+					continue
 				}
-			} else {
-				res = pattern
+				vramRow := a / PaintRowBytes
+				vramXbase := (a % PaintRowBytes) * 8
+				yfw := c.orgRow - vramRow
+				xfw := vramXbase - c.orgCol
+				if yfw < ymin || yfw > ymax || xfw+15 < xmin || xfw > xmax {
+					continue
+				}
 			}
-			writePlaneWord(plane, a, res)
+			switch {
+			case !logical:
+				// CLR REPLACE — a genuine fill: write the pattern straight to the
+				// bright foreground (cal-table background, CLR-with-data, or data=0
+				// explicit erase).
+				writePlaneWord(c.vram[:], a, pattern)
+			case clip:
+				// SCLR over the graph = the firmware's graph CLEAR (AND-checkerboard
+				// fade on real HW). Render the intent: clean foreground erase, no
+				// dither dots. The pattern word (0x5555/0xAAAA) is the checkerboard
+				// and is intentionally ignored — we clear unconditionally.
+				switch mm {
+				case 2: // AND — the only op this firmware uses on the graph: CLEAR.
+					writePlaneWord(c.vram[:], a, 0)
+				case 0: // masked REPLACE — unused as a graph SCLR; intentionally empty.
+				case 1: // OR  — cursor/blink overlay on real HW; unused; intentionally empty.
+				case 3: // EOR — XOR cursor on real HW; unused; intentionally empty.
+				}
+			default:
+				// Logical SCLR with NO area-def (e.g. boot's full-screen pass). On
+				// real HW this is the background dither fill; we don't dither and have
+				// no clip marking it a content clear, so we leave the foreground
+				// untouched (clean black background). Intentionally empty — was: wrote
+				// the 0x5555 dots to bgVram.
+			}
 		}
 	}
 	c.rwp[c.rwpDn] = uint32((int(c.rwp[c.rwpDn]) - int(ay+d1inc)*mwr) & 0xfffff)

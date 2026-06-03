@@ -1,6 +1,9 @@
 package hd63484
 
-import "image"
+import (
+	"image"
+	"image/color"
+)
 
 // RenderFrame materialises the chip's VRAM into an RGBA framebuffer for
 // inspection / display. Every lit bit in the visible 640×480 sub-window of
@@ -74,20 +77,44 @@ func (c *Chip) RenderFrame() *image.RGBA {
 			}
 			mask := byte(1 << uint(vx&7))
 			idx := rowBase + (vx >> 3)
-			switch {
-			case c.vram[idx]&mask != 0:
-				pix[off] = fgColor.R
-				pix[off+1] = fgColor.G
-				pix[off+2] = fgColor.B
-			case c.bgVram[idx]&mask != 0:
-				pix[off] = bgPaintColor.R
-				pix[off+1] = bgPaintColor.G
-				pix[off+2] = bgPaintColor.B
-			default:
-				pix[off] = 0
-				pix[off+1] = 0
-				pix[off+2] = 0
+			// Plane priority (front to back): text > trace > graticule(vram) >
+			// dither(bgVram) > black. In mono the foreground planes all render
+			// bright amber and bgVram dim amber (so the dither is the faint
+			// background it is on the real CRT); Colorized assigns distinct colours.
+			var col color.RGBA
+			fg, grat, bg := fgColor, fgColor, bgPaintColor
+			tr := fgColor
+			if c.Colorized {
+				fg, tr, grat, bg = textColor, traceColor, graticuleColor, ditherColor
 			}
+			// Graticule GRID. A full-sweep geometry scan finds NO grid polylines —
+			// the dotted vertical grid is the firmware's 0x4400 raster PATTERN fill,
+			// written into the back page at MAR=0x4000 (= vram row 256, one graph-
+			// height below the graph). Map that page UP so it lands in the graph, and
+			// confine it to the graph rect (area-def 0,0-400,209 ⇒ vram cols orgCol..
+			// orgCol+400, rows orgRow-209..orgRow). It renders dim/recessive; the
+			// bright trace + box (vram/tracePlane) composite ON TOP via the cases
+			// above. Vertical lines are Y-invariant so the exact row offset only needs
+			// to land the visible graph rows inside the filled page (256..511).
+			const graphH = 209 // area-def ymax
+			const gridPageBase = 256
+			graphTop := c.orgRow - graphH
+			gridRow := (vramRow - graphTop + gridPageBase) % PaintHeight
+			gridIdx := gridRow*PaintRowBytes + (vx >> 3)
+			inGraph := vramRow >= graphTop && vramRow <= c.orgRow && vx >= c.orgCol && vx <= c.orgCol+400
+			switch {
+			case c.textPlane[idx]&mask != 0:
+				col = fg
+			case c.tracePlane[idx]&mask != 0:
+				col = tr
+			case c.vram[idx]&mask != 0:
+				col = grat
+			case inGraph && c.bgVram[gridIdx]&mask != 0:
+				col = bg
+			}
+			pix[off] = col.R
+			pix[off+1] = col.G
+			pix[off+2] = col.B
 			pix[off+3] = 0xFF
 		}
 	}

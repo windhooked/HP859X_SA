@@ -64,6 +64,22 @@ func (c *Chip) drawLine(x0, y0, x1, y1 int, set bool) {
 	}
 }
 
+// drawLineRouted draws a line, routing it to the trace plane in Colorized mode
+// when it is SOLID (linePattern 0xFFFF) — the 8593 firmware forces the spectrum
+// trace solid while drawing the graticule grid with a stipple, so a solid
+// ALINE/RLINE is the trace (green plane), a stippled one is the grid (vram/grey).
+// Outside Colorized mode it is a plain solid line into vram, unchanged.
+func (c *Chip) drawLineRouted(x0, y0, x1, y1 int) {
+	if c.Colorized && c.linePattern == 0xFFFF {
+		prev := c.activePlane
+		c.activePlane = &c.tracePlane
+		c.drawLine(x0, y0, x1, y1, true)
+		c.activePlane = prev
+		return
+	}
+	c.drawLine(x0, y0, x1, y1, true)
+}
+
 // drawRect draws the outline of the rectangle spanned by (x0,y0)..(x1,y1).
 // Used for ARCT / RRCT. (Note: ARCT moves the pen to the second corner;
 // the parser updates pen position after calling this.)
