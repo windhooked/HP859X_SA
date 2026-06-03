@@ -1,9 +1,6 @@
 package hd63484
 
-import (
-	"image"
-	"image/color"
-)
+import "image"
 
 // RenderFrame materialises the chip's VRAM into an RGBA framebuffer for
 // inspection / display. Every lit bit in the visible 640×480 sub-window of
@@ -40,84 +37,13 @@ func (c *Chip) displayStartRow() int {
 }
 
 func (c *Chip) RenderFrame() *image.RGBA {
-	if c.img == nil {
-		c.img = image.NewRGBA(image.Rect(0, 0, DisplayWidth, DisplayHeight))
-	}
-	pix := c.img.Pix
-	stride := c.img.Stride
-	// The display scans VRAM starting from:
-	//   displayStartRow() (from RAR1/MWR1) + displayScanStart (CRT vertical offset)
-	// displayScanStart=23 is the number of VRAM rows before the visible CRT window
-	// begins, derived from the ORG_row=256 geometry: to fit the firmware's full
-	// content span fwY∈[-22,220] (VRAM rows 36..278) within the 256-row window,
-	// the scan must start at row 23 (keeping row 36 ≥ 23 at the top and row 278 =
-	// 23+255 at the bottom). See the defaultOrgRow / displayScanStart comments.
-	start := c.displayStartRow() + displayScanStart
-	for y := 0; y < DisplayHeight; y++ {
-		// Output row y samples VRAM row start + (y * VisibleHeight / DisplayHeight),
-		// wrapped — the analog CRT's vertical stretch of the 256-line raster onto
-		// the 4:3 tube (×1.5). Horizontal is 1:1 over the 512-px visible width.
-		srcY := y * VisibleHeight / DisplayHeight
-		vramRow := (start + srcY) % PaintHeight
-		rowBase := vramRow * PaintRowBytes
-		dstBase := y * stride
-		// renderXStart = 0: the display scans from VRAM column 0.
-		// DisplayWidth (see chip.go) is set to HWR_active + HWR_blank = 512 + 32 = 544
-		// so the full content span (VRAM cols 8..527) fits without clipping either side.
-		const renderXStart = 0
-		for x := 0; x < DisplayWidth; x++ {
-			off := dstBase + x*4
-			vx := renderXStart + x
-			if vx < 0 || vx >= PaintRowPixels {
-				pix[off] = 0
-				pix[off+1] = 0
-				pix[off+2] = 0
-				pix[off+3] = 0xFF
-				continue
-			}
-			mask := byte(1 << uint(vx&7))
-			idx := rowBase + (vx >> 3)
-			// Plane priority (front to back): text > trace > graticule(vram) >
-			// dither(bgVram) > black. In mono the foreground planes all render
-			// bright amber and bgVram dim amber (so the dither is the faint
-			// background it is on the real CRT); Colorized assigns distinct colours.
-			var col color.RGBA
-			fg, grat, bg := fgColor, fgColor, bgPaintColor
-			tr := fgColor
-			if c.Colorized {
-				fg, tr, grat, bg = textColor, traceColor, graticuleColor, ditherColor
-			}
-			// Graticule GRID. A full-sweep geometry scan finds NO grid polylines —
-			// the dotted vertical grid is the firmware's 0x4400 raster PATTERN fill,
-			// written into the back page at MAR=0x4000 (= vram row 256, one graph-
-			// height below the graph). Map that page UP so it lands in the graph, and
-			// confine it to the graph rect (area-def 0,0-400,209 ⇒ vram cols orgCol..
-			// orgCol+400, rows orgRow-209..orgRow). It renders dim/recessive; the
-			// bright trace + box (vram/tracePlane) composite ON TOP via the cases
-			// above. Vertical lines are Y-invariant so the exact row offset only needs
-			// to land the visible graph rows inside the filled page (256..511).
-			const graphH = 209 // area-def ymax
-			const gridPageBase = 256
-			graphTop := c.orgRow - graphH
-			gridRow := (vramRow - graphTop + gridPageBase) % PaintHeight
-			gridIdx := gridRow*PaintRowBytes + (vx >> 3)
-			inGraph := vramRow >= graphTop && vramRow <= c.orgRow && vx >= c.orgCol && vx <= c.orgCol+400
-			switch {
-			case c.textPlane[idx]&mask != 0:
-				col = fg
-			case c.tracePlane[idx]&mask != 0:
-				col = tr
-			case c.vram[idx]&mask != 0:
-				col = grat
-			case inGraph && c.bgVram[gridIdx]&mask != 0:
-				col = bg
-			}
-			pix[off] = col.R
-			pix[off+1] = col.G
-			pix[off+2] = col.B
-			pix[off+3] = 0xFF
-		}
-	}
+	// CUTOVER (Phase 4): the display is now scanned from the faithful unified core
+	// buffer (scanout.go RenderCore) — content page OR grid page at +0x4000, framed
+	// by the firmware's real ORG — with NO coordinate hacks (orgRow=256 /
+	// displayScanStart / +209 / bgVram). The legacy plane-based scanout it replaced
+	// is gone; the legacy vram/textPlane/bgVram planes remain only as the dual-write
+	// source and are slated for removal once the decoder writes the core directly.
+	c.img = c.RenderCore()
 	return c.img
 }
 
