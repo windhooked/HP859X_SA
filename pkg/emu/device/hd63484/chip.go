@@ -417,6 +417,9 @@ func (c *Chip) CoreORG() (layer int, dpa uint32, mwr1 uint16) {
 	return c.core.orgDN, c.core.orgDPA, c.core.mwr[1]
 }
 
+// CoreWord returns the faithful core buffer word at the given word offset.
+func (c *Chip) CoreWord(off uint32) uint16 { return c.core.readword(off) }
+
 // CoreLitWords counts non-zero words in the faithful core buffer (drawn content
 // accumulated via dual-write).
 func (c *Chip) CoreLitWords() int {
