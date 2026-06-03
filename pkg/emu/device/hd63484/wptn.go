@@ -162,6 +162,11 @@ func (dec *decoder) feedRaster(c *Chip, w uint16) {
 		c.bgVram[c.memPos] = byte(w & 0xFF)
 		c.bgVram[c.memPos+1] = byte(w >> 8)
 	}
+	// Faithful core (Phase 3): the raster burst writes the chip's frame buffer at
+	// the MAR WORD address (memPos is a byte offset → /2). The 0x4400 grid fill thus
+	// lands at core word 0x4000 — its real address, no off-screen redirect. Phase 4's
+	// scanout reads it from SAR1 like everything else.
+	c.core.writeword(uint32(c.memPos>>1), w)
 	c.memPos += 2
 	c.PaintWords++
 	// Each WPR-triggered raster burst is exactly 16384 words (see the 8593

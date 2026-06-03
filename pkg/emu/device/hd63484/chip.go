@@ -535,6 +535,9 @@ func (c *Chip) setVRAMPixel(x, y int) {
 // clearVRAMPixel turns off the pixel at (x, y) — used by glyph BG fills,
 // CLR, and SCLR.
 func (c *Chip) clearVRAMPixel(x, y int) {
+	if c.activePlane == nil || c.activePlane == &c.vram {
+		c.core.setDot(int16(x), int16(y), 0) // faithful core dual-write (Phase 3)
+	}
 	x = c.orgCol + x    // firmware X → VRAM column via ORG
 	y = c.orgRow - y    // firmware Y-up → VRAM Y-down via ORG
 	addr := c.vramByteAddr(x, y)

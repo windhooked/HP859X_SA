@@ -165,5 +165,18 @@ func (c *Chip) execClear(cr, pattern uint16, ax, ay int16) {
 		}
 	}
 	c.rwp[c.rwpDn] = uint32((int(c.rwp[c.rwpDn]) - int(ay+d1inc)*mwr) & 0xfffff)
+
+	// Faithful core (Phase 3): mirror the area op into the unified buffer at the
+	// REAL physical address (no displayScanStart/+23 hack — the core's RWP is the
+	// firmware's actual RWP). Keep the shipped intent=clear semantics: a REPLACE
+	// fill (CLR) writes the pattern; a logical SCLR (the firmware's AND-checkerboard
+	// fade) is read as a CLEAN CLEAR (replace with 0, no dither). core.clrExec
+	// advances core.rwp by the same (ay+1) lines as the legacy advance above, so the
+	// two pointers stay in lockstep.
+	if logical {
+		c.core.clrExec(0x0000, 0x0000, ax, ay) // clean clear, no dither
+	} else {
+		c.core.clrExec(cr, pattern, ax, ay) // faithful REPLACE fill
+	}
 	c.AreaClears++
 }
