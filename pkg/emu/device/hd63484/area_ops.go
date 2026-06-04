@@ -19,6 +19,13 @@ package hd63484
 // operation selected by cr&3 (0 replace / 1 OR / 2 AND / 3 EOR) under maskReg;
 // bit 10 clear ⇒ plain replace with the pattern word.
 
+// graphTopMargin is the firmware Y above which the graph clear's region holds
+// only top chrome (the REF/atten readout), not trace/grid — the graticule grid is
+// drawn up to y≈196 and the box top is ~y200, while the readout sits at ~y205. The
+// clean-clear preserves glyph pixels above this line (the readout text) but still
+// clears glyph pixels below it (stale boot-time messages in the graph body).
+const graphTopMargin = 200
+
 // areaMWR returns the active memory-width (words per raster line), defaulting to
 // our 64-word (128-byte) row when the firmware hasn't programmed MWR1.
 func (c *Chip) areaMWR() int {
@@ -177,11 +184,24 @@ func (c *Chip) execClear(cr, pattern uint16, ax, ay int16) {
 				// dither residue.
 				data := c.core.readword(coreOff)
 				m := c.core.mask & am
+				// PRESERVE GLYPH (text) PIXELS in the TOP MARGIN. The status readout
+				// (REF .0 dBm  AT 10 dB) is drawn at a firmware y just above the box top
+				// but inside the graph clear's y-range; the clean-clear would erase its
+				// lower rows. Text is glyph-tagged and is repainted by the firmware, not
+				// part of the per-sweep trace, so keep glyph pixels HERE. Scoped to
+				// yfw>graphTopMargin (above the box, where only chrome lives) so stale
+				// boot-time glyphs IN the graph body still clear (no ghosts).
+				if data != 0 && yfw > graphTopMargin {
+					base := coreOff << 4
+					var gm uint16
+					for b := 0; b < 16; b++ {
+						if c.core.cmdTag[base|uint32(b)] == tagGlyph {
+							gm |= 1 << uint(b)
+						}
+					}
+					m &^= gm
+				}
 				if res := data &^ m; res != data {
-					// Only write (and re-tag) when the clear actually changes the word —
-					// so a boundary word whose in-bounds bits are already 0 keeps its
-					// glyph tag (the right-side labels' first letter renders as a glyph,
-					// not mis-coloured as SCLR).
 					c.core.writeword(coreOff, res)
 					writePlaneWord(c.vram[:], a, res)
 				}
