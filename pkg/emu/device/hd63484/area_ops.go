@@ -77,6 +77,7 @@ func (c *Chip) execClear(cr, pattern uint16, ax, ay int16) {
 	mm := cr & 0x03
 	logical := cr&0x0400 != 0 // BIT(cr,10)
 
+
 	// === NO DITHERING ===
 	// On the real instrument the display is 1-BIT: every pixel is on or off, one
 	// colour. The firmware DITHERS — ANDs the graph with a 0x5555/0xAAAA
@@ -122,47 +123,68 @@ func (c *Chip) execClear(cr, pattern uint16, ax, ay int16) {
 	for d1 := int16(0); d1 != ay+d1inc; d1 += d1inc {
 		for d0 := int16(0); d0 != ax+d0inc; d0 += d0inc {
 			off := base - int(d1)*mwr + int(d0)
-			a := c.wordByteAddr(off, mwr)
-			if a < 0 {
-				continue
-			}
-			// Firmware coords of this word (inverse of setVRAMPixel) — used both for
-			// the area-def clip and for mirroring into the faithful core at its REAL
-			// physical address. xfw is 16-aligned so the word maps 1:1 (bit_pos 0).
-			vramRow := a / PaintRowBytes
-			vramXbase := (a % PaintRowBytes) * 8
-			yfw := c.orgRow - vramRow
-			xfw := vramXbase - c.orgCol
+			// FAITHFUL core address = the RWP-relative word DIRECTLY (the firmware's
+			// actual pointer), which is the SAME address space as the pen's
+			// calcOffset — so the clear ALIGNS with the pen draws (trace/box) instead
+			// of diverging through the legacy wordByteAddr mapping. Firmware coords for
+			// the area-def clip are the exact inverse of calcOffset about orgDPA.
+			coreOff := uint32(off) & acrtcRAMMask
+			orow := int(c.core.orgDPA) / mwr
+			ocol := int(c.core.orgDPA) % mwr
+			yfw := orow - off/mwr
+			xfw := (off%mwr - ocol) * 16
 			if clip && (yfw < ymin || yfw > ymax || xfw+15 < xmin || xfw > xmax) {
 				continue
 			}
-			coreOff, _ := c.core.calcOffset(int16(xfw), int16(yfw))
+			if c.GraticuleToUpper && clip {
+				coreOff = (coreOff + 0x4000) & acrtcRAMMask // experiment hook
+			}
+			a := c.wordByteAddr(off, mwr) // legacy vram (dead path, kept for compat)
 			switch {
 			case !logical:
 				// CLR REPLACE — a genuine fill: write the pattern straight to the
-				// bright foreground (cal-table background, CLR-with-data, or data=0
-				// explicit erase). Mirror into the core at its real address.
-				writePlaneWord(c.vram[:], a, pattern)
+				// frame buffer at its real address.
 				c.core.writeword(coreOff, pattern)
+				writePlaneWord(c.vram[:], a, pattern)
+			case clip && c.CleanClear && (mm == 2 || mm == 3):
+				// OPTION B — CLEAN CLEAR. The firmware's AND/EOR dither over the graph
+				// (cr&3 == 2/3) is, by intent, an ERASE: it clears the previous sweep's
+				// trace and any stale content so the new sweep can be drawn fresh. The
+				// faithful `data AND 0x5555` is idempotent, so it only thins old content
+				// to a 50% ghost that never goes away. Here we honour the intent and
+				// ZERO the masked bits — no residue, no ghost. The graticule grid and
+				// trace then come from the firmware's per-frame redraws, not from a
+				// dither residue.
+				data := c.core.readword(coreOff)
+				m := c.core.mask
+				res := data &^ m
+				c.core.writeword(coreOff, res)
+				writePlaneWord(c.vram[:], a, res)
 			case clip:
-				// SCLR over the graph = the firmware's graph CLEAR (AND-checkerboard
-				// fade on real HW). Render the intent: clean foreground erase, no
-				// dither dots. CRITICALLY this is CLIPPED to the area-def, so the
-				// clear never spills past the graph into the annunciators/softkeys —
-				// the core is cleared at the SAME clipped words, so softkeys survive.
+				// FAITHFUL SCLR. Execute the chip's real logical op (cr&3: 0 REPLACE /
+				// 1 OR / 2 AND / 3 EOR) under the mask register — NOT a "clean clear".
+				// So the firmware's 0x5555/0xAAAA AND-dither leaves the graticule's dot
+				// texture, and partial trace clears come out exactly as drawn. Clipped
+				// to the area-def (the chip clips area ops in area mode), so it never
+				// spills past the graph into the annunciators/softkeys.
+				data := c.core.readword(coreOff)
+				m := c.core.mask
+				var res uint16
 				switch mm {
-				case 2: // AND — the only op this firmware uses on the graph: CLEAR.
-					writePlaneWord(c.vram[:], a, 0)
-					c.core.writeword(coreOff, 0)
-				case 0: // masked REPLACE — unused as a graph SCLR; intentionally empty.
-				case 1: // OR  — cursor/blink overlay on real HW; unused; intentionally empty.
-				case 3: // EOR — XOR cursor on real HW; unused; intentionally empty.
+				case 0:
+					res = (data &^ m) | (pattern & m)
+				case 1:
+					res = (data &^ m) | ((data | pattern) & m)
+				case 2:
+					res = (data &^ m) | ((data & pattern) & m)
+				case 3:
+					res = (data &^ m) | ((data ^ pattern) & m)
 				}
+				c.core.writeword(coreOff, res)
+				writePlaneWord(c.vram[:], a, res)
 			default:
-				// Logical SCLR with NO area-def (e.g. boot's full-screen pass). On
-				// real HW this is the background dither fill; we don't dither and have
-				// no clip marking it a content clear, so we leave the foreground
-				// (and the core) untouched. Intentionally empty.
+				// Logical SCLR with NO area-def (boot full-screen pass) — left
+				// untouched for now (the boot doesn't rely on it; revisit if needed).
 			}
 		}
 	}

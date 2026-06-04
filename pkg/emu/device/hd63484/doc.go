@@ -57,6 +57,9 @@
 // into video RAM per burst (background dot pattern + clear operations).
 //
 // References:
+//   - docs/HD63484_DRAWING_COMMANDS.md — the drawing-command stream as the
+//     8593 firmware emits it and as this package decodes it (opcode table,
+//     attribute bits, frame composition, and the decoded hp-logo routine).
 //   - Hitachi HD63484 ACRTC User's Manual (1985), U75 — the primary
 //     register-map / command-format reference. URL in docs/research.md.
 //   - MAME hd63484.cpp — the structural reference (LGPL-licensed, used

@@ -17,7 +17,9 @@ func saveFrame(c *Chip, name string) {
 		return
 	}
 	defer f.Close()
-	png.Encode(f, c.RenderFrame())
+	// By-command coloured scanout with a legend strip (the canonical inspection
+	// view): each lit pixel is tinted by the command that drew it.
+	png.Encode(f, c.RenderScanoutByCmd())
 }
 
 // clearaccuracy_test.go is the clearing-accuracy spec: it draws each content
@@ -41,8 +43,11 @@ func saveFrame(c *Chip, name string) {
 func sclrRect(c *Chip, xmin, ymin, xmax, ymax int, pattern uint16) {
 	setAreaDef(c, uint16(xmin), uint16(ymin), uint16(xmax), uint16(ymax))
 	feedWords(c, 0x0800|PRMemWidth, 0xFFFF) // mask = all bits
-	// RWP base = bottom-left of the rect at the effective origin.
-	off := uint32((c.orgRow-displayScanStart-ymin)*(PaintRowBytes/2) + (c.orgCol+xmin)/16)
+	// RWP base = the CORE word offset of the rect's (xmin,ymin) corner via the SAME
+	// addressing the pen uses (calcOffset = orgDPA + x/16 − y·mwr). Using the core
+	// address — not the legacy orgRow/orgCol formula — makes the clear align with
+	// drawn content at the EDGES (xmax column), not just the middle.
+	off, _ := c.core.calcOffset(int16(xmin), int16(ymin))
 	setRWP(c, off)
 	ax := uint16((xmax-xmin)/16 + 1) // words across (over-cover; area-def clips)
 	ay := uint16(ymax - ymin)        // rows up

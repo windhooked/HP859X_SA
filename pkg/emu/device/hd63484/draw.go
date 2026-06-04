@@ -75,9 +75,34 @@ func (c *Chip) drawLineRouted(x0, y0, x1, y1 int) {
 		c.activePlane = &c.tracePlane
 		c.drawLine(x0, y0, x1, y1, true)
 		c.activePlane = prev
-		return
+	} else {
+		c.drawLine(x0, y0, x1, y1, true)
 	}
-	c.drawLine(x0, y0, x1, y1, true)
+	c.maybeFrameSnapshot(x0, y0, x1, y1)
+}
+
+// maybeFrameSnapshot takes a stable frame snapshot when the firmware repaints the
+// graticule — i.e. a LONG axis-aligned line inside the graph (a grid division or
+// box edge). The firmware repaints the whole screen each cycle as
+// clear → trace → graticule-grid; by the time the grid lines are drawn the trace
+// is already in place, so the LAST grid line per frame leaves the buffer holding a
+// COMPLETE frame. Snapshotting there (rather than at the clear, which under
+// clean-clear leaves a momentarily-blank graph) gives the scanout a flicker-free,
+// fully-painted image. Cheap: ~16 grid/box lines per frame, one buffer copy each.
+func (c *Chip) maybeFrameSnapshot(x0, y0, x1, y1 int) {
+	dx, dy := x1-x0, y1-y0
+	if dx < 0 {
+		dx = -dx
+	}
+	if dy < 0 {
+		dy = -dy
+	}
+	axisAligned := dx == 0 || dy == 0
+	long := dx >= 80 || dy >= 80
+	inGraph := x0 >= 0 && x0 <= 400 && y0 >= 0 && y0 <= 209
+	if axisAligned && long && inGraph {
+		c.core.snapshot()
+	}
 }
 
 // drawRect draws the outline of the rectangle spanned by (x0,y0)..(x1,y1).

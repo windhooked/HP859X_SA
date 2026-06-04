@@ -121,7 +121,7 @@ func (c *Chip) RenderScanout() *image.RGBA {
 	for dl := 0; dl < lines; dl++ {
 		base := (sar + uint32(dl*mwr)) & acrtcRAMMask
 		for word := 0; word < mwr; word++ {
-			v := c.core.ram[(base+uint32(word))&acrtcRAMMask]
+			v := c.core.scanWord(base + uint32(word))
 			for b := 0; b < 16; b++ {
 				col := color.RGBA{0, 0, 0, 0xFF}
 				if v&(1<<uint(b)) != 0 {
@@ -131,5 +131,47 @@ func (c *Chip) RenderScanout() *image.RGBA {
 			}
 		}
 	}
+	return img
+}
+
+// RenderScanoutByCmd renders the same register-derived scanout window as
+// RenderScanout, but colours each lit pixel BY THE COMMAND that drew it
+// (cmdTagColors) and appends a legend strip at the bottom. This is the canonical
+// view for tests/diagnostics: it shows the real display AND attributes every
+// pixel to its drawing command (trace vs graticule vs glyph vs clear), so a
+// rendering regression is immediately traceable to a command class. Reads the
+// stable frame snapshot, so it shows a complete, flicker-free frame.
+func (c *Chip) RenderScanoutByCmd() *image.RGBA {
+	lines := int(c.sp[1])
+	if lines == 0 {
+		lines = VisibleHeight
+	}
+	mwr := int(c.core.mwr[1])
+	if mwr == 0 {
+		mwr = 64
+	}
+	sar := c.core.sar[1]
+	w := mwr * 16
+	const legendH = 20
+	img := image.NewRGBA(image.Rect(0, 0, w, lines+legendH))
+	for dl := 0; dl < lines; dl++ {
+		base := (sar + uint32(dl*mwr)) & acrtcRAMMask
+		for word := 0; word < mwr; word++ {
+			off := base + uint32(word)
+			v := c.core.scanWord(off)
+			cc := cmdTagColors[c.core.scanTag(off)]
+			if cc.A == 0 {
+				cc = fgColor // lit but untagged ⇒ default foreground
+			}
+			for b := 0; b < 16; b++ {
+				col := color.RGBA{0, 0, 0, 0xFF}
+				if v&(1<<uint(b)) != 0 {
+					col = cc
+				}
+				img.SetRGBA(word*16+b, dl, col)
+			}
+		}
+	}
+	drawCmdLegend(img, lines)
 	return img
 }

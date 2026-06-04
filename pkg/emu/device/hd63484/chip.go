@@ -166,6 +166,36 @@ type Chip struct {
 	regDump  *os.File
 	regPanic bool
 
+	// APLLUpper (experiment): when true, APLL polyline draws are redirected into
+	// the upper memory region (+0x4000 words) instead of the Base screen.
+	APLLUpper bool
+
+	// GraticuleToUpper (experiment): when true, ALL access (pen draws AND area-op
+	// clears) targeting the graticule/center region is redirected into the upper
+	// memory region — so the graph's draws and clears stay together there.
+	GraticuleToUpper bool
+
+	// areaClip is set by dispatchCmd when the current drawing command has the AREA
+	// bit (opcode bit 6) set — the chip then clips the draw to the ADR (area-def
+	// rect, regs 0x08-0x0b). Without honouring it the trace/box leak past the graph.
+	areaClip bool
+
+	// DisableAreaClip (debug toggle) bypasses the AREA-mode clip in setVRAMPixel.
+	// Used to test whether the AREA clip is chopping content that lives outside the
+	// current ADR rect (e.g. the top-left hp logo). Default false.
+	DisableAreaClip bool
+
+	// CleanClear (option B) reinterprets the firmware's AND-dither area clear
+	// (SCLR, cr&3==2) as a CLEAN ERASE of the masked bits, instead of the faithful
+	// `data AND pattern`. The faithful AND is idempotent (X AND 0x5555 == X AND
+	// 0x5555 …) so old content — the previous sweep's trace and boot-time glyphs —
+	// is only thinned to a 50% dither and survives as a permanent ghost (it would
+	// read as dim on a real CRT but renders full-bright here). CleanClear honours
+	// the firmware's *intent* (the SCLR clears the graph each sweep) and removes the
+	// residue. The graticule grid must therefore come from the redraw, not the
+	// dither — verify when enabling. Default false (faithful AND).
+	CleanClear bool
+
 	// ctrlRegs is the full AR-addressed control-register file. Control-register
 	// writes (AR≠0) are decoded here rather than mis-fed to the command parser.
 	// Registers whose side-effects we faithfully model have explicit handlers in
@@ -469,6 +499,7 @@ func New() *Chip {
 		maskReg:        0xFFFF, // all bits affected until WPR 0x04 narrows the mask
 	}
 	c.activePlane = &c.vram // default draw target == graticule plane
+	c.CleanClear = true     // option B (default): SCLR dither-clear = clean erase
 	// Faithful core defaults so the unified buffer addresses correctly before the
 	// firmware programs ORG/MWR at runtime (drives unit tests that draw directly).
 	// Matches the 8593's display-init: ORG 0x4003,0xa450 → dn=1, dpa=0x3a45; MWR1=64.
@@ -535,13 +566,27 @@ func (c *Chip) vramByteAddr(x, y int) int {
 // bounding box. Out-of-range coordinates are silently ignored — matches
 // the chip's hardware clipping behaviour.
 func (c *Chip) setVRAMPixel(x, y int) {
+	// AREA mode (opcode bit 6): clip this draw to the ADR (area-def rect). The
+	// firmware sets the ADR to the graph for trace/box draws, so honouring it
+	// confines them to the graticule box instead of leaking above/below.
+	if c.areaClip && !c.DisableAreaClip {
+		xmin, ymin := int(int16(c.regs[0x08])), int(int16(c.regs[0x09]))
+		xmax, ymax := int(int16(c.regs[0x0a])), int(int16(c.regs[0x0b]))
+		if xmax > xmin && ymax > ymin && (x < xmin || x > xmax || y < ymin || y > ymax) {
+			return
+		}
+	}
 	// Faithful core (Phase 2 dual-write): the pen draws in firmware logical coords,
 	// which is exactly what calcOffset/setDot consume — so mirror the pixel into the
 	// unified address space alongside the legacy path. Glyphs/trace route to their
 	// own legacy planes (activePlane != &vram); only the base vram content is
 	// mirrored for now so the core matches what Phase 4 will scan out.
 	if c.activePlane == nil || c.activePlane == &c.vram {
+		if c.GraticuleToUpper && regionOf(x, y) == regionCenter {
+			c.core.drawOffset = 0x4000
+		}
 		c.core.setDot(int16(x), int16(y), 1)
+		c.core.drawOffset = 0
 		c.RegionWrites[regionOf(x, y)]++
 	}
 	x = c.orgCol + x    // firmware X → VRAM column via ORG
@@ -562,7 +607,11 @@ func (c *Chip) setVRAMPixel(x, y int) {
 // CLR, and SCLR.
 func (c *Chip) clearVRAMPixel(x, y int) {
 	if c.activePlane == nil || c.activePlane == &c.vram {
+		if c.GraticuleToUpper && regionOf(x, y) == regionCenter {
+			c.core.drawOffset = 0x4000
+		}
 		c.core.setDot(int16(x), int16(y), 0) // faithful core dual-write (Phase 3)
+		c.core.drawOffset = 0
 	}
 	x = c.orgCol + x    // firmware X → VRAM column via ORG
 	y = c.orgRow - y    // firmware Y-up → VRAM Y-down via ORG

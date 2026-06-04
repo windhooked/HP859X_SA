@@ -47,22 +47,24 @@ func TestMachineBootScreen(t *testing.T) {
 	// fields, graticule) instead of freezing at the analog poll. The golden
 	// captures that UI.
 	m := newMachine(t)
-	m.BootToOperating(bootScreenCycles)
+	m.MMIO.SweepActive = true
+	m.BootToOperatingWithSweep(bootScreenCycles)
 
-	got := m.MMIO.Display.RenderFrame()
+	// Canonical render: register-derived scanout coloured BY DRAWING COMMAND with a
+	// legend strip, from the stable (complete-frame) snapshot — the graticule grid
+	// (ALINE/RLINE), graph box (ARCT), trace (APLL) and glyphs each render in their
+	// command's colour, so a regression is attributable to a command class.
+	got := m.MMIO.Display.Chip.RenderScanoutByCmd()
 
 	// Sanity: the screen must not be blank. (The operating loop spends time in
 	// many subroutines, so the instantaneous PC is not a reliable "booted"
 	// signal — a rendered screen is.)
 	//
-	// Threshold for Rev L at 200M cycles: the graticule frame + grid + the
-	// annunciator/label text, sampled into the 512×384 output (the ACRTC's
-	// 512×256 displayed raster, ×1.5 vertical stretch for the 4:3 CRT — see
-	// docs/CRT_GEOMETRY_DIAGNOSIS.md). ~11k lit pixels. The firmware's uniform
-	// 0x4400 raster fill is its OFF-SCREEN back-buffer (MAR=0x4000 = row 256,
-	// below the 256-line display) so it no longer stripes the visible area. The
-	// exact image is locked by the golden PNG; this floor is a blank-screen
-	// backstop.
+	// Threshold for Rev L: the 1024×276 by-command scanout (256 display lines +
+	// the 20-px legend strip) holds the graticule grid (ALINE/RLINE) + box (ARCT)
+	// + trace (APLL) + label glyphs from the stable frame snapshot — ~6.6k lit
+	// pixels. The exact image is locked by the golden PNG; this floor is a
+	// blank-screen backstop.
 	if lit := litPixels(got); lit < 3_500 {
 		t.Fatalf("display far below expected (%d lit pixels, PC=%#06X) — "+
 			"PAINT/raster pipeline likely broken", lit, m.CPU.Reg(cpu.PC))

@@ -173,6 +173,7 @@ func (dec *decoder) feedRaster(c *Chip, w uint16) {
 	if gw >= gridPageWords {
 		gw = gridPageWords + ((gw - gridPageWords) & (gridPageWords - 1))
 	}
+	c.core.curCmd = tagRaster
 	c.core.writeword(uint32(gw), w)
 	c.memPos += 2
 	c.PaintWords++

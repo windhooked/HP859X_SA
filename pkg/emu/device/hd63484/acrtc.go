@@ -40,10 +40,69 @@ type acrtc struct {
 	ccr  uint16 // control reg; GBM (graphic bit mode) in bits 8-10 selects bpp
 	mask uint16 // WPR 0x04 write-mask: which bits a logical op may change
 
+	// drawOffset is added to every setDot word address — an experiment hook to
+	// redirect specific draws (e.g. APLL polylines) into another memory region.
+	drawOffset uint32
+
 	// writeHist buckets every writeword by 0x200-word (1 KB) page — a histogram of
 	// which controller memory regions the firmware actually populates.
 	writeHist [acrtcRAMWords >> 9]int
+
+	// curCmd tags which command class is currently writing; cmdTag records, per
+	// word, the last command that wrote it — for the by-command colour render.
+	curCmd uint8
+	cmdTag [acrtcRAMWords]uint8
+
+	// stable / stableTag are a snapshot of ram / cmdTag taken at each frame
+	// boundary (snapshot()), so the scanout shows a COMPLETE, flicker-free frame
+	// regardless of where execution pauses mid-repaint. Under clean-clear the live
+	// buffer is momentarily blank between a graph clear and the redraw; the snapshot
+	// is the last fully-painted frame. haveStable gates it (false until the first
+	// frame boundary, so direct-draw unit tests read the live buffer).
+	stable     [acrtcRAMWords]uint16
+	stableTag  [acrtcRAMWords]uint8
+	haveStable bool
 }
+
+// snapshot captures the current frame buffer (+ command tags) as the stable,
+// flicker-free image the scanout renders. Called at each frame boundary.
+func (a *acrtc) snapshot() {
+	a.stable = a.ram
+	a.stableTag = a.cmdTag
+	a.haveStable = true
+}
+
+// scanWord / scanTag return the rendered word / command-tag at off — from the
+// stable snapshot if one exists, else live ram.
+func (a *acrtc) scanWord(off uint32) uint16 {
+	off &= acrtcRAMMask
+	if a.haveStable {
+		return a.stable[off]
+	}
+	return a.ram[off]
+}
+
+func (a *acrtc) scanTag(off uint32) uint8 {
+	off &= acrtcRAMMask
+	if a.haveStable {
+		return a.stableTag[off]
+	}
+	return a.cmdTag[off]
+}
+
+// Command-class tags (cmdTag values).
+const (
+	tagNone uint8 = iota
+	tagPoly        // APLL / RPLL polyline
+	tagSCLR        // SCLR area op
+	tagCLR         // CLR area op
+	tagRect        // ARCT / RRCT / AFRCT / RFRCT
+	tagLine        // ALINE / RLINE
+	tagDot         // DOT
+	tagGlyph       // WPTN glyph
+	tagRaster      // raster pattern fill (0x4400)
+	tagOther
+)
 
 // getBpp returns bits-per-logical-pixel from the GBM field (CCR bits 8-10):
 // 000→1, 001→2, 010→4, 011→8, 100→16. The 8593 runs 1bpp (GBM=000).
@@ -98,6 +157,7 @@ func (a *acrtc) readword(off uint32) uint16 { return a.ram[off&acrtcRAMMask] }
 func (a *acrtc) writeword(off uint32, v uint16) {
 	a.ram[off&acrtcRAMMask] = v
 	a.writeHist[(off&acrtcRAMMask)>>9]++ // 0x200-word (1 KB) page buckets
+	a.cmdTag[off&acrtcRAMMask] = a.curCmd
 }
 
 // getDot reads the logical pixel value at (x,y) (MAME get_dot).
@@ -112,6 +172,7 @@ func (a *acrtc) getDot(x, y int16) uint16 {
 func (a *acrtc) setDot(x, y int16, color uint16) {
 	bpp := a.getBpp()
 	off, bitPos := a.calcOffset(x, y)
+	off += a.drawOffset // experiment hook: redirect draws to another region
 	pmask := uint16((1<<bpp)-1) << bitPos
 	w := a.readword(off)
 	w = (w &^ pmask) | ((color << bitPos) & pmask)

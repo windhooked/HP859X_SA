@@ -69,11 +69,11 @@ func TestCRTSclrClearsGlyph(t *testing.T) {
 		t.Fatalf("solid glyph not drawn at (%d,%d)", gx, gy)
 	}
 
-	// The glyph cell occupies vram (orgCol+gx .. +15, orgRow-gy .. orgRow-gy-7).
-	// The firmware addresses the SCLR by the RWP in EFFECTIVE-position coordinates
-	// (ORG_row - displayScanStart); wordByteAddr adds displayScanStart back to land
-	// on the stored content. So compute the RWP at the effective origin.
-	off := uint32((c.orgRow-displayScanStart-gy)*(PaintRowBytes/2) + (c.orgCol+gx)/16)
+	// Address the SCLR by the RWP using the SAME core addressing the pen used to
+	// draw the glyph (calcOffset = orgDPA + x/16 − y·mwr), so the clear lands on the
+	// stored content. (The legacy orgRow/orgCol/displayScanStart formula diverged
+	// from the core address at cell edges.)
+	off, _ := c.core.calcOffset(int16(gx), int16(gy))
 	setAreaDef(c, 0, 0, 400, 209)
 	feedWords(c, 0x0800|PRMemWidth, 0xFFFF) // mask = all bits
 	setRWP(c, off)

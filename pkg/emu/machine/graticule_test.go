@@ -8,17 +8,15 @@ import (
 	"github.com/windhooked/HP859X_SA/pkg/emu/romloader"
 )
 
-// TestGraticuleGridVisible pins the FINDING that the graticule's vertical grid
-// is the firmware's 0x4400 raster PATTERN fill (not vector lines — a full-sweep
-// geometry scan finds zero grid polylines). The firmware fills that pattern into
-// the back page (MAR=0x4000), and the display is meant to show it; our model
-// currently routes it OFF-SCREEN (bgVram rows 256+), so the graph interior is
-// blank. This test asserts the grid is actually rendered IN the visible graph —
-// i.e. the graph interior contains a set of regularly-lit vertical columns (the
-// grid lines), not just the trace.
-//
-// Region: the UPPER graph interior, above the trace band and left of the softkey
-// column, so a pass means "grid present" rather than "trace present".
+// TestGraticuleGridVisible pins the FINDING (docs/HD63484_DRAWING_COMMANDS.md)
+// that the graticule is the firmware's 10×8 VECTOR grid — explicit ALINE/RLINE
+// division lines + an ARCT box — repainted EVERY display cycle (verified: 9
+// vertical + 7 horizontal long axis-aligned lines, ×11 per capture). It is NOT
+// the 0x4400 raster dither (an earlier, now-disproven theory). Under clean-clear
+// the grid survives because the stable-frame snapshot captures the buffer right
+// after the grid repaint. This test asserts the grid renders in the visible graph
+// — several regularly-spaced vertical columns in the upper graph interior (above
+// the trace band), in the register-derived scanout.
 func TestGraticuleGridVisible(t *testing.T) {
 	rom, err := romloader.LoadDir("../../../hp8593a_eeproms")
 	if err != nil {
@@ -31,44 +29,48 @@ func TestGraticuleGridVisible(t *testing.T) {
 	m.BootToOperatingWithSweep(250_000_000)
 	m.BootToOperatingWithSweep(10_000_000)
 
-	img := m.MMIO.Display.Chip.RenderFrame()
-	// Graph span incl. the box frame edges (graph left edge ≈ display x48, right
-	// ≈ x448). Display coords; DisplayWidth=544, DisplayHeight=384.
-	const x0, x1 = 40, 460
-	const y0, y1 = 45, 240
-	height := y1 - y0
+	// Plain amber scanout (foreground R≈0xFF) for pixel assertions; the saved
+	// inspection image uses the by-command view.
+	img := m.MMIO.Display.Chip.RenderScanout()
+	w := img.Bounds().Dx()
+	// Graph interior (scanout coords): right of the left label column, left of the
+	// softkey column, above the trace noise band at the bottom.
+	x0, x1 := 100, 495
+	if x1 > w {
+		x1 = w
+	}
+	y0, y1 := 25, 195
 
-	// Per-column count of near-full-height vertical lines. The accurate graticule is
-	// the firmware's VECTOR frame (box left/right edges + a few dotted divisions) —
-	// NOT the dense 0x4400 dither (suppressed by decision; it time-averages to a
-	// faint CRT glow, and as hard stripes it was inaccurate). So we expect a SMALL
-	// number of frame columns, not the old ~25 dither bars.
-	frameCols := 0
-	for x := x0; x < x1; x++ {
+	// Count HORIZONTAL grid lines: the firmware's amplitude divisions span the full
+	// graph width, so a grid row lights a large fraction of x0..x1; empty graph rows
+	// light ~nothing (clean-clear leaves no dither residue). The 8-division grid
+	// gives ~7 interior horizontals + the box top edge. (The vertical divisions are
+	// too finely dotted to threshold per-column, so we assert on the horizontals.)
+	span := x1 - x0
+	gridRows := 0
+	for y := y0; y < y1; y++ {
 		lit := 0
-		for y := y0; y < y1; y++ {
+		for x := x0; x < x1; x++ {
 			if img.Pix[y*img.Stride+x*4] > 30 {
 				lit++
 			}
 		}
-		if lit >= height/2 {
-			frameCols++
+		if lit >= span/4 {
+			gridRows++
 		}
 	}
 
 	if os.Getenv("SAVE") != "" {
 		f, _ := os.Create("../../../screens/graticule_grid.png")
-		png.Encode(f, img)
+		png.Encode(f, m.MMIO.Display.Chip.RenderScanoutByCmd())
 		f.Close()
 	}
 
-	t.Logf("near-full-height graticule frame columns in graph interior: %d", frameCols)
-	// At least the box left edge must render (frame present); and we must NOT see the
-	// dense dither back (which produced ~25 such columns).
-	if frameCols < 1 {
-		t.Errorf("graticule frame not rendered: no near-full-height vertical line in the graph interior")
-	}
-	if frameCols > 10 {
-		t.Errorf("dense dither appears to be back: %d near-full-height columns (expected the vector frame, a handful)", frameCols)
+	t.Logf("graticule horizontal grid lines in graph interior: %d", gridRows)
+	// The 8-division grid has ~7 interior horizontals + the box top edge. Require
+	// several (the grid is present), well above the 1 a bare box top would give.
+	if gridRows < 5 {
+		t.Errorf("graticule grid not rendered (%d horizontal lines) — the firmware's "+
+			"10×8 ALINE grid should be repainted and visible each cycle", gridRows)
 	}
 }

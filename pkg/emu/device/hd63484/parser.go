@@ -346,7 +346,11 @@ func (dec *decoder) feed(c *Chip, w uint16) {
 		// grid, not to polyline area-outline draws. Force solid for the segment.
 		savedPat := c.linePattern
 		c.linePattern = 0xFFFF
+		if c.APLLUpper {
+			c.core.drawOffset = 0x4000 // experiment: APLL → upper memory region
+		}
 		c.drawLine(c.penX, c.penY, ex, ey, true)
+		c.core.drawOffset = 0
 		c.linePattern = savedPat
 		c.Lines++
 		c.penX, c.penY = ex, ey
@@ -402,6 +406,13 @@ func nextCPYState(s decoderState) decoderState {
 // dispatchCmd decodes a command opcode and transitions the parser to the
 // appropriate parameter-collection state.
 func (dec *decoder) dispatchCmd(c *Chip, w uint16) {
+	if t := cmdTagOf(w); t != tagNone {
+		c.core.curCmd = t // tag subsequent writes by command class (debug.go colour render)
+		// AREA bit (opcode bit 6) on a drawing command ⇒ clip draws to the ADR.
+		c.areaClip = (t == tagPoly || t == tagRect || t == tagLine || t == tagDot) && w&0x0040 != 0
+	} else {
+		c.areaClip = false
+	}
 	// Match WPR / RPR by mask first (they cover 32 register-numbered
 	// opcodes each).
 	if w&cmdWPRMask == cmdWPRBase {

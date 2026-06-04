@@ -3,6 +3,10 @@ package hd63484
 import (
 	"image"
 	"image/color"
+
+	"golang.org/x/image/font"
+	"golang.org/x/image/font/basicfont"
+	"golang.org/x/image/math/fixed"
 )
 
 // === Display regions ===
@@ -251,3 +255,91 @@ func (c *Chip) RenderMemoryAreasCollage() *image.RGBA {
 // SP returns split-screen width n (0=Upper,1=Base,2=Lower). CoreMWR1 returns MWR1.
 func (c *Chip) SP(n int) uint16 { if n<0||n>=len(c.sp){return 0}; return c.sp[n] }
 func (c *Chip) CoreMWR1() uint16 { return c.core.mwr[1] }
+
+// cmdTagOf classifies a command opcode into a cmdTag value (tagNone for
+// non-drawing commands so curCmd keeps the last drawing class).
+func cmdTagOf(w uint16) uint8 {
+	switch w & 0xFC00 {
+	case 0x9800, 0x9C00:
+		return tagPoly
+	}
+	switch {
+	case w&0xFFFC == 0x5C00:
+		return tagSCLR
+	case w&0xFFFE == 0xF000:
+		return tagCLR
+	case w&0xFFFE == 0x9000, w&0xFFFE == 0x9400, w&0xFFFE == 0xA000, w&0xFFFE == 0xA400:
+		return tagRect
+	case w&0xFFFE == 0x8800, w&0xFFFE == 0x8C00:
+		return tagLine
+	case w&0xFFFE == 0xCC00:
+		return tagDot
+	case w&0xFFFE == 0x1800:
+		return tagGlyph
+	}
+	return tagNone
+}
+
+// cmdTagColors maps each command class to a render colour.
+var cmdTagColors = [tagOther + 1]color.RGBA{
+	tagNone:   {0x10, 0x10, 0x10, 0xFF}, // grey  — untouched
+	tagPoly:   {0xFF, 0xB0, 0x00, 0xFF}, // amber — APLL/RPLL (trace + vector lines)
+	tagSCLR:   {0xFF, 0x20, 0x20, 0xFF}, // red   — SCLR area op
+	tagCLR:    {0xC0, 0x00, 0x60, 0xFF}, // magenta — CLR
+	tagRect:   {0x20, 0x80, 0xFF, 0xFF}, // blue  — ARCT/RRCT box+rects
+	tagLine:   {0x00, 0xFF, 0xFF, 0xFF}, // cyan  — ALINE/RLINE
+	tagDot:    {0xFF, 0xFF, 0x00, 0xFF}, // yellow— DOT
+	tagGlyph:  {0xFF, 0xFF, 0xFF, 0xFF}, // white — glyphs
+	tagRaster: {0x20, 0xC0, 0x40, 0xFF}, // green — 0x4400 raster pattern
+	tagOther:  {0x80, 0x80, 0x00, 0xFF},
+}
+
+// RenderUpperByCmd renders the UPPER memory region (core rows 256..511, the
+// 0x4000 page) coloured BY THE COMMAND that wrote each pixel (see cmdTagColors /
+// the legend in regionNames-style comments). Lit pixels take their command's
+// colour; unlit-but-written words show a faint tint of the writing command.
+func (c *Chip) RenderByCmd(startRow int) *image.RGBA {
+	const rows = 256
+	const legendH = 20
+	img := image.NewRGBA(image.Rect(0, 0, PaintRowPixels, rows+legendH))
+	mwr := PaintRowBytes / 2 // 64 words/line
+	for row := 0; row < rows; row++ {
+		coreRow := startRow + row
+		for px := 0; px < PaintRowPixels; px++ {
+			word := uint32(coreRow*mwr + px/16)
+			tag := c.core.cmdTag[word&acrtcRAMMask]
+			lit := c.core.ram[word&acrtcRAMMask]&(1<<uint(px&15)) != 0
+			cc := cmdTagColors[tag]
+			if !lit {
+				// unlit: dim the command colour to a faint tint (shows where each
+				// command cleared/wrote 0 without lighting a pixel)
+				cc = color.RGBA{cc.R / 6, cc.G / 6, cc.B / 6, 0xFF}
+			}
+			img.SetRGBA(px, row, cc)
+		}
+	}
+	drawCmdLegend(img, rows)
+	return img
+}
+
+var cmdTagLabels = [tagOther + 1]string{
+	tagNone: "none", tagPoly: "APLL/RPLL", tagSCLR: "SCLR", tagCLR: "CLR",
+	tagRect: "ARCT", tagLine: "ALINE/RLINE", tagDot: "DOT", tagGlyph: "glyph",
+	tagRaster: "raster", tagOther: "other",
+}
+
+func drawCmdLegend(img *image.RGBA, y0 int) {
+	x := 4
+	for tag := tagPoly; tag <= tagRaster; tag++ {
+		col := cmdTagColors[tag]
+		for dy := 4; dy < 16; dy++ {
+			for dx := 0; dx < 12; dx++ {
+				img.SetRGBA(x+dx, y0+dy, col)
+			}
+		}
+		label := cmdTagLabels[tag]
+		d := &font.Drawer{Dst: img, Src: image.NewUniform(col), Face: basicfont.Face7x13, Dot: fixed.P(x+16, y0+15)}
+		d.DrawString(label)
+		x += 16 + len(label)*7 + 14
+	}
+}
