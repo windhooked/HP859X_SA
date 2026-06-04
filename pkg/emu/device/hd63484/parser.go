@@ -341,17 +341,16 @@ func (dec *decoder) feed(c *Chip, w uint16) {
 		if dec.polyRel {
 			ex, ey = c.penX+dec.moveX, c.penY+int(int16(w))
 		}
-		// Polylines (the italic "hp" logo, vector glyphs) are SOLID strokes — the
-		// dotted-grid stipple (c.linePattern) applies to the graticule ALINE/RLINE
-		// grid, not to polyline area-outline draws. Force solid for the segment.
-		savedPat := c.linePattern
-		c.linePattern = 0xFFFF
+		// Polylines honour the firmware's line stipple (c.linePattern), like any
+		// other line draw — the firmware sets it per use: 0xFFFF (solid) before the
+		// trace's APLL, 0xCCCC (dash) before the hp-logo "p" RPLL. (An earlier
+		// force-solid override here wrongly made the dashed logo "p" solid while the
+		// "h" — drawn as RLINE — stayed dashed; the firmware draws both dashed.)
 		if c.APLLUpper {
 			c.core.drawOffset = 0x4000 // experiment: APLL → upper memory region
 		}
 		c.drawLine(c.penX, c.penY, ex, ey, true)
 		c.core.drawOffset = 0
-		c.linePattern = savedPat
 		c.Lines++
 		c.penX, c.penY = ex, ey
 		dec.polyN--
