@@ -136,6 +136,26 @@ func (c *Chip) execClear(cr, pattern uint16, ax, ay int16) {
 			if clip && (yfw < ymin || yfw > ymax || xfw+15 < xmin || xfw > xmax) {
 				continue
 			}
+			// Per-word X area-mask: which of this word's 16 px fall within
+			// [xmin,xmax]. At the area-def's right/left edge a word straddles the
+			// boundary; clearing the whole 16-px word there wiped the FIRST letter of
+			// the right-side softkey labels — their leading char sits in the boundary
+			// word (firmware x=400..415, one past xmax=400). Restrict the op to the
+			// in-bounds pixels so the boundary clear stops exactly at xmax.
+			am := uint16(0xFFFF)
+			if clip {
+				lo, hi := xmin-xfw, xmax-xfw
+				if lo < 0 {
+					lo = 0
+				}
+				if hi > 15 {
+					hi = 15
+				}
+				am = 0
+				for b := lo; b <= hi; b++ {
+					am |= 1 << uint(b)
+				}
+			}
 			if c.GraticuleToUpper && clip {
 				coreOff = (coreOff + 0x4000) & acrtcRAMMask // experiment hook
 			}
@@ -156,10 +176,15 @@ func (c *Chip) execClear(cr, pattern uint16, ax, ay int16) {
 				// trace then come from the firmware's per-frame redraws, not from a
 				// dither residue.
 				data := c.core.readword(coreOff)
-				m := c.core.mask
-				res := data &^ m
-				c.core.writeword(coreOff, res)
-				writePlaneWord(c.vram[:], a, res)
+				m := c.core.mask & am
+				if res := data &^ m; res != data {
+					// Only write (and re-tag) when the clear actually changes the word —
+					// so a boundary word whose in-bounds bits are already 0 keeps its
+					// glyph tag (the right-side labels' first letter renders as a glyph,
+					// not mis-coloured as SCLR).
+					c.core.writeword(coreOff, res)
+					writePlaneWord(c.vram[:], a, res)
+				}
 			case clip:
 				// FAITHFUL SCLR. Execute the chip's real logical op (cr&3: 0 REPLACE /
 				// 1 OR / 2 AND / 3 EOR) under the mask register — NOT a "clean clear".
@@ -168,7 +193,7 @@ func (c *Chip) execClear(cr, pattern uint16, ax, ay int16) {
 				// to the area-def (the chip clips area ops in area mode), so it never
 				// spills past the graph into the annunciators/softkeys.
 				data := c.core.readword(coreOff)
-				m := c.core.mask
+				m := c.core.mask & am
 				var res uint16
 				switch mm {
 				case 0:
@@ -180,8 +205,10 @@ func (c *Chip) execClear(cr, pattern uint16, ax, ay int16) {
 				case 3:
 					res = (data &^ m) | ((data ^ pattern) & m)
 				}
-				c.core.writeword(coreOff, res)
-				writePlaneWord(c.vram[:], a, res)
+				if res != data {
+					c.core.writeword(coreOff, res)
+					writePlaneWord(c.vram[:], a, res)
+				}
 			default:
 				// Logical SCLR with NO area-def (boot full-screen pass) — left
 				// untouched for now (the boot doesn't rely on it; revisit if needed).
