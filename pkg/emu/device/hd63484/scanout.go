@@ -159,13 +159,13 @@ func (c *Chip) RenderScanoutByCmd() *image.RGBA {
 		for word := 0; word < mwr; word++ {
 			off := base + uint32(word)
 			v := c.core.scanWord(off)
-			cc := cmdTagColors[c.core.scanTag(off)]
-			if cc.A == 0 {
-				cc = fgColor // lit but untagged ⇒ default foreground
-			}
 			for b := 0; b < 16; b++ {
 				col := color.RGBA{0, 0, 0, 0xFF}
 				if v&(1<<uint(b)) != 0 {
+					cc := cmdTagColors[c.core.scanTagBit(off, b)]
+					if cc.A == 0 {
+						cc = fgColor // lit but untagged ⇒ default foreground
+					}
 					col = cc
 				}
 				img.SetRGBA(word*16+b, dl, col)

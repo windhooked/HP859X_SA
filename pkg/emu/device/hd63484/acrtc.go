@@ -1,5 +1,7 @@
 package hd63484
 
+import "math/bits"
+
 // acrtc is the faithful HD63484 core being rebuilt per docs/HD63484_REBUILD_PROMPT.md:
 // a single FLAT, word-addressed frame buffer with logical→physical address
 // translation (ORG/MWR/bit-depth) and RWP-addressed area ops — a direct port of
@@ -19,6 +21,9 @@ package hd63484
 const (
 	acrtcRAMWords = 0x8000
 	acrtcRAMMask  = acrtcRAMWords - 1
+	// acrtcRAMPixels is the per-pixel count (16 px per word) for the per-pixel
+	// command-tag arrays.
+	acrtcRAMPixels = acrtcRAMWords * 16
 )
 
 type acrtc struct {
@@ -48,10 +53,12 @@ type acrtc struct {
 	// which controller memory regions the firmware actually populates.
 	writeHist [acrtcRAMWords >> 9]int
 
-	// curCmd tags which command class is currently writing; cmdTag records, per
-	// word, the last command that wrote it — for the by-command colour render.
+	// curCmd tags which command class is currently writing; cmdTag records, PER
+	// PIXEL, the command that last LIT it — for the by-command colour render. Indexed
+	// (word<<4)|bit. Per-pixel (not per-word) so a box edge sharing a 16-px word with
+	// a glyph/trace doesn't re-colour the neighbouring pixels.
 	curCmd uint8
-	cmdTag [acrtcRAMWords]uint8
+	cmdTag [acrtcRAMPixels]uint8
 
 	// stable / stableTag are a snapshot of ram / cmdTag taken at each frame
 	// boundary (snapshot()), so the scanout shows a COMPLETE, flicker-free frame
@@ -60,20 +67,20 @@ type acrtc struct {
 	// is the last fully-painted frame. haveStable gates it (false until the first
 	// frame boundary, so direct-draw unit tests read the live buffer).
 	stable     [acrtcRAMWords]uint16
-	stableTag  [acrtcRAMWords]uint8
+	stableTag  [acrtcRAMPixels]uint8
 	haveStable bool
 }
 
-// snapshot captures the current frame buffer (+ command tags) as the stable,
-// flicker-free image the scanout renders. Called at each frame boundary.
+// snapshot captures the current frame buffer (+ per-pixel command tags) as the
+// stable, flicker-free image the scanout renders. Called at each frame boundary.
 func (a *acrtc) snapshot() {
 	a.stable = a.ram
 	a.stableTag = a.cmdTag
 	a.haveStable = true
 }
 
-// scanWord / scanTag return the rendered word / command-tag at off — from the
-// stable snapshot if one exists, else live ram.
+// scanWord returns the rendered word at off — from the stable snapshot if one
+// exists, else live ram.
 func (a *acrtc) scanWord(off uint32) uint16 {
 	off &= acrtcRAMMask
 	if a.haveStable {
@@ -82,12 +89,14 @@ func (a *acrtc) scanWord(off uint32) uint16 {
 	return a.ram[off]
 }
 
-func (a *acrtc) scanTag(off uint32) uint8 {
-	off &= acrtcRAMMask
+// scanTagBit returns the command tag of pixel `bit` (0..15) in word off — from
+// the stable snapshot if one exists, else live.
+func (a *acrtc) scanTagBit(off uint32, bit int) uint8 {
+	idx := (off&acrtcRAMMask)<<4 | uint32(bit&15)
 	if a.haveStable {
-		return a.stableTag[off]
+		return a.stableTag[idx]
 	}
-	return a.cmdTag[off]
+	return a.cmdTag[idx]
 }
 
 // Command-class tags (cmdTag values).
@@ -155,9 +164,21 @@ func (a *acrtc) calcOffset(x, y int16) (offset uint32, bitPos uint8) {
 
 func (a *acrtc) readword(off uint32) uint16 { return a.ram[off&acrtcRAMMask] }
 func (a *acrtc) writeword(off uint32, v uint16) {
-	a.ram[off&acrtcRAMMask] = v
-	a.writeHist[(off&acrtcRAMMask)>>9]++ // 0x200-word (1 KB) page buckets
-	a.cmdTag[off&acrtcRAMMask] = a.curCmd
+	o := off & acrtcRAMMask
+	// Tag only the pixels this write NEWLY LIGHTS (0→1): a box-edge write that sets
+	// one bit of a word must not re-tag the glyph/trace pixels already lit in that
+	// word. Bits that stay lit keep their tag; cleared bits' tags are irrelevant
+	// (they render black).
+	if newly := v &^ a.ram[o]; newly != 0 {
+		base := o << 4
+		for newly != 0 {
+			b := bits.TrailingZeros16(newly)
+			a.cmdTag[base|uint32(b)] = a.curCmd
+			newly &= newly - 1
+		}
+	}
+	a.ram[o] = v
+	a.writeHist[o>>9]++ // 0x200-word (1 KB) page buckets
 }
 
 // getDot reads the logical pixel value at (x,y) (MAME get_dot).

@@ -307,8 +307,9 @@ func (c *Chip) RenderByCmd(startRow int) *image.RGBA {
 		coreRow := startRow + row
 		for px := 0; px < PaintRowPixels; px++ {
 			word := uint32(coreRow*mwr + px/16)
-			tag := c.core.cmdTag[word&acrtcRAMMask]
-			lit := c.core.ram[word&acrtcRAMMask]&(1<<uint(px&15)) != 0
+			bit := px & 15
+			tag := c.core.cmdTag[(word&acrtcRAMMask)<<4|uint32(bit)]
+			lit := c.core.ram[word&acrtcRAMMask]&(1<<uint(bit)) != 0
 			cc := cmdTagColors[tag]
 			if !lit {
 				// unlit: dim the command colour to a faint tint (shows where each
