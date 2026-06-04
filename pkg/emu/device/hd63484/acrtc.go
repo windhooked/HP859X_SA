@@ -69,6 +69,15 @@ type acrtc struct {
 	stable     [acrtcRAMWords]uint16
 	stableTag  [acrtcRAMPixels]uint8
 	haveStable bool
+
+	// renderLive makes scanWord/scanTagBit bypass the stable snapshot and read the
+	// LIVE buffer. The snapshot only updates on a graticule-grid redraw (the
+	// flicker-free operating display); modes that don't draw the grid — CAL DISP,
+	// command echo, menus — would freeze on the last snapshot. Interactive callers
+	// (the GUI) set this so EVERY mode refreshes; tests/golden leave it off for a
+	// deterministic complete-frame render. (Trade-off: the operating graticule may
+	// briefly blank under clean-clear.)
+	renderLive bool
 }
 
 // snapshot captures the current frame buffer (+ per-pixel command tags) as the
@@ -83,7 +92,7 @@ func (a *acrtc) snapshot() {
 // exists, else live ram.
 func (a *acrtc) scanWord(off uint32) uint16 {
 	off &= acrtcRAMMask
-	if a.haveStable {
+	if a.haveStable && !a.renderLive {
 		return a.stable[off]
 	}
 	return a.ram[off]
@@ -93,7 +102,7 @@ func (a *acrtc) scanWord(off uint32) uint16 {
 // the stable snapshot if one exists, else live.
 func (a *acrtc) scanTagBit(off uint32, bit int) uint8 {
 	idx := (off&acrtcRAMMask)<<4 | uint32(bit&15)
-	if a.haveStable {
+	if a.haveStable && !a.renderLive {
 		return a.stableTag[idx]
 	}
 	return a.cmdTag[idx]

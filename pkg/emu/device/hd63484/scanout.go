@@ -134,6 +134,12 @@ func (c *Chip) RenderScanout() *image.RGBA {
 	return img
 }
 
+// SetRenderLive makes the scanout read the LIVE frame buffer instead of the
+// stable snapshot — so EVERY firmware screen update (CAL DISP, command echo,
+// menus) refreshes immediately. Interactive callers (the GUI) set this; tests
+// leave it off for a deterministic complete-frame render. See acrtc.renderLive.
+func (c *Chip) SetRenderLive(b bool) { c.core.renderLive = b }
+
 // RenderScanoutByCmd renders the same register-derived scanout window as
 // RenderScanout, but colours each lit pixel BY THE COMMAND that drew it
 // (cmdTagColors) and appends a legend strip at the bottom. This is the canonical

@@ -341,6 +341,11 @@ func main() {
 	// offline decoding of which clear/draw commands the firmware issues.
 	m.MMIO.Display.Chip.EnableCmdTrace(16384)
 
+	// Render the LIVE buffer so EVERY mode refreshes (CAL DISP, command echo,
+	// menus) — the stable-frame snapshot only updates on the operating display's
+	// graticule redraw and would otherwise freeze the GUI in other modes.
+	m.MMIO.Display.Chip.SetRenderLive(true)
+
 	g := &game{
 		m:     m,
 		lb:    emutest.NewLoopBreaker(50),
