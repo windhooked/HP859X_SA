@@ -27,6 +27,7 @@ package main
 
 import (
 	"fmt"
+	"image"
 	"image/png"
 	"log"
 	"os"
@@ -45,7 +46,7 @@ import (
 // saveScreen writes the current HD63484 framebuffer to screens/gui_<timestamp>.png
 // and returns the path, or an error message.
 func saveScreen(m *machine.Machine) string {
-	img := m.MMIO.Display.Chip.RenderFrame()
+	img := m.MMIO.Display.Chip.RenderScanoutByCmd()
 	ts := time.Now().Format("20060102_150405")
 	path := fmt.Sprintf("screens/gui_%s.png", ts)
 	f, err := os.Create(path)
@@ -178,6 +179,18 @@ type game struct {
 	// probe mode: cycle through all 48 matrix bits to find key positions
 	probeMode bool
 	probeBit  int
+	// byCmd selects the by-command coloured display view (default) vs realistic
+	// amber; toggled with Ctrl+V.
+	byCmd bool
+}
+
+// renderDisplay returns the current display image: the register-derived scanout,
+// either coloured by drawing command (with a legend) or plain amber.
+func (g *game) renderDisplay() *image.RGBA {
+	if g.byCmd {
+		return g.m.MMIO.Display.Chip.RenderScanoutByCmd()
+	}
+	return g.m.MMIO.Display.Chip.RenderScanout()
 }
 
 func (g *game) Update() error {
@@ -209,6 +222,17 @@ func (g *game) Update() error {
 		if inpututil.IsKeyJustPressed(ebiten.KeyR) {
 			g.m.MMIO.Display.Chip.StartCmdCapture(262144)
 			g.lastMsg = "cmd capture armed — do the action, then Ctrl+S"
+		}
+		// Ctrl+V: toggle the display view between the realistic amber scanout and
+		// the by-command coloured view (each pixel tinted by the command that drew
+		// it, with a legend strip).
+		if inpututil.IsKeyJustPressed(ebiten.KeyV) {
+			g.byCmd = !g.byCmd
+			if g.byCmd {
+				g.lastMsg = "view: by-command (amber: Ctrl+V)"
+			} else {
+				g.lastMsg = "view: amber (by-command: Ctrl+V)"
+			}
 		}
 	}
 
@@ -271,7 +295,14 @@ func (g *game) Update() error {
 }
 
 func (g *game) Draw(screen *ebiten.Image) {
-	img := g.m.MMIO.Display.RenderFrame()
+	img := g.renderDisplay()
+	b := img.Bounds()
+	// The scanout dimensions (and the legend strip) differ from the legacy
+	// RenderFrame size, so size the framebuffer to whatever the render produces;
+	// WritePixels requires an exact match.
+	if g.fb == nil || g.fb.Bounds().Dx() != b.Dx() || g.fb.Bounds().Dy() != b.Dy() {
+		g.fb = ebiten.NewImage(b.Dx(), b.Dy())
+	}
 	g.fb.WritePixels(img.Pix)
 	screen.DrawImage(g.fb, nil)
 	msg := ""
@@ -284,7 +315,13 @@ func (g *game) Draw(screen *ebiten.Image) {
 		byte(g.m.Bus.Read(0xFFBC67, 1)), g.lastKey, g.keyReads, msg))
 }
 
-func (g *game) Layout(int, int) (int, int) { return device.DisplayWidth, device.DisplayHeight }
+func (g *game) Layout(int, int) (int, int) {
+	if g.fb != nil {
+		b := g.fb.Bounds()
+		return b.Dx(), b.Dy()
+	}
+	return device.DisplayWidth, device.DisplayHeight
+}
 
 func main() {
 	img, err := romloader.LoadDir("hp8593a_eeproms")
@@ -305,12 +342,16 @@ func main() {
 	m.MMIO.Display.Chip.EnableCmdTrace(16384)
 
 	g := &game{
-		m:  m,
-		lb: emutest.NewLoopBreaker(50),
-		fb: ebiten.NewImage(device.DisplayWidth, device.DisplayHeight),
+		m:     m,
+		lb:    emutest.NewLoopBreaker(50),
+		fb:    ebiten.NewImage(device.DisplayWidth, device.DisplayHeight),
+		byCmd: true, // default to the by-command coloured view (Ctrl+V toggles)
 	}
 
-	ebiten.SetWindowSize(device.DisplayWidth*2, device.DisplayHeight*2)
+	// The scanout is 1024 px wide × 256 lines (+ a 20-px legend strip). Show it at
+	// 1× width with a 1.5× vertical stretch (≈ the 4:3 CRT geometry); the window is
+	// resizable and Layout adapts to the actual render size.
+	ebiten.SetWindowSize(1024, 414)
 	ebiten.SetWindowTitle("HP 8593A — booting…")
 	ebiten.SetWindowResizingMode(ebiten.WindowResizingModeEnabled)
 	if err := ebiten.RunGame(g); err != nil {
