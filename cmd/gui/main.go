@@ -95,6 +95,11 @@ const (
 	cyclesPerFrame = 2_000_000
 	chunkCycles    = 2000
 	irqEvery       = 5
+	// liveHoldFrames is how many frames after a key press the display keeps
+	// rendering the LIVE buffer (so typed-command echo / menu updates show at once
+	// — the real instrument echoes as you type). ~0.7s at 60fps comfortably bridges
+	// the gap between keystrokes while typing a command.
+	liveHoldFrames = 40
 	irqServiceCost = 400
 	irq4Cost       = 600 // IRQ4 handler is slightly heavier (transport + ring-buf)
 )
@@ -182,6 +187,11 @@ type game struct {
 	// byCmd selects the by-command coloured display view (default) vs realistic
 	// amber; toggled with Ctrl+V.
 	byCmd bool
+	// liveHold counts down frames during which the display renders the LIVE buffer
+	// regardless of sweep state, so typed-command echo / menu changes appear
+	// immediately (as on the real instrument) instead of waiting for the firmware
+	// to leave sweep mode. Refreshed by every key press; see Update.
+	liveHold int
 }
 
 // renderDisplay returns the current display image: the register-derived scanout,
@@ -242,6 +252,7 @@ func (g *game) Update() error {
 		if inpututil.IsKeyJustPressed(k) && fp.Known() {
 			g.m.FrontPanel.SetBit(fp.Byte, fp.Bit)
 			g.lastKey = fp.Name
+			g.liveHold = liveHoldFrames
 		}
 	}
 	// Probe mode: Tab steps through all 48 matrix bits to locate unknown keys.
@@ -275,6 +286,7 @@ func (g *game) Update() error {
 			if make := device.ATMake(atk); make != nil {
 				g.m.ATKeyboard.Enqueue(make...)
 				g.lastKey = fmt.Sprintf("AT%v", k)
+				g.liveHold = liveHoldFrames
 			}
 		}
 		// Break (key-up): inject the F0 release code.
@@ -289,6 +301,16 @@ func (g *game) Update() error {
 		g.m.CPU.SetIRQ(4)
 		g.m.CPU.Run(irq4Cost)
 		g.m.CPU.SetIRQ(0)
+	}
+
+	// Render source: the LIVE buffer while typing (so command echo / menu changes
+	// appear immediately, as on the real instrument) or whenever the firmware isn't
+	// sweeping (CAL DISP / menus); otherwise the stable snapshot, which keeps the
+	// periodically-repainted graticule grid on screen flicker-free. See
+	// Machine.SweepIdle + liveHold.
+	g.m.MMIO.Display.Chip.SetRenderLive(g.m.SweepIdle() || g.liveHold > 0)
+	if g.liveHold > 0 {
+		g.liveHold--
 	}
 
 	return nil
@@ -341,10 +363,12 @@ func main() {
 	// offline decoding of which clear/draw commands the firmware issues.
 	m.MMIO.Display.Chip.EnableCmdTrace(16384)
 
-	// Render the LIVE buffer so EVERY mode refreshes (CAL DISP, command echo,
-	// menus) — the stable-frame snapshot only updates on the operating display's
-	// graticule redraw and would otherwise freeze the GUI in other modes.
-	m.MMIO.Display.Chip.SetRenderLive(true)
+	// Render source is chosen per-frame in Update() from the firmware's display
+	// mode (m.SweepIdle): the STABLE snapshot while sweeping (so the periodically-
+	// repainted graticule grid stays on screen flicker-free) and the LIVE buffer
+	// while idle (CAL DISP / menus, which the snapshot can't refresh). Initialise
+	// to the snapshot.
+	m.MMIO.Display.Chip.SetRenderLive(false)
 
 	g := &game{
 		m:     m,

@@ -126,6 +126,11 @@ type Machine struct {
 	// driveSweepCycle and docs/TRACE_DISPLAY_PATH.md "TWO-IRQ SWEEP MODEL".
 	SweepDrive bool
 	sweepAccum int // cycle accumulator that paces sweep points (see driveSweepCycle)
+	// sweepHold counts down the driveSweepCycle chunks remaining in the "firmware
+	// is sweeping" hold. Each sweep-wait poll (MMIO.ConsumeSweepRegionPoll) refreshes
+	// it to sweepHoldChunks; while >0 the sweep injection free-runs. It decays to 0
+	// within ~1 frame once the firmware stops polling the sweep-wait (CAL DISP / menus).
+	sweepHold int
 
 	// Timer is the autonomous periodic-interrupt source: it synthesises the
 	// firmware's IRQ5 timer tick that real hardware (the MC68230 PIT, a zeroed
@@ -198,6 +203,11 @@ func New8593A(romImage []byte) (*Machine, error) {
 		return nil, err
 	}
 
+	// Let the MMIO sweep-status read handler see the current PC, so it can tell a
+	// sweep-wait poll (spectrum display) from the background poll — the trigger
+	// the analog sweep driver gates on (driveSweepCycle).
+	mmio.PCFunc = func() uint32 { return c.Reg(cpu.PC) }
+
 	return &Machine{
 		Bus: b, CPU: c, ROM: rom, CalNVRAM: calNVRAM, CalRAM: calRAM,
 		ATKeyboard: atKbd, FrontPanel: fp,
@@ -230,6 +240,12 @@ const (
 	sweepCyclesPerPoint = 2300 // pace: one sweep point per ~2300 cycles ⇒ ~58 ms / 401-pt sweep
 	sweepStepCost       = 400  // cycles allowed for the IRQ1 sweep-step handler to run
 	sweepCaptureCost    = 250  // cycles allowed for the IRQ6 capture handler to run
+	// sweepHoldChunks is how many driveSweepCycle chunks the sweep injection keeps
+	// free-running after each sweep-wait poll. It must bridge the gap between the
+	// firmware's (sparse, when fed) sweep-wait polls — ~one sweep ≈ 461 chunks — so
+	// 1000 (≈2M cycles ≈ one GUI frame) bridges comfortably while still letting the
+	// hold decay within a frame once the firmware leaves the sweep code (cal mode).
+	sweepHoldChunks = 1000
 )
 
 // pumpTimer advances the autonomous timer by ranCycles of just-executed mainline
@@ -337,6 +353,16 @@ func (m *Machine) bootLoop(maxCycles int, lb *emutest.LoopBreaker) {
 // trace processes and draws, and the operating loop advances, the faithful way
 // (no flag-forcing). Data comes from m.MMIO.Sweep via SweepActive. See
 // docs/TRACE_DISPLAY_PATH.md "TWO-IRQ SWEEP MODEL".
+// SweepIdle reports whether the firmware is NOT currently sweeping — i.e. the
+// sweep-wait hold has fully decayed (no sweep-wait poll for ~1 frame). It is the
+// firmware-display-mode signal the GUI uses to pick its render source: while
+// sweeping (idle=false) render the flicker-free STABLE snapshot so the
+// periodically-repainted graticule grid stays on screen; while idle (idle=true —
+// CAL DISP, menus, the firmware not driving the spectrum) render the LIVE buffer
+// so those non-sweep screens refresh. (The sweep gate keeps the live buffer
+// stable in those modes, since it no longer injects phantom sweeps there.)
+func (m *Machine) SweepIdle() bool { return m.sweepHold == 0 }
+
 // DriveOneSweepChunk fires the sweep IRQs for one boot-chunk's worth of cycles.
 // GUI and other real-time drivers call this once per CPU chunk (after CPU.Run)
 // to keep the sweep progressing in lock-step. Equivalent to what bootLoop does
@@ -349,6 +375,26 @@ func (m *Machine) DriveOneSweepChunk() {
 }
 
 func (m *Machine) driveSweepCycle() {
+	// Faithful trigger: only inject a sweep while the firmware is in its sweep
+	// code. It reads the sweep-status register (0xFFF300) from a sweep-wait region
+	// (measurement processor 0x171xx / operating-loop wait 0x188BA) only when
+	// displaying the spectrum; a non-sweep screen (CAL DISP, menus) reaches neither
+	// and so never opens the gate. Those polls are sparse when the firmware is
+	// being fed (it isn't spinning), so a one-shot gate would throttle injection to
+	// nothing — instead each poll REFRESHES a short hold and we free-run inject
+	// while the hold is live, matching the old continuous feed. In cal mode no poll
+	// refreshes it, so the hold decays within ~1 frame and the screen persists.
+	// This replaces the old unconditional free-run (gated only on the bf34 capture
+	// vector, which stays armed in cal mode) that dragged the firmware into an SCLR
+	// storm and wiped the cal display.
+	if m.MMIO.ConsumeSweepRegionPoll() {
+		m.sweepHold = sweepHoldChunks
+	} else if m.sweepHold > 0 {
+		m.sweepHold--
+	}
+	if m.sweepHold == 0 {
+		return
+	}
 	bf34 := m.Bus.Read(0xFFBF34, bus.Long)
 	if bf34 != 0x40B8 && bf34 != 0x410A {
 		return

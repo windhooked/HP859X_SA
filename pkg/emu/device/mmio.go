@@ -103,6 +103,30 @@ const sweepStatusOffset = 0x300
 // mode) are preserved from whatever the firmware wrote.
 const sweepStatusReady = uint32(0x1000)
 
+// Sweep-wait PC regions: a 0xFFF300 read from inside these is the firmware
+// waiting for a sweep (spectrum display only). measRegion covers the measurement
+// /sweep-processor fcn.171f6 (the sweep-waits at 0x1723A/0x17258/0x17460);
+// opWaitRegion covers fcn.18568's idle-wait read at 0x188BA. The background poll
+// (0x3F00) and the op-tick entry read (0x18570) are deliberately outside both,
+// so CAL DISP / menus — which reach only those — never open the sweep gate.
+const (
+	measRegionLo = 0x017000
+	measRegionHi = 0x017600
+	opWaitLo     = 0x018800
+	opWaitHi     = 0x0188F0
+)
+
+// ConsumeSweepRegionPoll reports whether the firmware has read the sweep-status
+// register from one of its sweep-wait code regions since the last call, then
+// clears the flag. The analog sweep driver uses it (with a short hold) to keep
+// injecting while the firmware is sweeping and to stop once it isn't (CAL DISP /
+// menus reach neither region). Requires PCFunc to be set.
+func (m *HP8593AMMIO) ConsumeSweepRegionPoll() bool {
+	v := m.sweepRegionPoll
+	m.sweepRegionPoll = false
+	return v
+}
+
 // 0xFFF75C / 0xFFF75E are an indirect register-select-and-data pair —
 // the A16's analog-control hybrid (multiplexer + DAC + ADC readback) based
 // on the way the firmware drives it. The firmware writes a select to
@@ -207,6 +231,18 @@ type HP8593AMMIO struct {
 	// repeats.
 	sweepPoint  int
 	SweepPoints int
+
+	// PCFunc, if set, returns the current CPU PC (the machine wires it to
+	// m.CPU.Reg(PC)). It lets the sweep-status read handler classify a 0xFFF300
+	// read by WHERE it came from: the firmware polls it from its sweep-wait code
+	// (the measurement processor fcn.171f6, ROM 0x171xx, and the operating-loop
+	// idle-wait at 0x188BA) only while displaying the spectrum. A non-sweep screen
+	// (CAL DISP, menus) reaches neither — it touches 0xFFF300 only via the sparse
+	// background poll (ROM 0x3F00). So a read from a sweep-wait PC is the genuine,
+	// injection-independent "I am sweeping" signal the analog sweep driver gates
+	// on. See ConsumeSweepRegionPoll + machine.driveSweepCycle.
+	PCFunc          func() uint32
+	sweepRegionPoll bool
 
 	// Sweep is the analog-model sweep engine backing the 0xFFF200 video-ADC
 	// reads (faithful spectrum: CAL peak + noise floor). See sweepengine.go.
@@ -446,8 +482,16 @@ func (m *HP8593AMMIO) Read(addr uint32, sz bus.Size) uint32 {
 			return (v & 0xFF00) | sciStatusReady
 		}
 		// Sweep-status register: OR in the "ready" bit regardless of the stored
-		// value so every firmware polling pattern returns immediately.
+		// value so every firmware polling pattern returns immediately. Flag the
+		// read when it comes from a sweep-wait code region — the signal the analog
+		// sweep driver gates injection on (ConsumeSweepRegionPoll).
 		if addr == sweepStatusOffset {
+			if m.PCFunc != nil {
+				if pc := m.PCFunc(); (pc >= measRegionLo && pc <= measRegionHi) ||
+					(pc >= opWaitLo && pc <= opWaitHi) {
+					m.sweepRegionPoll = true
+				}
+			}
 			return v | sweepStatusReady
 		}
 		// Display data port (0x5FE): return the chip's block-read word. The
