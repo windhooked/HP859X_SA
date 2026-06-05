@@ -76,7 +76,7 @@ var (
 	// (the 0x4400 page superimposed under the bright foreground) — dim enough to
 	// read as the real CRT's faint dotted grid, not hard bright stripes.
 	gridDimColor = color.RGBA{R: 0x3A, G: 0x28, B: 0x00, A: 0xFF}
-	ditherColor    = color.RGBA{R: 0x0E, G: 0x0E, B: 0x0E, A: 0xFF} // bg dither → near-black
+	ditherColor  = color.RGBA{R: 0x0E, G: 0x0E, B: 0x0E, A: 0xFF} // bg dither → near-black
 )
 
 // Status-byte bit layout (read from address+1 / offset 0x5FD in the 8593 MMIO).
@@ -301,6 +301,13 @@ type Chip struct {
 	glyphFG uint16
 	glyphBG uint16
 
+	// Pending glyph: the HD63484 renders text in TWO commands — WPTN loads the
+	// glyph bitmap into pattern RAM, then PTN (0xD000) blits it at the pen sized by
+	// SZ. So WPTN stashes the rows here and the PTN handler (drawPattern) does the
+	// actual blit. pendGlyph gates whether a glyph is staged. See wptn.go.
+	pendRows  [glyphRows]uint16
+	pendGlyph bool
+
 	// Command-decoder state (parser.go is the state machine).
 	dec decoder
 
@@ -520,13 +527,14 @@ func (c *Chip) resetBounds() {
 // ORG command is issued. They are set by the 8593 firmware's display-init routine
 // (ROM 0xA95E) via the ORG command with XW=0x4003, XD=0xa450, MWR1=0x40=64:
 //
-//   ORG_col = (XW % MWR1) * 16 + (XD & 0xF) = (3)*16 + 0 = 48
-//   ORG_row = XW / MWR1                       = 16387 / 64 = 256
+//	ORG_col = (XW % MWR1) * 16 + (XD & 0xF) = (3)*16 + 0 = 48
+//	ORG_row = XW / MWR1                       = 16387 / 64 = 256
 //
 // The ORG command sets the drawing-coordinate origin in display memory. All
 // firmware drawing coordinates (AMOVE/ALINE/etc.) are relative to this origin:
-//   VRAM_col = ORG_col + fwX
-//   VRAM_row = ORG_row - fwY  (Y-up→Y-down flip)
+//
+//	VRAM_col = ORG_col + fwX
+//	VRAM_row = ORG_row - fwY  (Y-up→Y-down flip)
 //
 // displayScanStart is the first VRAM row the display's visible window scans from.
 // It derives from the HD63484's vertical window registers (VWR-A=5, MWR1=64) and
@@ -537,8 +545,9 @@ func (c *Chip) resetBounds() {
 // at the top of the screen for date/time / HP-logo content the firmware may draw
 // in future (or which the real instrument draws when the RTC and options are
 // present). So:
-//   displayScanStart = 23
-//   effective drawYOrigin = ORG_row - displayScanStart = 256 - 23 = 233
+//
+//	displayScanStart = 23
+//	effective drawYOrigin = ORG_row - displayScanStart = 256 - 23 = 233
 //
 // NOTE (2026-06-03): the firmware's RWP-addressed SCLR area-clear targets the
 // EFFECTIVE position (≈ vram row 233 for the graph bottom), while the pen STORES
@@ -589,8 +598,8 @@ func (c *Chip) setVRAMPixel(x, y int) {
 		c.core.drawOffset = 0
 		c.RegionWrites[regionOf(x, y)]++
 	}
-	x = c.orgCol + x    // firmware X → VRAM column via ORG
-	y = c.orgRow - y    // firmware Y-up → VRAM Y-down via ORG
+	x = c.orgCol + x // firmware X → VRAM column via ORG
+	y = c.orgRow - y // firmware Y-up → VRAM Y-down via ORG
 	addr := c.vramByteAddr(x, y)
 	if addr < 0 {
 		return
@@ -613,8 +622,8 @@ func (c *Chip) clearVRAMPixel(x, y int) {
 		c.core.setDot(int16(x), int16(y), 0) // faithful core dual-write (Phase 3)
 		c.core.drawOffset = 0
 	}
-	x = c.orgCol + x    // firmware X → VRAM column via ORG
-	y = c.orgRow - y    // firmware Y-up → VRAM Y-down via ORG
+	x = c.orgCol + x // firmware X → VRAM column via ORG
+	y = c.orgRow - y // firmware Y-up → VRAM Y-down via ORG
 	addr := c.vramByteAddr(x, y)
 	if addr < 0 {
 		return

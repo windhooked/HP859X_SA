@@ -253,27 +253,35 @@ func (c *Chip) RenderMemoryAreasCollage() *image.RGBA {
 }
 
 // SP returns split-screen width n (0=Upper,1=Base,2=Lower). CoreMWR1 returns MWR1.
-func (c *Chip) SP(n int) uint16 { if n<0||n>=len(c.sp){return 0}; return c.sp[n] }
+func (c *Chip) SP(n int) uint16 {
+	if n < 0 || n >= len(c.sp) {
+		return 0
+	}
+	return c.sp[n]
+}
 func (c *Chip) CoreMWR1() uint16 { return c.core.mwr[1] }
 
 // cmdTagOf classifies a command opcode into a cmdTag value (tagNone for
 // non-drawing commands so curCmd keeps the last drawing class).
 func cmdTagOf(w uint16) uint8 {
+	// Opcodes follow the manual's sequential map: polylines AND polygons sit at
+	// 0x9800–0xA7FF; the filled rectangles AFRCT/RFRCT are 0xC0xx/0xC4xx (the old
+	// table had 0xA000/0xA400 mis-tagged as rectangles — they are APLG/RPLG).
 	switch w & 0xFC00 {
-	case 0x9800, 0x9C00:
+	case 0x9800, 0x9C00, 0xA000, 0xA400: // APLL/RPLL/APLG/RPLG
 		return tagPoly
+	case 0x9000, 0x9400, 0xC000, 0xC400: // ARCT/RRCT + AFRCT/RFRCT
+		return tagRect
+	case 0x8800, 0x8C00: // ALINE/RLINE
+		return tagLine
+	case 0xCC00: // DOT
+		return tagDot
 	}
 	switch {
 	case w&0xFFFC == 0x5C00:
 		return tagSCLR
 	case w&0xFFFE == 0xF000:
 		return tagCLR
-	case w&0xFFFE == 0x9000, w&0xFFFE == 0x9400, w&0xFFFE == 0xA000, w&0xFFFE == 0xA400:
-		return tagRect
-	case w&0xFFFE == 0x8800, w&0xFFFE == 0x8C00:
-		return tagLine
-	case w&0xFFFE == 0xCC00:
-		return tagDot
 	case w&0xFFFE == 0x1800:
 		return tagGlyph
 	}

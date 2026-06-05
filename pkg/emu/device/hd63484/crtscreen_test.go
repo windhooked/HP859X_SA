@@ -30,6 +30,7 @@ func drawSolidGlyph(c *Chip, x, y uint16) {
 	for i := 0; i < glyphRows; i++ {
 		feedWords(c, 0xFFFF) // all 16 columns lit
 	}
+	feedWords(c, cmdPTN, 0x0907) // PTN: blit the staged glyph (SZ = 8×10 cell)
 }
 
 // setRWP sets the Read/Write Pointer to word offset `off` via WPR 0x0C/0x0D,

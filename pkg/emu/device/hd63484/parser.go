@@ -16,7 +16,7 @@ const (
 	cmdWPRMask = 0xFFE0 // mask to match the WPR family (0x0800..0x081F)
 	cmdRPRBase = 0x0C00 // RPR    — read parameter register (low 5 bits = reg #; 0 args, 1 result)
 	cmdRPRMask = 0xFFE0
-	cmdGCHR    = 0xD000 // (per-glyph attribute/terminator; 1 arg) — emitted after each text glyph
+	cmdPTN     = 0xD000 // PTN    — Pattern draw: blit the WPTN-staged pattern-RAM glyph at the pen, sized by SZ (1 arg). The 8593 emits it after every text glyph (was mis-identified as a stub "GCHR").
 	cmdWPTN    = 0x1800 // WPTN   — write pattern RAM (next word = count of pattern words)
 	cmdRPTN    = 0x1C00 // RPTN   — read pattern RAM (1 arg, returns count words)
 	cmdSCAN    = 0x1400 // SCAN   — scan boundary (rare; 1 arg)
@@ -32,503 +32,248 @@ const (
 	cmdARCT = 0x9000 // ARCT   — absolute rectangle outline (2 args: endX, endY)
 	cmdRRCT = 0x9400 // RRCT   — relative rectangle outline (2 args: dX, dY)
 
-	// Filled-rectangle commands (top nibble 0xA).
-	cmdAFRCT = 0xA000 // AFRCT  — absolute filled rectangle (2 args)
-	cmdRFRCT = 0xA400 // RFRCT  — relative filled rectangle (2 args)
-
-	// Polyline / polygon commands (top nibble 0xB).
-	cmdAPLL = 0xB000 // APLL   — absolute polyline (variable; ended by RTN)
-	cmdRPLL = 0xB400 // RPLL   — relative polyline
-	cmdAPLG = 0xB800 // APLG   — absolute polygon (closes back to start)
-	cmdRPLG = 0xBC00 // RPLG   — relative polygon
-
-	// Circle / ellipse (top nibble 0xC except DOT).
-	cmdCRCL = 0xC000 // CRCL   — circle (1 arg: radius)
-	cmdELPS = 0xC400 // ELPS   — ellipse (2 args)
-	cmdDOT  = 0xCC00 // DOT    — plot one pixel at the pen (0 args)
+	// Graphic-drawing opcodes are a SEQUENTIAL top-6-bit map per the HD63484 manual
+	// (command summary, docs/hd63484_um.txt). The previous constants in the
+	// 0xA000–0xCC00 range were SCRAMBLED (e.g. AFRCT was coded 0xA000=APLG, CRCL
+	// 0xC000=AFRCT); corrected here. The 8593 firmware only emits AMOVE/RMOVE/
+	// ALINE/RLINE/ARCT/RRCT/APLL/RPLL/DOT/WPTN/PTN (verified by a full command-
+	// stream trace), so the rest are framed for correctness but their draws are
+	// gated/unmodelled.
+	cmdAPLL  = 0x9800 // APLL   — absolute polyline (count-prefixed: n then 2n coords)
+	cmdRPLL  = 0x9C00 // RPLL   — relative polyline
+	cmdAPLG  = 0xA000 // APLG   — absolute polygon (count-prefixed)
+	cmdRPLG  = 0xA400 // RPLG   — relative polygon
+	cmdCRCL  = 0xA800 // CRCL   — circle (1 arg: radius)
+	cmdELPS  = 0xAC00 // ELPS   — ellipse (3 args: a, b, dX)
+	cmdAARC  = 0xB000 // AARC   — absolute arc (4 args)
+	cmdRARC  = 0xB400 // RARC   — relative arc (4 args)
+	cmdAEARC = 0xB800 // AEARC  — absolute ellipse arc (6 args)
+	cmdREARC = 0xBC00 // REARC  — relative ellipse arc (6 args)
+	cmdAFRCT = 0xC000 // AFRCT  — absolute filled rectangle (2 args: endX, endY)
+	cmdRFRCT = 0xC400 // RFRCT  — relative filled rectangle (2 args: dX, dY)
+	cmdPAINT = 0xC800 // PAINT  — flood-fill from pen (0 args + E flag)
+	cmdDOT   = 0xCC00 // DOT    — plot one pixel at the pen (0 args)
 
 	// Block fill (used by the POST display-memory self-test at ROM 0xD6B2).
-	// 0x5800 fills a (dx+1)×(dy+1) region of display memory at the current
-	// write pointer with a single pattern word: params = pattern, dx, dy.
-	// The firmware writes 0x5800, pattern, 0x003F, 0x00FF → 64×256 = 16384
-	// words, then reads them all back via RD to verify the RAM. See dmem.
-	cmdBLKFILL = 0x5800 // (3 args: pattern, dx, dy)
+	// 0x5800 is the manual's CLR (clear an area); the 8593 uses it to fill a
+	// (dx+1)×(dy+1) region with a pattern word (params = pattern, dx, dy), then
+	// reads it back via RD to verify the RAM. See dmem.
+	cmdBLKFILL = 0x5800 // CLR — (3 args: pattern, dx, dy)
 
-	// Memory operations (top nibble 0xE/0xF).
-	cmdPAINT = 0xE000 // PAINT  — flood-fill from pen
-	cmdDMR   = 0xE800 // DMR    — DMA read
-	cmdDMW   = 0xEC00 // DMW    — DMA write
-	cmdCLR   = 0xF000 // CLR    — clear an area (3 args: data, dx, dy)
-	cmdSCLR  = 0xF400 // SCLR   — screen clear (1 arg: fill word)
-	cmdCPY   = 0xF800 // CPY    — area copy (4 args)
-	cmdSCPY  = 0xFC00 // SCPY   — screen-area copy (4 args)
+	// NON-STANDARD placeholder opcodes for the legacy area-fill / copy PRIMITIVES
+	// (exercised by crtscreen_test.go). These are NOT the manual's real codes — the
+	// manual's CLR/SCLR are 0x5800 / 0x5C00 (the real ones the 8593 firmware emits,
+	// dispatched above / by the 0x5C00 mask) and CPY/SCPY live in the 0x7xxx range.
+	// The 8593 never emits 0xF0xx, so these only drive the unit-test fill/clear
+	// path; left as-is to keep that scope separate from the graphic-opcode fix.
+	cmdCLR  = 0xF000 // legacy CLR primitive (test-only): clear/fill an area (3 args)
+	cmdSCLR = 0xF400 // legacy SCLR primitive (test-only): screen fill (1 arg)
+	cmdCPY  = 0xF800 // legacy CPY primitive (test-only): area copy (4 args)
+	cmdSCPY = 0xFC00 // legacy SCPY primitive (test-only): screen-area copy (4 args)
 )
 
-// decoderState is the parser's "what word do I expect next" state. Each
-// multi-word command has its own slot so we can read the parameter words
-// without disambiguating from the next command word.
+// Glyph packet: a WPTN with count=glyphWPTNCount (10) is the 8593 firmware's text
+// glyph — 2 colour selector words then glyphRows (8) bitmap rows — LOADED into
+// pattern RAM and then blitted by the following PTN command. See execWPTN / wptn.go.
+const (
+	glyphRows      = 8
+	glyphWPTNCount = 0x000A
+)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Declarative command table + generic operand collector.
+//
+// The HD63484 command FIFO is a bare stream of 16-bit words with NO framing
+// markers, so the parser must know EXACTLY how many parameter words each command
+// consumes to stay in sync — a wrong count desyncs everything after it. We keep
+// that knowledge as DATA in cmdSpecOf, a direct transcription of the manual's
+// command summary, so the framing is exhaustive and auditable in ONE place
+// (TestCommandFraming pins it). A generic collector (decoder.collect) gathers the
+// operands per the spec; execCmd applies the (separately-verified) side effects.
+// This replaces the former one-state-per-parameter-word machine, where operand
+// counts were implicit in the state graph and a wrong count (e.g. the old
+// WPTN/PTN handling) could slip in unnoticed.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// cmdID identifies a decoded command for execCmd.
+type cmdID uint8
+
+const (
+	idNOP cmdID = iota
+	idORG
+	idWPR
+	idRPR
+	idWPTN
+	idRPTN
+	idSCAN
+	idAMOVE
+	idRMOVE
+	idALINE
+	idRLINE
+	idARCT
+	idRRCT
+	idAPLL
+	idRPLL
+	idAPLG
+	idRPLG
+	idCRCL
+	idELPS
+	idAARC
+	idAEARC
+	idAFRCT
+	idRFRCT
+	idPAINT
+	idDOT
+	idPTN
+	idBLKFILL
+	idSCLRarea
+	idCLRlegacy
+	idSCLRlegacy
+	idCPY
+)
+
+// operandKind tells the collector how to frame a command's operand words.
+type operandKind uint8
+
+const (
+	opNone          operandKind = iota // 0 operands; execute immediately
+	opFixed                            // exactly n operand words
+	opCountPrefixed                    // 1 count word N, then n*N operand words
+)
+
+// cmdSpecOf maps a command word to its (id, operand framing). System/register
+// commands have bespoke encodings; graphic-drawing commands are the top-6-bit
+// opcode with AREA/COL/OPM attribute bits in the low 10 (masked off here — safe
+// now that the framing is exhaustive, so data words never reach this point). ok
+// is false for an unrecognised opcode (a genuine unimplemented command OR a parser
+// desync — the caller surfaces it via panic/gate).
+func cmdSpecOf(w uint16) (id cmdID, kind operandKind, n int, ok bool) {
+	// System / register / data-transfer commands (bespoke encodings).
+	switch {
+	case w == cmdNOP:
+		return idNOP, opNone, 0, true
+	case w == cmdORG:
+		return idORG, opFixed, 2, true
+	case w&cmdWPRMask == cmdWPRBase:
+		return idWPR, opFixed, 1, true
+	case w&cmdRPRMask == cmdRPRBase:
+		return idRPR, opNone, 0, true
+	case w == cmdWPTN:
+		return idWPTN, opCountPrefixed, 1, true
+	case w == cmdRPTN:
+		return idRPTN, opFixed, 1, true
+	case w == cmdSCAN:
+		return idSCAN, opFixed, 1, true
+	case w == cmdBLKFILL: // 0x5800 — manual CLR
+		return idBLKFILL, opFixed, 3, true
+	case w&0xFFFC == 0x5C00: // SCLR (logical-op in low 2 bits)
+		return idSCLRarea, opFixed, 3, true
+	}
+	// Graphic-drawing commands: base = top 6 bits (attribute bits masked off).
+	switch w & 0xFC00 {
+	case cmdAMOVE:
+		return idAMOVE, opFixed, 2, true
+	case cmdRMOVE:
+		return idRMOVE, opFixed, 2, true
+	case cmdALIN0: // 0x8800 — ALINE (+ attr variants)
+		return idALINE, opFixed, 2, true
+	case cmdRLINE: // 0x8C00
+		return idRLINE, opFixed, 2, true
+	case cmdARCT:
+		return idARCT, opFixed, 2, true
+	case cmdRRCT:
+		return idRRCT, opFixed, 2, true
+	case cmdAPLL:
+		return idAPLL, opCountPrefixed, 2, true
+	case cmdRPLL:
+		return idRPLL, opCountPrefixed, 2, true
+	case cmdAPLG:
+		return idAPLG, opCountPrefixed, 2, true
+	case cmdRPLG:
+		return idRPLG, opCountPrefixed, 2, true
+	case cmdCRCL:
+		return idCRCL, opFixed, 1, true
+	case cmdELPS:
+		return idELPS, opFixed, 3, true
+	case cmdAARC:
+		return idAARC, opFixed, 4, true
+	case cmdRARC:
+		return idAARC, opFixed, 4, true
+	case cmdAEARC:
+		return idAEARC, opFixed, 6, true
+	case cmdREARC:
+		return idAEARC, opFixed, 6, true
+	case cmdAFRCT:
+		return idAFRCT, opFixed, 2, true
+	case cmdRFRCT:
+		return idRFRCT, opFixed, 2, true
+	case cmdPAINT:
+		return idPAINT, opNone, 0, true
+	case cmdDOT:
+		return idDOT, opNone, 0, true
+	case cmdPTN:
+		return idPTN, opFixed, 1, true
+	// legacy test-only placeholders (non-standard; see const note).
+	case cmdCLR: // 0xF000
+		return idCLRlegacy, opFixed, 3, true
+	case cmdSCLR: // 0xF400
+		return idSCLRlegacy, opFixed, 1, true
+	case cmdCPY, cmdSCPY: // 0xF800 / 0xFC00
+		return idCPY, opFixed, 4, true
+	}
+	return 0, 0, 0, false
+}
+
+// decoderState — the table-driven parser has just three states.
 type decoderState int
 
 const (
-	stCmd          decoderState = iota // hub: awaiting a command word
-	stMoveX                            // AMOVE: next word = X
-	stMoveY                            // AMOVE: next word = Y
-	stRMoveX                           // RMOVE: next word = dX
-	stRMoveY                           // RMOVE: next word = dY
-	stLineX                            // ALINE: next word = endX
-	stLineY                            // ALINE: next word = endY
-	stRLineX                           // RLINE: next word = dX
-	stRLineY                           // RLINE: next word = dY
-	stRctX                             // ARCT:  next word = endX
-	stRctY                             // ARCT:  next word = endY
-	stRRctX                            // RRCT:  next word = dX
-	stRRctY                            // RRCT:  next word = dY
-	stFRctX                            // AFRCT/RFRCT: next word = endX/dX
-	stFRctY                            //              next word = endY/dY
-	stWPRArg                           // WPR:   consume one value word
-	stGlyphA                           // WPTN(10): consume 0x000A header
-	stGlyphFG                          //   then  fg selector
-	stGlyphBG                          //   then  bg selector
-	stGlyphRows                        //   then  glyphRows × bitmap rows
-	stGlyphTrailer                     //   then  glyphTrailLen × trailer words
-	stWPTNCount                        // WPTN: read count word (for non-glyph variants)
-	stRasterData                       // raster (memory-write) mode active
-	stORG1                             // ORG: next word = origin X
-	stORG2                             //      then     = origin Y
-	stCRCLArg                          // CRCL: radius
-	stPAINTSeed                        // PAINT: seed colour
-	stSCLRArg                          // SCLR: fill word
-	stCLRData                          // CLR:  fill word
-	stCLRDX                            // CLR:  dx (width-1)
-	stCLRDY                            // CLR:  dy (height-1)
-	stCPYSrcLo                         // CPY:  source MAR low
-	stCPYSrcHi                         // CPY:  source MAR high
-	stCPYDX                            // CPY:  dx
-	stCPYDY                            // CPY:  dy
-	stBlkPattern                       // BLKFILL: fill pattern word
-	stBlkDX                            // BLKFILL: dx (width-1)
-	stBlkDY                            // BLKFILL: dy (height-1)
-	stPolyCount                        // APLL/RPLL: vertex-count word N
-	stPolyX                            // APLL/RPLL: vertex X / ΔX
-	stPolyY                            // APLL/RPLL: vertex Y / ΔY
-	stSkip                             // consume dec.skipN words then return to stCmd
+	stCmd        decoderState = iota // hub: awaiting a command word
+	stCollect                        // collecting operand words for the current command
+	stRasterData                     // streaming a bulk video-RAM raster burst (MAR pair)
 )
 
-// Glyph packet layout: a WPTN with count=10 is interpreted as a text-glyph
-// blit by the 8593 firmware. The packet has this structure:
-//
-//	0x1800 0x000A           ← WPTN header + count
-//	fg, bg                  ← 2 colour selector words (palette pen indices)
-//	row0..row7              ← 8 × 16-bit bitmap rows (LSB = leftmost pixel)
-//	trailer × 4             ← post-glyph state (0805 reg-write + 3 values)
-//
-// Calibrated against the live Rev L firmware stream — see cmd/displayprobe
-// for the run-folded view of an actual packet.
-const (
-	glyphRows      = 8
-	glyphTrailLen  = 4
-	glyphWPTNCount = 0x000A // WPTN count that identifies a glyph packet
-)
-
-// decoder is the chip's command-FIFO parser. Each WriteData feeds one word;
-// the parser dispatches based on the current state and the word value.
+// decoder is the chip's command-FIFO parser. Each WriteData feeds one word; the
+// parser frames the command per cmdSpecOf and executes it via execCmd.
 type decoder struct {
-	st decoderState
+	st           decoderState
+	cmdWord      uint16   // command word being collected (for attr bits / SCLR cr / WPR reg)
+	curID        cmdID    // which command
+	stride       int      // operand words per count unit (opCountPrefixed)
+	args         []uint16 // collected operand words (args[0] = count for opCountPrefixed)
+	need         int      // remaining operand words to collect
+	countPending bool     // the next operand word is the count (opCountPrefixed)
 
-	// In-flight command working storage.
-	moveX, moveY int    // captured pen / endpoint coords during multi-word cmds
-	wprReg       uint16 // register selected by an in-flight WPR
-	rows         [glyphRows]uint16
-	rowIdx       int
-	trailIdx     int
-	wptnCount    int // pending WPTN data-word count
-	wptnPos      int // words consumed so far in a non-glyph WPTN
-
-	// CLR working storage.
-	clrData uint16
-	clrDX   int
-	// areaCR/isArea capture an in-flight 0x5C00-family SCLR (the real
-	// RWP-addressed area fill): areaCR is the command word (logical-op + mode
-	// bits), isArea routes stCLRDY to execClear instead of the legacy drawFilledRect.
-	areaCR uint16
-	isArea bool
-
-	// Polyline working storage (APLL/RPLL): remaining vertex count and whether
-	// the coordinates are relative (RPLL) or absolute (APLL).
-	polyN   int
-	polyRel bool
-
-	// skipN counts the remaining parameter words to consume for a framed-but-
-	// unrendered command (stSkip).
-	skipN int
+	// Raster-burst streaming bookkeeping (feedRaster / handleWPRSideEffect).
+	wptnCount int
+	wptnPos   int
 }
 
-// feed dispatches a single 16-bit word into the chip according to the
-// current decoder state. Most multi-word commands have their own state
-// slots; the hub case (stCmd) decodes the command opcode and transitions.
+// feed dispatches a single 16-bit word according to the current state.
 func (dec *decoder) feed(c *Chip, w uint16) {
 	switch dec.st {
 	case stCmd:
 		dec.dispatchCmd(c, w)
-	case stMoveX:
-		dec.moveX = int(int16(w))
-		dec.st = stMoveY
-	case stMoveY:
-		c.penX = dec.moveX
-		c.penY = int(int16(w))
-		c.Moves++
-		dec.st = stCmd
-	case stRMoveX:
-		dec.moveX = int(int16(w))
-		dec.st = stRMoveY
-	case stRMoveY:
-		c.penX += dec.moveX
-		c.penY += int(int16(w))
-		c.Moves++
-		dec.st = stCmd
-	case stLineX:
-		dec.moveX = int(int16(w))
-		dec.st = stLineY
-	case stLineY:
-		ly := int(int16(w))
-		c.drawLineRouted(c.penX, c.penY, dec.moveX, ly)
-		c.penX, c.penY = dec.moveX, ly
-		c.Lines++
-		dec.st = stCmd
-	case stRLineX:
-		dec.moveX = int(int16(w))
-		dec.st = stRLineY
-	case stRLineY:
-		ex := c.penX + dec.moveX
-		ey := c.penY + int(int16(w))
-		c.drawLineRouted(c.penX, c.penY, ex, ey)
-		c.penX, c.penY = ex, ey
-		c.Lines++
-		dec.st = stCmd
-	case stRctX:
-		dec.moveX = int(int16(w))
-		dec.st = stRctY
-	case stRctY:
-		c.drawRect(c.penX, c.penY, dec.moveX, int(int16(w)), true)
-		c.Rects++
-		dec.st = stCmd
-	case stRRctX:
-		dec.moveX = int(int16(w))
-		dec.st = stRRctY
-	case stRRctY:
-		ex := c.penX + dec.moveX
-		ey := c.penY + int(int16(w))
-		c.drawRect(c.penX, c.penY, ex, ey, true)
-		c.Rects++
-		dec.st = stCmd
-	case stFRctX:
-		dec.moveX = int(int16(w))
-		dec.st = stFRctY
-	case stFRctY:
-		c.drawFilledRect(c.penX, c.penY, dec.moveX, int(int16(w)), true)
-		c.FilledRects++
-		dec.st = stCmd
-	case stORG1:
-		dec.moveX = int(int16(w)) // XW — word address in display memory
-		dec.st = stORG2
-	case stORG2:
-		// ORG: compute the drawing-coordinate origin from (XW, XD).
-		//   ORG_col = (XW % MWR1) * 16 + (XD & 0xF)
-		//   ORG_row = XW / MWR1
-		// MWR1 is the words-per-row from the display init. Use dispMWR if set,
-		// otherwise fall back to the default (64 words = 1024 px/row for Rev L).
-		xw := dec.moveX
-		xd := int(w & 0xF) // dot position within the word (bits 0–3 of XD param)
-		mwr := int(c.dispMWR)
-		if mwr <= 0 {
-			mwr = PaintRowBytes / 2 // 64 words/row default
-		}
-		c.orgCol = (xw%mwr)*16 + xd
-		c.orgRow = xw / mwr
-		// Faithful core (Phase 2): decode ORG from the raw (XW, XD) params per the
-		// MAME COMMAND_ORG formula — dpa/dpd/dn, the unified physical origin.
-		c.core.setORG(uint16(xw), w)
-		c.regs[0x1F] = uint16(xw) // stash XW for register-read diagnostics
-		c.OrgLog = append(c.OrgLog, [2]int{xw, int(w)})
-		dec.st = stCmd
-	case stCRCLArg:
-		// CRCL — circle of radius |w| at current pen.
-		c.drawCircle(c.penX, c.penY, int(int16(w)), true)
-		dec.st = stCmd
-	case stPAINTSeed:
-		// PAINT seed colour — flood fill from current pen until boundary.
-		// Modelled as a no-op for now; the 8593 firmware doesn't use this
-		// path in its boot sequence (we'd see it via the unknown-cmd
-		// histogram if it did).
-		_ = w
-		dec.st = stCmd
-	case stSCLRArg:
-		// SCLR — screen clear / fill. Replicates `w` across the entire
-		// vram. A common firmware call is `SCLR 0x0000` to zero the
-		// screen between frames.
-		c.fillVRAM(w)
-		c.ScreenClears++
-		dec.st = stCmd
-	case stCLRData:
-		dec.clrData = w
-		dec.st = stCLRDX
-	case stCLRDX:
-		dec.clrDX = int(int16(w))
-		dec.st = stCLRDY
-	case stCLRDY:
-		// CLR — clear (or fill) a (dx+1)×(dy+1) area starting at the pen.
-		// data=0 means "clear to dark"; non-zero means "fill lit". Real
-		// hardware uses the fill word as a pattern, but the firmware only
-		// uses 0/all-ones, so a binary lit/dark mapping is faithful.
-		if dec.isArea {
-			// Real RWP-addressed SCLR: pattern=clrData, ΔX=clrDX, ΔY=w.
-			c.execClear(dec.areaCR, dec.clrData, int16(dec.clrDX), int16(w))
-			dec.isArea = false
-			dec.st = stCmd
-			break
-		}
-		dy := int(int16(w))
-		ex := c.penX + dec.clrDX
-		ey := c.penY + dy
-		c.drawFilledRect(c.penX, c.penY, ex, ey, dec.clrData != 0)
-		c.AreaClears++
-		dec.st = stCmd
-	case stCPYSrcLo, stCPYSrcHi, stCPYDX, stCPYDY:
-		// CPY — area copy. Not used by the 8593 boot stream; we consume
-		// the parameter words to keep the parser aligned and advance to
-		// the next command without actually performing the copy.
-		dec.st = nextCPYState(dec.st)
-		_ = w
-	case stBlkPattern:
-		dec.clrData = w // reuse clrData as the block-fill pattern
-		dec.st = stBlkDX
-	case stBlkDX:
-		dec.clrDX = int(w) + 1 // width in words = dx+1
-		dec.st = stBlkDY
-	case stBlkDY:
-		// BLKFILL completes: populate the chip's display memory (dmem)
-		// with (dx+1)*(dy+1) copies of the pattern, then rewind the read
-		// pointer so the firmware's verify loop reads it back from the
-		// start. This is the write half of the POST RAM self-test.
-		c.blockFill(dec.clrData, dec.clrDX*(int(w)+1))
-		dec.st = stCmd
-	case stPolyCount:
-		// APLL/RPLL vertex count. The command is count-prefixed: N vertices
-		// follow as N (X,Y) pairs. N==0 ends immediately.
-		dec.polyN = int(w)
-		if dec.polyN <= 0 {
-			dec.st = stCmd
-		} else {
-			dec.st = stPolyX
-		}
-	case stSkip:
-		// Consume one parameter word of a framed-but-unrendered command.
-		dec.skipN--
-		if dec.skipN <= 0 {
-			dec.st = stCmd
-		}
-	case stPolyX:
-		dec.moveX = int(int16(w))
-		dec.st = stPolyY
-	case stPolyY:
-		// One polyline vertex. APLL/RPLL draw a connected line through the
-		// vertex list (pen → v1 → v2 → …). Now that the ORG drawing-origin is
-		// faithfully applied (setVRAMPixel uses c.orgCol/c.orgRow), the vertices
-		// land in the right place — so we DRAW each segment. This renders the
-		// firmware's vector content that uses polylines, e.g. the italic "hp"
-		// logo in the top-left status line.
-		ex, ey := dec.moveX, int(int16(w))
-		if dec.polyRel {
-			ex, ey = c.penX+dec.moveX, c.penY+int(int16(w))
-		}
-		// Polylines honour the firmware's line stipple (c.linePattern), like any
-		// other line draw — the firmware sets it per use: 0xFFFF (solid) before the
-		// trace's APLL, 0xCCCC (dash) before the hp-logo "p" RPLL. (An earlier
-		// force-solid override here wrongly made the dashed logo "p" solid while the
-		// "h" — drawn as RLINE — stayed dashed; the firmware draws both dashed.)
-		if c.APLLUpper {
-			c.core.drawOffset = 0x4000 // experiment: APLL → upper memory region
-		}
-		c.drawLine(c.penX, c.penY, ex, ey, true)
-		c.core.drawOffset = 0
-		c.Lines++
-		c.penX, c.penY = ex, ey
-		dec.polyN--
-		if dec.polyN <= 0 {
-			dec.st = stCmd
-		} else {
-			dec.st = stPolyX
-		}
-	case stWPRArg:
-		c.writeRegister(dec.wprReg, w)
-		// handleWPRSideEffect may transition the parser into a follow-up
-		// state (e.g. stRasterData when the MAR pair primes a video-RAM
-		// burst). Only fall back to stCmd if it didn't.
-		dec.st = stCmd
-		dec.handleWPRSideEffect(c, dec.wprReg, w)
-	case stWPTNCount:
-		dec.wptnCount = int(w)
-		dec.wptnPos = 0
-		if w == glyphWPTNCount {
-			dec.st = stGlyphFG // 2 colour words then 8 rows then trailer
-		} else if w == 0 {
-			dec.st = stCmd
-		} else {
-			// Non-glyph WPTN: read `count` words into pattern RAM.
-			dec.st = stRasterData // re-use raster path with a finite count
-			// Use a sentinel: if wptnCount > 0 we're writing pattern, not
-			// vram. The stRasterData handler honours this distinction by
-			// inspecting wptnCount.
-		}
-	case stGlyphFG, stGlyphBG, stGlyphRows, stGlyphTrailer:
-		dec.feedGlyph(c, w)
+	case stCollect:
+		dec.collect(c, w)
 	case stRasterData:
 		dec.feedRaster(c, w)
 	}
 }
 
-// nextCPYState advances through the 4-word CPY parameter sequence and
-// returns stCmd after the last parameter has been consumed.
-func nextCPYState(s decoderState) decoderState {
-	switch s {
-	case stCPYSrcLo:
-		return stCPYSrcHi
-	case stCPYSrcHi:
-		return stCPYDX
-	case stCPYDX:
-		return stCPYDY
-	default:
-		return stCmd
-	}
-}
-
-// dispatchCmd decodes a command opcode and transitions the parser to the
-// appropriate parameter-collection state.
+// dispatchCmd decodes a command word and starts operand collection (or executes
+// immediately for a 0-operand command).
 func (dec *decoder) dispatchCmd(c *Chip, w uint16) {
+	// Tag the command class (by-command colour render) and the AREA-clip flag.
 	if t := cmdTagOf(w); t != tagNone {
-		c.core.curCmd = t // tag subsequent writes by command class (debug.go colour render)
-		// AREA bit (opcode bit 6) on a drawing command ⇒ clip draws to the ADR.
+		c.core.curCmd = t
 		c.areaClip = (t == tagPoly || t == tagRect || t == tagLine || t == tagDot) && w&0x0040 != 0
 	} else {
 		c.areaClip = false
 	}
-	// Match WPR / RPR by mask first (they cover 32 register-numbered
-	// opcodes each).
-	if w&cmdWPRMask == cmdWPRBase {
-		dec.wprReg = w & 0x001F
-		dec.st = stWPRArg
-		return
-	}
-	if w&cmdRPRMask == cmdRPRBase {
-		// RPR — read parameter register (0 args; pushes the register value into
-		// the read-FIFO). The read-FIFO is not modelled. Recognised-but-stubbed:
-		// gate it (panics unless allowlisted) then stay at command position.
-		c.gate("cmd:rpr", "command RPR %#04x (read parameter register; read-FIFO not modelled)", w)
-		return
-	}
-	// Count-prefixed polyline family — APLL (0x9800) / RPLL (0x9C00). The low
-	// 10 bits carry attribute/area-mode flags; mask them off. These are the
-	// commands that previously desynced the parser (e.g. 0x9841): they read a
-	// vertex-count word then 2×N coordinate words, NOT a fixed 2. Masking with
-	// 0xFC00 keeps APLL/RPLL distinct from ARCT(0x9000)/RRCT(0x9400).
-	switch w & 0xFC00 {
-	case 0x9800: // APLL — absolute polyline (rendered: pen → v1 → v2 → …)
-		dec.polyRel = false
-		dec.st = stPolyCount
-		return
-	case 0x9C00: // RPLL — relative polyline (rendered)
-		dec.polyRel = true
-		dec.st = stPolyCount
-		return
-	}
-	// SCLR (0x5C00 | logical-op in low 2 bits) — the real HD63484 selective area
-	// clear/fill (MAME). Params: pattern, ΔX, ΔY. It writes WORD-granular at the
-	// Read/Write Pointer (WPR 0x0C/0x0D), MWR words per raster line, applying the
-	// pattern through the logical op (cr&3) under maskReg. The cal-data display
-	// (CAL DISP;) repaints the screen with this (`5c02 5555 ΔX 00d1`). Collected
-	// via the CLR states; stCLRDY dispatches execClear (see area_ops.go).
-	if w&0xFFFC == 0x5C00 {
-		dec.areaCR = w
-		dec.isArea = true
-		dec.st = stCLRData
-		return
-	}
-	// Strict exact-match dispatch. The family-mask approach (each top-6-
-	// bits subdivision = one shape command, low 10 bits = attribute
-	// flags) is structurally correct per the HD63484 datasheet, BUT in
-	// practice the firmware emits MANY 16-bit values as parameter / glyph
-	// row data that happen to have top nibbles overlapping the command
-	// space (e.g. a glyph row of 0x9300 would mask-match into the ARCT
-	// family and swallow 2 unrelated words as "arguments"). Each false
-	// positive cascades into 3-word desync. Until we can validate the
-	// chip-side parameter framing per command (which would let us tell
-	// "real opcode" from "data that looks like opcode"), keep exact
-	// matches only and add the specific attribute-bit variants the
-	// firmware actually uses (sourced from cmd/_r2survey).
-	switch w {
-	case cmdNOP:
-		// NOP — no parameters; remain at command position.
-	case cmdORG:
-		dec.st = stORG1
-	case cmdAMOVE:
-		dec.st = stMoveX
-	case cmdRMOVE:
-		dec.st = stRMoveX
-	case cmdALIN0, cmdALINE: // 0x8800 / 0x8801 — ALINE without/with attr
-		dec.st = stLineX
-	case cmdRLINE, 0x8C01: // 0x8C00 / 0x8C01 — RLINE without/with attr
-		dec.st = stRLineX
-	case cmdARCT, 0x9001: // 0x9000 / 0x9001 — ARCT without/with attr
-		dec.st = stRctX
-	case cmdRRCT, 0x9401: // 0x9400 / 0x9401 — RRCT without/with attr
-		dec.st = stRRctX
-	case cmdAFRCT, 0xA001: // 0xA000 / 0xA001 — AFRCT without/with attr
-		dec.st = stFRctX
-	case cmdRFRCT, 0xA401: // 0xA400 / 0xA401 — RFRCT without/with attr
-		dec.st = stFRctX
-	case cmdDOT, 0xCC01: // 0xCC00 / 0xCC01 — DOT without/with attr
-		c.setVRAMPixel(c.penX, c.penY)
-		c.Dots++
-		if c.DotLog != nil {
-			c.DotLog = append(c.DotLog, DotRec{c.penX, c.penY})
-		}
-	case cmdCRCL:
-		dec.st = stCRCLArg
-	case cmdWPTN:
-		dec.st = stWPTNCount
-	case cmdPAINT:
-		c.gate("cmd:paint", "command PAINT %#04x (flood-fill from pen; not modelled)", w)
-		dec.st = stPAINTSeed
-	case cmdSCLR, 0xF401: // 0xF400 / 0xF401 — SCLR without/with attr
-		dec.st = stSCLRArg
-	case cmdCLR, 0xF001: // 0xF000 / 0xF001 — CLR without/with attr (legacy path)
-		dec.isArea = false
-		dec.st = stCLRData
-	case cmdCPY, 0xF801, cmdSCPY, 0xFC01:
-		c.gate("cmd:cpy", "command CPY/SCPY %#04x (area copy, 4 args; consumed but not performed)", w)
-		dec.st = stCPYSrcLo
-	case cmdBLKFILL:
-		dec.st = stBlkPattern
-	case cmdRPTN, cmdSCAN:
-		// 0-or-1 arg commands. Recognised-but-stubbed: gate (panics unless
-		// allowlisted) then stay at command position.
-		c.gate("cmd:rptn-scan", "command %#04x (RPTN/SCAN; not modelled)", w)
-	case cmdGCHR:
-		// Post-glyph attribute/terminator command (1 arg). The firmware emits
-		// it after every text glyph (docs/research.md §7 trailer:
-		// 0x0805 0x0000 0xD000 0x0907). Its argument tracks glyph content but
-		// has no observable effect on our 1bpp monochrome render. Recognised-
-		// but-stubbed: gate it (allowlist cmd:0xd000) and frame its single
-		// argument so the command stream stays in sync.
-		if c.gate("cmd:0xd000", "command 0xD000 (post-glyph attribute, 1 arg) — side-effect not modelled") {
-			dec.skipN = 1
-			dec.st = stSkip
-		}
-	default:
-		// Faithfulness gate: an opcode with no handler. This is either a
-		// genuinely-unimplemented command or a parser desync (data misread as a
-		// command) — both must be surfaced, not silently tallied. Record for the
-		// panic context, then panic.
+	id, kind, n, ok := cmdSpecOf(w)
+	if !ok {
+		// Unknown opcode: an unimplemented command OR a parser desync. Surface it.
 		c.UnknownCmds++
 		if c.UnknownCmdHist != nil {
 			c.UnknownCmdHist[w]++
@@ -537,5 +282,220 @@ func (dec *decoder) dispatchCmd(c *Chip, w uint16) {
 			return
 		}
 		c.unimplementedf("command opcode %#04x at command position (no handler)", w)
+		return
+	}
+	dec.cmdWord = w
+	dec.curID = id
+	dec.stride = n
+	dec.args = dec.args[:0]
+	switch kind {
+	case opNone:
+		dec.st = stCmd
+		dec.execCmd(c)
+	case opFixed:
+		if n == 0 {
+			dec.st = stCmd
+			dec.execCmd(c)
+			return
+		}
+		dec.need = n
+		dec.countPending = false
+		dec.st = stCollect
+	case opCountPrefixed:
+		dec.need = 1 // read the count word first
+		dec.countPending = true
+		dec.st = stCollect
+	}
+}
+
+// collect gathers one operand word; when the framing is satisfied it executes.
+func (dec *decoder) collect(c *Chip, w uint16) {
+	dec.args = append(dec.args, w)
+	dec.need--
+	if dec.countPending {
+		// args[0] was the count N: now need stride*N more operand words.
+		dec.countPending = false
+		dec.need += dec.stride * int(w)
+	}
+	if dec.need <= 0 {
+		dec.st = stCmd // default; execCmd may override (WPR → stRasterData)
+		dec.execCmd(c)
+	}
+}
+
+// execCmd applies a command's side effects from its collected operands (args).
+// This is the only place command SEMANTICS live; framing is entirely in
+// cmdSpecOf, so the two can be audited independently. Unmodelled-but-framed
+// commands gate (panic unless allowlisted) so an unexpected appearance surfaces.
+func (dec *decoder) execCmd(c *Chip) {
+	a := dec.args
+	switch dec.curID {
+	case idNOP:
+		// no operation
+
+	case idORG:
+		// ORG_col = (XW % MWR1)*16 + (XD & 0xF); ORG_row = XW / MWR1.
+		xw := int(int16(a[0]))
+		xd := int(a[1] & 0xF)
+		mwr := int(c.dispMWR)
+		if mwr <= 0 {
+			mwr = PaintRowBytes / 2 // 64 words/row default
+		}
+		c.orgCol = (xw%mwr)*16 + xd
+		c.orgRow = xw / mwr
+		c.core.setORG(uint16(xw), a[1]) // faithful core ORG (dpa/dpd/dn)
+		c.regs[0x1F] = uint16(xw)
+		c.OrgLog = append(c.OrgLog, [2]int{xw, int(a[1])})
+
+	case idWPR:
+		reg := dec.cmdWord & 0x001F
+		c.writeRegister(reg, a[0])
+		// May transition the parser (MAR pair → stRasterData) — execCmd runs after
+		// dec.st was set to stCmd, so this side effect can override it.
+		dec.handleWPRSideEffect(c, reg, a[0])
+	case idRPR:
+		// Read parameter register (read-FIFO not modelled).
+		c.gate("cmd:rpr", "command RPR %#04x (read parameter register; read-FIFO not modelled)", dec.cmdWord)
+
+	case idAMOVE:
+		c.penX, c.penY = int(int16(a[0])), int(int16(a[1]))
+		c.Moves++
+	case idRMOVE:
+		c.penX += int(int16(a[0]))
+		c.penY += int(int16(a[1]))
+		c.Moves++
+
+	case idALINE:
+		ex, ey := int(int16(a[0])), int(int16(a[1]))
+		c.drawLineRouted(c.penX, c.penY, ex, ey)
+		c.penX, c.penY = ex, ey
+		c.Lines++
+	case idRLINE:
+		ex, ey := c.penX+int(int16(a[0])), c.penY+int(int16(a[1]))
+		c.drawLineRouted(c.penX, c.penY, ex, ey)
+		c.penX, c.penY = ex, ey
+		c.Lines++
+
+	case idARCT:
+		c.drawRect(c.penX, c.penY, int(int16(a[0])), int(int16(a[1])), true)
+		c.Rects++
+	case idRRCT:
+		ex, ey := c.penX+int(int16(a[0])), c.penY+int(int16(a[1]))
+		c.drawRect(c.penX, c.penY, ex, ey, true)
+		c.Rects++
+
+	case idAFRCT:
+		c.drawFilledRect(c.penX, c.penY, int(int16(a[0])), int(int16(a[1])), true)
+		c.FilledRects++
+	case idRFRCT:
+		ex, ey := c.penX+int(int16(a[0])), c.penY+int(int16(a[1]))
+		c.drawFilledRect(c.penX, c.penY, ex, ey, true)
+		c.FilledRects++
+
+	case idAPLL, idRPLL, idAPLG, idRPLG:
+		dec.drawPolyline(c)
+
+	case idCRCL:
+		c.drawCircle(c.penX, c.penY, int(int16(a[0])), true)
+
+	case idDOT:
+		c.setVRAMPixel(c.penX, c.penY)
+		c.Dots++
+		if c.DotLog != nil {
+			c.DotLog = append(c.DotLog, DotRec{c.penX, c.penY})
+		}
+
+	case idWPTN:
+		dec.execWPTN(c)
+	case idPTN:
+		c.drawPattern(a[0])
+
+	case idBLKFILL: // 0x5800 — fill (dx+1)*(dy+1) words for the POST RAM test
+		c.blockFill(a[0], (int(a[1])+1)*(int(a[2])+1))
+	case idSCLRarea: // 0x5C00 — RWP-addressed selective area clear/fill
+		c.execClear(dec.cmdWord, a[0], int16(a[1]), int16(a[2]))
+
+	case idSCLRlegacy: // 0xF400 — legacy screen-fill primitive (test-only)
+		c.fillVRAM(a[0])
+		c.ScreenClears++
+	case idCLRlegacy: // 0xF000 — legacy area clear/fill primitive (test-only)
+		dx := int(int16(a[1]))
+		dy := int(int16(a[2]))
+		c.drawFilledRect(c.penX, c.penY, c.penX+dx, c.penY+dy, a[0] != 0)
+		c.AreaClears++
+
+	case idELPS:
+		c.gate("cmd:ellipse", "command ELPS %#04x (ellipse; not modelled)", dec.cmdWord)
+	case idAARC:
+		c.gate("cmd:arc", "command ARC %#04x (arc; not modelled)", dec.cmdWord)
+	case idAEARC:
+		c.gate("cmd:earc", "command EARC %#04x (ellipse arc; not modelled)", dec.cmdWord)
+	case idPAINT:
+		c.gate("cmd:paint", "command PAINT %#04x (flood-fill from pen; not modelled)", dec.cmdWord)
+	case idCPY:
+		c.gate("cmd:cpy", "command CPY/SCPY %#04x (area copy; consumed but not performed)", dec.cmdWord)
+	case idRPTN, idSCAN:
+		c.gate("cmd:rptn-scan", "command %#04x (RPTN/SCAN; not modelled)", dec.cmdWord)
+	}
+}
+
+// drawPolyline renders APLL/RPLL/APLG/RPLG: args[0]=N, then N (X,Y) vertices.
+// Relative variants (RPLL/RPLG) accumulate from the pen; polygons (APLG/RPLG)
+// close back to the start. Honours the firmware's line stipple (c.linePattern).
+func (dec *decoder) drawPolyline(c *Chip) {
+	a := dec.args
+	n := int(a[0])
+	rel := dec.curID == idRPLL || dec.curID == idRPLG
+	poly := dec.curID == idAPLG || dec.curID == idRPLG
+	startX, startY := c.penX, c.penY
+	for k := 0; k < n && 2+2*k < len(a); k++ {
+		vx, vy := int(int16(a[1+2*k])), int(int16(a[2+2*k]))
+		ex, ey := vx, vy
+		if rel {
+			ex, ey = c.penX+vx, c.penY+vy
+		}
+		if c.APLLUpper {
+			c.core.drawOffset = 0x4000 // experiment hook: APLL → upper memory region
+		}
+		c.drawLine(c.penX, c.penY, ex, ey, true)
+		c.core.drawOffset = 0
+		c.Lines++
+		c.penX, c.penY = ex, ey
+	}
+	if poly && n > 0 {
+		c.drawLine(c.penX, c.penY, startX, startY, true) // close the polygon
+		c.Lines++
+		c.penX, c.penY = startX, startY
+	}
+}
+
+// execWPTN handles a WPTN: args[0]=count, args[1..]=data. count=glyphWPTNCount
+// (10) is the 8593's text glyph (2 colour words + glyphRows bitmap rows) — STAGED
+// for the following PTN to blit (see drawPattern/wptn.go). Any other count is a
+// pattern-RAM load whose first word also sets the active line stipple.
+func (dec *decoder) execWPTN(c *Chip) {
+	a := dec.args
+	cnt := int(a[0])
+	if cnt == glyphWPTNCount && len(a) >= 3+glyphRows {
+		c.glyphFG = a[1]
+		c.glyphBG = a[2]
+		for i := 0; i < glyphRows; i++ {
+			c.pendRows[i] = a[3+i]
+		}
+		c.pendGlyph = true
+		if c.glyphLog != nil {
+			c.glyphLog.RecordColours(a[1], a[2])
+			c.glyphLog.Record(c.penX, c.penY, c.pendRows)
+		}
+		return
+	}
+	// Pattern-RAM load.
+	for i := 1; i < len(a); i++ {
+		if i-1 < len(c.pattern) {
+			c.pattern[i-1] = a[i]
+		}
+	}
+	if len(a) > 1 {
+		c.linePattern = a[1] // first pattern word = active line stipple
 	}
 }

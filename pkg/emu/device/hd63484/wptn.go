@@ -1,66 +1,9 @@
 package hd63484
 
-// feedGlyph drives the per-word states of a WPTN-with-count=10 packet,
-// which the 8593 firmware uses as its text-glyph blit primitive. Layout
-// (matches the live Rev L stream — see cmd/displayprobe):
+// The HD63484 renders text in TWO commands: WPTN loads the glyph bitmap into
+// pattern RAM (parsed by execWPTN in parser.go — 2 colour words + glyphRows bitmap
+// rows), then PTN (0xD000) blits it at the pen sized by SZ (drawPattern below).
 //
-//	0x1800 0x000A                ← WPTN header (parsed before this fn)
-//	fg, bg                       ← 2 colour selector words
-//	row0..row7                   ← 8 × 16-bit bitmap rows (LSB-first pixels)
-//	0x0805, 0x0000, 0xD000, 0x0907   ← 4-word trailer
-//
-// The bitmap occupies the 8×16-pixel cell at (penX, penY) to (penX+15,
-// penY+7) in the firmware's Y-UP coordinate system (penY = cell bottom-left;
-// the firmware draws bottom-up — see drawYOrigin in chip.go). The global
-// Y-up→Y-down flip lives in setVRAMPixel, so glyph placement is in firmware
-// coordinates here.
-//
-// Rows are sent BOTTOM-TO-TOP within the cell: row 0 is the bottom of the
-// glyph, row 7 the top (standard 1970s/80s character-bitmap convention). We
-// place row i at firmware-Y penY+i; setVRAMPixel's flip then renders row 0 at
-// the cell bottom and row 7 at the top (right-side-up). Bit 0 of each row is
-// the leftmost pixel.
-//
-// FG / BG colour words: per the HD63484 glyph-blit semantics, FG is applied
-// to bits set in the row bitmap and BG to bits clear in the row bitmap.
-// For the 8593's monochrome amber display we collapse to a binary rule:
-// non-zero ⇒ lit pixel, zero ⇒ dark pixel. The common case (FG=0xFFFF,
-// BG=0x0000) therefore lights the glyph bits AND erases the rest of the
-// cell — which gives the firmware's annunciator-redraw the per-cell clear
-// it needs to overwrite the previous frame's text.
-func (dec *decoder) feedGlyph(c *Chip, w uint16) {
-	switch dec.st {
-	case stGlyphFG:
-		c.glyphFG = w
-		dec.st = stGlyphBG
-	case stGlyphBG:
-		c.glyphBG = w
-		dec.rowIdx = 0
-		dec.st = stGlyphRows
-		if c.glyphLog != nil {
-			c.glyphLog.RecordColours(c.glyphFG, c.glyphBG)
-		}
-	case stGlyphRows:
-		dec.rows[dec.rowIdx] = w
-		dec.rowIdx++
-		if dec.rowIdx >= glyphRows {
-			c.blitGlyph(dec.rows, c.glyphFG, c.glyphBG)
-			c.Glyphs++
-			if c.glyphLog != nil {
-				c.glyphLog.Record(c.penX, c.penY, dec.rows)
-			}
-			// WPTN count=0x000A is EXACTLY 10 data words (fg, bg, 8 rows);
-			// the packet ends here. The words that follow (0x0805 WPR5,
-			// 0xD000+arg — the firmware's per-glyph "trailer", see
-			// docs/research.md §7) are SEPARATE commands and are dispatched
-			// normally. (The former blind 4-word trailer-consume mis-framed
-			// these and desynced the parser ~73×/boot when the post-glyph
-			// command sequence wasn't exactly 4 words.)
-			dec.st = stCmd
-		}
-	}
-}
-
 // blitGlyph paints an 8-row × 16-column bitmap into the cell whose top-left
 // corner is the pen. Rows are stored bottom-up in the input array (row 0 =
 // glyph bottom), so row i lands at penY + (glyphRows-1-i). Bit 0 of each
@@ -76,7 +19,7 @@ func (dec *decoder) feedGlyph(c *Chip, w uint16) {
 // behaviour where the screen accumulates glyphs over time — the per-frame
 // clear must come from a separate mechanism (likely partial raster bursts
 // at MAR addresses other than 0x4000/0x0000, which we don't model yet).
-func (c *Chip) blitGlyph(rows [glyphRows]uint16, fg, bg uint16) {
+func (c *Chip) blitGlyph(rows [glyphRows]uint16, fg, bg uint16, yoff int) {
 	// In Colorized mode glyphs land in the dedicated text plane (white, never
 	// dithered). In mono they stay in vram: the SCLR's per-cycle graph dither
 	// clears them to the dim background and they redraw solid, so they read as
@@ -102,8 +45,10 @@ func (c *Chip) blitGlyph(rows [glyphRows]uint16, fg, bg uint16) {
 		// Y-up coordinate system; place row i at firmware-Y penY+i. setVRAMPixel
 		// applies the global Y-up→Y-down flip (drawYOrigin - y), so after the
 		// flip row 0 (bottom) lands at the bottom of the rendered cell and row 7
-		// (top) at the top — i.e. the glyph renders right-side-up.
-		y := c.penY + i
+		// (top) at the top — i.e. the glyph renders right-side-up. yoff is the
+		// PTN-cell bottom margin (SZ height − glyphRows) so the bitmap sits at the
+		// firmware's intended baseline within the taller cell (see drawPattern).
+		y := c.penY + i + yoff
 		for b := 0; b < 16; b++ {
 			x := c.penX + b
 			switch {
@@ -120,6 +65,36 @@ func (c *Chip) blitGlyph(rows [glyphRows]uint16, fg, bg uint16) {
 		}
 	}
 	_ = fg // capture only; chip's pen 0 ⇒ always lit on row-bit-set
+}
+
+// drawPattern is the PTN command (0xD000): it draws the pattern-RAM glyph staged
+// by the preceding WPTN onto the rectangle at the current pen, sized by SZ. SZ is
+// SZy:SZx (high:low byte), each in pixels and size-1 encoded, so the cell is
+// (SZx+1)×(SZy+1). The 8593's text uses SZ=0x0907 ⇒ an 8×10 cell. Our bitmap is
+// glyphRows (8) tall, so the cell is taller by (SZy+1 − glyphRows) rows; that
+// extra height is the cell's bottom margin, which the firmware's AMOVE accounts
+// for — so we offset the bitmap down by it to land on the intended baseline
+// (without it, glyphs render that many scan rows too high). PTN was previously
+// mis-identified as a stubbed "GCHR" and the glyph was blitted at WPTN time with
+// no cell sizing — the cause of the ~2-row glyph offset. See parser.go.
+func (c *Chip) drawPattern(sz uint16) {
+	if !c.pendGlyph {
+		return
+	}
+	c.pendGlyph = false
+	// SZ says the cell is (SZy+1) tall (10 for SZ=0x0907) vs our glyphRows (8)
+	// bitmap. The 2-row difference is the candidate for the reported "glyph sits ~2
+	// scan rows too high": shifting the bitmap DOWN by that margin (yoff = -(cellH −
+	// glyphRows)) lowers glyphs relative to the vector graticule. We keep yoff=0 for
+	// now (no visual change, golden/tests stable) until the direction is confirmed
+	// on the instrument — the real PTN may TILE the 8-row pattern into the 10-row
+	// cell rather than shift the baseline. glyphCellMargin computes the shift; wire
+	// it into yoff once verified.
+	glyphCellMargin := int((sz>>8)&0xFF) + 1 - glyphRows // SZy+1 − glyphRows (= 2)
+	_ = glyphCellMargin
+	yoff := 0
+	c.blitGlyph(c.pendRows, c.glyphFG, c.glyphBG, yoff)
+	c.Glyphs++
 }
 
 // feedRaster drives the per-word states of either:

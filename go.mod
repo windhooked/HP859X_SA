@@ -5,6 +5,7 @@ go 1.24.1
 require (
 	github.com/hajimehoshi/ebiten/v2 v2.9.9
 	github.com/unicorn-engine/unicorn v0.0.0-20250410153552-f8c6db950420
+	golang.org/x/image v0.31.0
 )
 
 require (
