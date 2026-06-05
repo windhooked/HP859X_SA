@@ -2,6 +2,7 @@ package machine
 
 import (
 	"fmt"
+	"sort"
 	"testing"
 
 	"github.com/windhooked/HP859X_SA/pkg/emu/bus"
@@ -88,4 +89,52 @@ func TestCalGatesMeasureModeDiag(t *testing.T) {
 	t.Logf("cal-INVALID (blank): %s", run(true))
 	t.Logf("cal-VALID   (synth): %s", run(false))
 	t.Log("⇒ if the measure-mode cells (b0ec/a9a0/b0a1) match, cal-validity does NOT gate the measure mode")
+}
+
+// TestIdleLoopDiag finds the DOMINANT post-boot idle loop in the SWEEP-DRIVEN boot
+// (where fcn.18568 IS entered, unlike the doc's passive boot) and which gate flag it
+// spins on. The measure-mode setter fcn.21c96 is called from the measurement state
+// machine 0x22xxx, which (per a7iobus.go) waits on the sweep-event IRQ handshake RAM
+// flags. This pins the exact stuck loop + gate. DIAG=1 to run.
+func TestIdleLoopDiag(t *testing.T) {
+	m := diagBootMachine(t)
+	m.BootToOperatingWithSweep(260_000_000)
+
+	pcPage := map[uint32]int{}
+	gateRead := map[uint32]int{}
+	m.Bus.OnRead = func(addr uint32, sz bus.Size, val uint32) {
+		pcPage[m.CPU.Reg(cpu.PC)>>10]++ // 1KB-page PC histogram
+		switch addr {
+		case 0xFFBF26, 0xFFB1E0, 0xFFB212, 0xFFAD7D, 0xFFF72A, 0xFFF300, 0xFFF75E:
+			gateRead[addr]++
+		}
+	}
+	m.bootLoop(5_000_000, nil) // idle window (sweep-driving still on)
+	m.Bus.OnRead = nil
+
+	type kv struct {
+		k uint32
+		v int
+	}
+	top := func(label string, mp map[uint32]int, shift int) {
+		var ks []kv
+		for k, v := range mp {
+			ks = append(ks, kv{k, v})
+		}
+		sort.Slice(ks, func(i, j int) bool { return ks[i].v > ks[j].v })
+		s := ""
+		for i, e := range ks {
+			if i >= 8 {
+				break
+			}
+			s += fmt.Sprintf(" 0x%X=%d", e.k<<shift, e.v)
+		}
+		t.Logf("%s:%s", label, s)
+	}
+	top("dominant idle PC 1KB-pages", pcPage, 10)
+	top("gate-flag/poll reads", gateRead, 0)
+	t.Logf("FINAL PC=0x%X b0ec=0x%X a9a0=0x%04X b1e0=0x%X b212=0x%X ad7d=0x%X bf26=0x%X",
+		m.CPU.Reg(cpu.PC), m.Bus.Read(0xFFB0EC, bus.Word), m.Bus.Read(0xFFA9A0, bus.Word),
+		m.Bus.Read(0xFFB1E0, bus.Word), m.Bus.Read(0xFFB212, bus.Word),
+		byte(m.Bus.Read(0xFFAD7D, bus.Byte)), m.Bus.Read(0xFFBF26, bus.Long))
 }
