@@ -41,9 +41,8 @@ var adcDebugN = func() int {
 //	       contracts — the init poll wants exactly 0x06 (EOC clear) while the
 //	       conversion-done polls want bit0 set — so no single constant works;
 //	       the EOC bit sets after a triggered conversion and clears on the
-//	       result read. Status is presented only every statusReadyEveryNReads
-//	       reads ("busy" between) to keep the operating loop's background
-//	       redraw alive.
+//	       result read. The ready/settled bits (0x06) are STATIC (present on
+//	       every read while powered); only EOC is transient.
 //
 //	0x9F / 0x9D — ADC result (READ). 0x9F is the 12-bit signed result
 //	       (range-checked at PC 0x5EF96 against [-0x200, +0x1FF]); 0x9D is the
@@ -96,16 +95,14 @@ type analogBus struct {
 	// then read the result from 0x9F (which consumes it). One constant
 	// cannot satisfy the firmware's conflicting 0x9A poll contracts (the
 	// init poll wants 0x06 with EOC clear; the conversion-done polls want
-	// EOC set) — hence this state machine.
+	// EOC set) — hence this state machine. The ready/settled bits (0x06) are
+	// STATIC (asserted on every read while powered, like the real hybrid);
+	// only EOC (bit0) is transient — set when a conversion completes, cleared
+	// when the result is read (or self-cleared if the result is never read,
+	// so an init poll waiting for exactly 0x06 is never permanently blocked).
 	convState     convPhase // idle → converting → done → (result read) → idle
-	convReadCount int       // sel=0x9A status reads since the last trigger
+	convReadCount int       // sel=0x9A status reads since entering the current phase
 	latchedADC    int16     // ADC sample taken at trigger; returned on 0x9F/0x9D
-	donePresented bool      // EOC was shown on a pulse; decays to idle if unread
-
-	// statusReadCount is the running count of sel=0x9A status reads; it
-	// drives the "ready pulse" cadence (see statusReadyEveryNReads) that
-	// keeps the operating loop's background-redraw work alive.
-	statusReadCount uint64
 }
 
 // convPhase is the U47 ADC conversion lifecycle.
@@ -114,7 +111,7 @@ type convPhase uint8
 const (
 	convIdle       convPhase = iota // no conversion pending; status = 0x06
 	convConverting                  // triggered, not yet complete; status = 0x06
-	convDone                        // complete, result unread; status = 0x07 on pulse
+	convDone                        // complete, result unread; status = 0x07 (EOC set)
 )
 
 // Symbolic select IDs. Names follow the CLIP 5963-2591 register naming
@@ -143,18 +140,29 @@ const (
 	adcStatusIdle    = adcStatusReady | adcStatusSettled // 0x06 — ready, no pending data
 )
 
-// statusReadyEveryNReads: a sel=0x9A read presents the status value only
-// every Nth read; between pulses it reads 0x00 ("busy"). This preserves the
-// firmware's background-redraw cadence in the operating loop — returning
-// "ready" on EVERY read collapses the render (see CLAUDE.md). 256 carries
-// over the previous calibration.
-const statusReadyEveryNReads = 256
+// Static status, no cadence: the sel=0x9A status presents the ready/settled
+// bits (0x06) on EVERY read — that is faithful to the real U47 hybrid (those
+// bits are asserted continuously while powered). The previous model returned
+// 0x00 ("busy") on 255 of every 256 reads; that was unfaithful (it momentarily
+// claimed the hybrid unpowered, bit1 clear) and it TRAPPED the boot-measurement
+// analog poll fcn.5e5de — which waits for (status & 0x12)==0x02 with a ~1000-
+// unit timeout — into running every wait to full timeout, starving the
+// operating loop ~8×. The feared "ready-every-read collapses the render"
+// regression does NOT occur with this conversion state machine (measured: the
+// vector count is unchanged — see the cadence A/B in oploop_diag_test.go's
+// history and docs/TRACE_DISPLAY_PATH.md).
 
-// convReadsToEOC: a triggered conversion completes after this many sel=0x9A
-// status reads (models the U47 conversion time). Kept well below the pulse
-// period so a conversion is always finished by the time the next ready pulse
-// can present its EOC bit.
+// convReadsToEOC: a triggered conversion completes (EOC asserts) after this
+// many sel=0x9A status reads — models the U47 conversion time so a poll that
+// triggers then immediately checks EOC sees "still converting" briefly first.
 const convReadsToEOC = 8
+
+// staleReadsToIdle: if a completed conversion's result is never read (e.g. an
+// init poll that waits for exactly 0x06 without reading 0x9F), EOC self-clears
+// back to idle after this many sel=0x9A reads, so the init poll is never
+// permanently blocked. A real conversion-done poll reads the result on its very
+// first status read (EOC is now static), so this only governs the no-reader case.
+const staleReadsToIdle = 64
 
 // writeSelect captures the select value written to 0xFFF75C.
 func (a *analogBus) writeSelect(sel uint16) { a.sel = sel }
@@ -191,7 +199,6 @@ func (a *analogBus) triggerConversion() {
 	a.latchedADC = a.sampleADC()
 	a.convState = convConverting
 	a.convReadCount = 0
-	a.donePresented = false
 }
 
 // sampleADC returns the 12-bit signed ADC reading for the current mux channel
@@ -233,36 +240,30 @@ func (a *analogBus) sampleADC() int16 {
 func (a *analogBus) readData() uint16 {
 	switch a.sel & 0xFF {
 	case abSelStatus:
-		// Advance the conversion timer on each status read; a converting
-		// sample becomes "done" after convReadsToEOC reads.
-		if a.convState == convConverting {
+		// Static ready/settled bits (0x06) on EVERY read — faithful to the
+		// powered hybrid; EOC (bit0) is the only transient. The "busy 0x00"
+		// cadence was removed (it trapped fcn.5e5de's timeout poll — see the
+		// note above triggerConversion).
+		s := uint16(adcStatusIdle) // 0x06: ready + settled
+		switch a.convState {
+		case convConverting:
+			// Conversion in flight: EOC still clear (0x06). Completes after
+			// convReadsToEOC status reads.
 			a.convReadCount++
 			if a.convReadCount >= convReadsToEOC {
 				a.convState = convDone
+				a.convReadCount = 0
 			}
-		}
-		// Ready-pulse cadence: present the status only every Nth read, "busy"
-		// (0x00) otherwise, so the firmware keeps doing background work
-		// between ready events.
-		a.statusReadCount++
-		if a.statusReadCount%statusReadyEveryNReads != 0 {
-			return 0x0000
-		}
-		// On a ready pulse: present 0x06 (idle) or 0x07 (data ready). EOC is a
-		// transient — it is shown on exactly one pulse; if the firmware does
-		// not read the result before the next pulse, the converter returns to
-		// idle and EOC self-clears (so the init poll that waits for *exactly*
-		// 0x06 is not blocked by a stale, unlatched conversion). An actively
-		// waiting conversion-done poll catches that single 0x07 pulse and
-		// reads the result (clearing EOC) well before the next pulse.
-		s := uint16(adcStatusIdle) // 0x06: ready + settled
-		if a.convState == convDone {
-			if a.donePresented {
+		case convDone:
+			// Result ready: assert EOC (0x07) until the result read consumes it
+			// (abSelADC/abSelADCHi → convIdle). If no read ever comes, self-clear
+			// after staleReadsToIdle so an init poll waiting for exactly 0x06 is
+			// not permanently blocked.
+			s |= adcStatusEOC // 0x07: data ready
+			a.convReadCount++
+			if a.convReadCount >= staleReadsToIdle {
 				a.convState = convIdle
-				a.donePresented = false
-			} else {
-				a.donePresented = true
-				s |= adcStatusEOC // 0x07: data ready
+				a.convReadCount = 0
 			}
 		}
 		return s
@@ -272,7 +273,7 @@ func (a *analogBus) readData() uint16 {
 		// that fcn.5E6BC sign-extends into the high word of a 32-bit reading;
 		// returning 0 keeps the combined value equal to the 0x9F word.
 		a.convState = convIdle
-		a.donePresented = false
+		a.convReadCount = 0
 		if a.sel&0xFF == abSelADCHi {
 			return 0x0000
 		}

@@ -619,3 +619,36 @@ documented multi-session task: the firmware boots into CONFIG mode and never ent
 the continuous-sweep **MEASURE-mode** DLP state (`0xB0EC`→spectrum + the measure-mode
 DLP that schedules the trace-draw). See docs/DRIVETICK_BLOCKER.md for the full Gate
 1+2 map.
+
+### REFINEMENT (2026-06-05, later still) — it's a COMMAND-DELIVERY gap, and the analog idle is a red herring
+
+Three new measurements (`pkg/emu/machine/oploop_diag_test.go`, DIAG=1) sharpen the above
+from "the operating loop / measure-mode state is blocked" to the exact missing event:
+
+1. **`fcn.18568` is on the stack the WHOLE idle — not a derail, not a DLP-step block.**
+   `TestIdleStackScanDiag` raw-A7-stack scan at the analog-poll idle: an `fcn.18568`
+   (0x18568..0x18B00) return address is present in **200/200** samples; `fcn.34EE8` (DLP
+   interpreter), the DLP scheduler, and the command dispatcher are **ABSENT**. The
+   "dominant boot-measurement analog idle" (PC pages 0x4800/0x5E400, ~9800 `0xFFF75E`
+   reads) is the operating loop calling the boot-default analog measurement DIRECTLY — the
+   compiled routine at DLP-RAM `0xFC9A32` → `fcn.5e88c`/`fcn.5f0c4` → poll `fcn.5e5de`
+   (`TestIdleStackDiag` gives the call chain). So the loop is HEALTHY; it just lacks CONTS.
+
+2. **The analog `0x9A` cadence is NOT the trace gate (but IS a real faithfulness bug).**
+   `fcn.5e5de` waits for `(0x9A_status & 0x12)==0x02` (bit1 set) with a ~1000-unit timeout;
+   our model (`analogbus.go statusReadyEveryNReads=256`) returns the real status only every
+   256th read and `0x00` (bit1 CLEAR — unfaithful; ready/settled are static-on when powered)
+   the rest, so the poll mostly times out and burns the loop. `TestADCCadenceSweepDiag` A/B
+   (cadence 256→1): analog reads `18997→735`, op-loop entries `71→547`, **but `b0ec`/`a9a0`/
+   `b0a1` byte-identical** and the old "ready-every-read collapses the render" regression does
+   NOT reproduce (vectors ~unchanged). So fix the cadence for faithfulness, but it does not
+   unblock the trace. (And `fcn.5E6E8`, the PRESET ADC cal, COMPLETES — returns `0xFFFF`
+   uncal — it does not infinite-loop; the `fcn.5e63c` sub-poll is only on the cal-VALID path.)
+
+3. **CONTS has exactly ONE delivery path — pinned to one instruction.** `b0a1` bit 3 is
+   never wholesale-written; its only writer is `0x5f980 bchg` in `fcn.5f968`, whose only call
+   site is `0x126d8 jsr fcn.00000550` — the CONTS *case* of dispatcher `fcn.12288`
+   (`move.w -0x8(a6),d0` = command arg → `jsr`). So CONTS is set ONLY when the command
+   executor dispatches a CONTS opcode+arg. ⇒ the blocker is precisely **command DELIVERY**:
+   find what should feed a CONTS command to `fcn.12288` at power-up (ROM default-config
+   command list vs. NVRAM state-recall). That is the bounded next task.

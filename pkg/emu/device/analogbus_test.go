@@ -2,23 +2,18 @@ package device
 
 import "testing"
 
-// TestAnalogBus_StatusCadence verifies the sel=0x9A status register, when
-// idle (no conversion pending), returns 0x06 every Nth read and 0 otherwise —
-// the ready-pulse cadence the firmware's polls rely on for background work.
-func TestAnalogBus_StatusCadence(t *testing.T) {
+// TestAnalogBus_StatusStatic verifies the sel=0x9A status register, when idle
+// (no conversion pending), returns 0x06 (ready+settled) on EVERY read — the
+// faithful static-status model. The old "0x00 busy 255/256 reads" cadence was
+// removed because it trapped the boot-measurement poll fcn.5e5de into timeouts
+// (it waits for (status & 0x12)==0x02, which 0x00 never satisfies).
+func TestAnalogBus_StatusStatic(t *testing.T) {
 	var a analogBus
 	a.writeSelect(abSelStatus)
-	matches := 0
-	for i := 0; i < statusReadyEveryNReads*4; i++ {
-		v := a.readData()
-		if v == adcStatusIdle { // 0x06
-			matches++
-		} else if v != 0 {
-			t.Errorf("read #%d = %#04X, want 0x06 or 0", i, v)
+	for i := 0; i < 1000; i++ {
+		if v := a.readData(); v != adcStatusIdle { // 0x06 every read
+			t.Fatalf("idle read #%d = %#04X, want 0x06 (static ready+settled)", i, v)
 		}
-	}
-	if matches != 4 {
-		t.Errorf("matches=%d in %d reads, want 4", matches, statusReadyEveryNReads*4)
 	}
 }
 
@@ -50,35 +45,40 @@ func TestAnalogBus_StatusBitsSatisfyFirmwarePolls(t *testing.T) {
 
 // TestAnalogBus_ConversionLifecycle verifies the ADC conversion state machine
 // (docs/ANALOG_BUS_MODEL.md §5): idle reads 0x06; a DAC-low write triggers a
-// conversion; after convReadsToEOC status reads a ready pulse reports 0x07
-// (EOC); reading the 0x9F result consumes it back to 0x06.
+// conversion; after convReadsToEOC status reads the status reports 0x07 (EOC)
+// and HOLDS it; reading the 0x9F result consumes it back to 0x06.
 func TestAnalogBus_ConversionLifecycle(t *testing.T) {
 	var a analogBus
-	pulse := func() uint16 { // advance to the next ready pulse and return it
+	// readN does n status reads and returns the last (must stay below
+	// staleReadsToIdle in the convDone phase so EOC doesn't self-clear).
+	readN := func(n int) uint16 {
 		a.writeSelect(abSelStatus)
 		var v uint16
-		for i := 0; i < statusReadyEveryNReads; i++ {
+		for i := 0; i < n; i++ {
 			v = a.readData()
 		}
 		return v
 	}
-	// Idle: a ready pulse is 0x06 (no data ready).
-	if v := pulse(); v != adcStatusIdle {
-		t.Fatalf("idle pulse = %#x, want 0x06", v)
+	// Idle: status is 0x06 (no data ready).
+	if v := readN(convReadsToEOC + 2); v != adcStatusIdle {
+		t.Fatalf("idle status = %#x, want 0x06", v)
 	}
 	// Trigger a conversion via the DAC-low write (completes send_dac_word).
 	a.writeSelect(abSelDACLo)
 	a.writeData(0x10)
-	// The very next pulse should report EOC (0x07) since a full pulse period
-	// (>= convReadsToEOC) of status reads elapses inside pulse().
-	if v := pulse(); v != adcStatusIdle|adcStatusEOC {
-		t.Fatalf("post-trigger pulse = %#x, want 0x07 (EOC)", v)
+	// After convReadsToEOC reads the conversion completes and EOC (0x07) asserts.
+	if v := readN(convReadsToEOC + 2); v != adcStatusIdle|adcStatusEOC {
+		t.Fatalf("post-trigger status = %#x, want 0x07 (EOC)", v)
+	}
+	// EOC is static (held) until the result is read — not a one-shot pulse.
+	if v := readN(2); v != adcStatusIdle|adcStatusEOC {
+		t.Fatalf("held EOC = %#x, want 0x07 (held until result read)", v)
 	}
 	// Reading the result clears EOC → idle again.
 	a.writeSelect(abSelADC)
 	a.readData()
-	if v := pulse(); v != adcStatusIdle {
-		t.Fatalf("post-read pulse = %#x, want 0x06 (EOC cleared)", v)
+	if v := readN(2); v != adcStatusIdle {
+		t.Fatalf("post-read status = %#x, want 0x06 (EOC cleared)", v)
 	}
 }
 

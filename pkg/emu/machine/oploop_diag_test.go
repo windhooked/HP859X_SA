@@ -2,12 +2,55 @@ package machine
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"testing"
 
 	"github.com/windhooked/HP859X_SA/pkg/emu/bus"
 	"github.com/windhooked/HP859X_SA/pkg/emu/cpu"
+	"github.com/windhooked/HP859X_SA/pkg/emu/romloader"
 )
+
+// TestADCStaticStatusDiag locks in the faithful static-status fix (analogbus.go):
+// with the 0x9A ready/settled bits static (0x06 every read) instead of the old
+// "0x00 busy 255/256 reads" cadence, the boot-measurement poll fcn.5e5de no longer
+// times out, so the operating loop is freed — far fewer analog reads (0xFFF75E) and
+// many more op-loop entries (b010 write @0x1856C) in a late idle window. (History:
+// the cadence A/B that proved this — sweeping device.SetADCStatusCadence 256→1 —
+// is removed with the knob; cadence 256 gave ~19k reads / 71 entries, cadence 1
+// ~735 / 547. The trace gate is UNCHANGED — b0ec/a9a0/b0a1 don't move — so this is
+// a faithfulness/perf fix, not the trace fix.) DIAG=1.
+func TestADCStaticStatusDiag(t *testing.T) {
+	m := diagBootMachine(t)
+	m.BootToOperatingWithSweep(260_000_000)
+
+	opEntries, anaReads := 0, 0
+	m.Bus.OnWrite = func(addr uint32, sz bus.Size, val uint32) {
+		if addr == 0xFFB010 {
+			if pc := m.CPU.Reg(cpu.PC); pc >= 0x1856C && pc <= 0x18574 {
+				opEntries++
+			}
+		}
+	}
+	m.Bus.OnRead = func(addr uint32, sz bus.Size, val uint32) {
+		if addr == 0xFFF75E {
+			anaReads++
+		}
+	}
+	m.bootLoop(10_000_000, nil) // late idle window
+	m.Bus.OnWrite, m.Bus.OnRead = nil, nil
+
+	t.Logf("static status | op-loop entries=%d analogReads=%d | b0ec=0x%X a9a0=0x%04X b0a1=0x%02X",
+		opEntries, anaReads, m.Bus.Read(0xFFB0EC, bus.Word), m.Bus.Read(0xFFA9A0, bus.Word),
+		byte(m.Bus.Read(0xFFB0A1, bus.Byte)))
+	// Regression guard: the static fix should keep analog reads low and the loop busy.
+	if anaReads > 5000 {
+		t.Errorf("analogReads=%d too high — the 0x9A status cadence regressed (poll timing out)", anaReads)
+	}
+	if opEntries < 100 {
+		t.Errorf("op-loop entries=%d too low — the operating loop is starved", opEntries)
+	}
+}
 
 // oploop_diag_test.go — DIAG-gated probes for the operating-loop / DLP-render
 // blocker (docs/DRIVETICK_BLOCKER.md). Run with DIAG=1.
@@ -89,6 +132,268 @@ func TestCalGatesMeasureModeDiag(t *testing.T) {
 	t.Logf("cal-INVALID (blank): %s", run(true))
 	t.Logf("cal-VALID   (synth): %s", run(false))
 	t.Log("⇒ if the measure-mode cells (b0ec/a9a0/b0a1) match, cal-validity does NOT gate the measure mode")
+}
+
+// TestIdleStackDiag answers the open handoff question: WHO owns the ~9800-read
+// analog idle loop? fcn.5e6e8 (completes, returns 0xFFFF uncal) and fcn.5e63c
+// (bounded dbra=119) do NOT infinite-loop, so the reads come from a HIGHER-LEVEL
+// loop cycling through them. This walks the A6 frame chain at every 0xFFF75E read
+// in the idle window and histograms the dominant call STACK — the call chain that
+// owns the idle is the routine that must complete/transition. DIAG=1 to run.
+func TestIdleStackDiag(t *testing.T) {
+	m := diagBootMachine(t)
+	m.BootToOperatingWithSweep(260_000_000)
+
+	readPC := map[uint32]int{} // exact PC of the 0xFFF75E read
+	caller := map[uint32]int{} // immediate return address (frame 1)
+	chainH := map[string]int{} // full A6 chain signature
+	samples := 0
+	m.Bus.OnRead = func(addr uint32, sz bus.Size, val uint32) {
+		if addr != 0xFFF75E {
+			return
+		}
+		samples++
+		readPC[m.CPU.Reg(cpu.PC)]++
+		// Walk the A6 linked frame chain: each frame is [prev_a6 | ret_addr].
+		a6 := m.CPU.Reg(cpu.A6)
+		sig := ""
+		for depth := 0; depth < 10 && a6 >= 0xFF0000 && a6 < 0xFFF000; depth++ {
+			ret := m.Bus.Read(a6+4, bus.Long) & 0xFFFFFF
+			if depth == 0 {
+				caller[ret]++
+			}
+			sig += fmt.Sprintf("%05X<", ret)
+			next := m.Bus.Read(a6, bus.Long) & 0xFFFFFF
+			if next <= a6 || next >= 0xFFF000 {
+				break
+			}
+			a6 = next
+		}
+		chainH[sig]++
+	}
+	m.bootLoop(5_000_000, nil)
+	m.Bus.OnRead = nil
+
+	t.Logf("0xFFF75E reads in idle window: %d", samples)
+	topPCs(t, "read-site PC", readPC, 6)
+	topPCs(t, "immediate caller (ret addr)", caller, 8)
+	// dominant full chains
+	type sc struct {
+		s string
+		v int
+	}
+	var cs []sc
+	for s, v := range chainH {
+		cs = append(cs, sc{s, v})
+	}
+	sort.Slice(cs, func(i, j int) bool { return cs[i].v > cs[j].v })
+	for i, e := range cs {
+		if i >= 5 {
+			break
+		}
+		t.Logf("  chain x%d: %s", e.v, e.s)
+	}
+}
+
+// TestSendCONTSDiag is the DECISIVE lever test for task (b): does delivering a
+// real CONTS; command (the faithful HP-IB path) actually set CONTS (b0a1 bit3),
+// arm the sweep (a9a0≥0), and draw the trace? If YES, the whole trace blocker
+// reduces to "deliver CONTS at power-up" and the fix target is confirmed. If the
+// handler runs but a9a0 stays -1 / no vectors, there's a downstream gate (mode
+// b0ec) too. Boots with HP-IB installed, captures before/after. DIAG=1.
+func TestSendCONTSDiag(t *testing.T) {
+	if os.Getenv("DIAG") == "" {
+		t.Skip("DIAG=1")
+	}
+	rom, err := romloader.LoadDir("../../../hp8593a_eeproms")
+	if err != nil {
+		t.Skip("rom not available")
+	}
+	m, _ := New8593A(rom)
+	m.MMIO.InstallHPIB()
+	m.CPU.Reset()
+	m.MMIO.SweepActive = true
+	m.SweepDrive = true
+	m.BootToOperatingWithSweep(250_000_000)
+	chip := m.MMIO.Display.Chip
+	chip.EnableLineLog()
+
+	b0a1Before := byte(m.Bus.Read(0xFFB0A1, bus.Byte))
+	a9a0Before := m.Bus.Read(0xFFA9A0, bus.Word)
+	vecBefore := len(chip.LineLog)
+
+	// Watch the CONTS handler (bchg @0x5f980) + dispatcher (b1f8 @0x12290) +
+	// the receive→parse chain: bc28 = parser-FIFO write index (RECEIVE lands
+	// bytes), bc12 = parser FIFO (the parser POPS bytes — only if the deep block
+	// PC 0x18F3E runs). If bc28 advances but bc12 is never read, the parser never
+	// runs ⇒ the DRIVETICK deep-block-never-reached blocker eats the command.
+	contsHandler, dispatches, fifoWrites, fifoReads := 0, 0, 0, 0
+	m.Bus.OnWrite = func(addr uint32, sz bus.Size, val uint32) {
+		pc := m.CPU.Reg(cpu.PC)
+		switch addr {
+		case 0xFFB0A1:
+			if pc >= 0x5f980 && pc <= 0x5f988 {
+				contsHandler++
+			}
+		case 0xFFB1F8:
+			if pc >= 0x12290 && pc <= 0x12296 {
+				dispatches++
+			}
+		case 0xFFBC28:
+			fifoWrites++
+		}
+	}
+	m.Bus.OnRead = func(addr uint32, sz bus.Size, val uint32) {
+		if addr >= 0xFFBC12 && addr <= 0xFFBC27 { // parser FIFO body
+			fifoReads++
+		}
+	}
+	m.GPIBSend("CONTS;", 60_000_000)
+	// a few sweeps after, to let an armed sweep paint
+	m.bootLoop(20_000_000, nil)
+	m.Bus.OnWrite, m.Bus.OnRead = nil, nil
+	t.Logf("receive: parser-FIFO writes(bc28)=%d   parse: FIFO reads(bc12)=%d", fifoWrites, fifoReads)
+
+	t.Logf("BEFORE: b0a1=0x%02X(bit3=%d) a9a0=0x%04X vec=%d",
+		b0a1Before, (b0a1Before>>3)&1, a9a0Before, vecBefore)
+	t.Logf("AFTER : b0a1=0x%02X(bit3=%d) a9a0=0x%04X vec=%d",
+		byte(m.Bus.Read(0xFFB0A1, bus.Byte)), (byte(m.Bus.Read(0xFFB0A1, bus.Byte))>>3)&1,
+		m.Bus.Read(0xFFA9A0, bus.Word), len(chip.LineLog))
+	t.Logf("CONTS handler (bchg @0x5f980) reached: %d   command dispatches during send: %d",
+		contsHandler, dispatches)
+	t.Logf("b0ec=0x%X (spectrum=0x2D/0x31/0x36)", m.Bus.Read(0xFFB0EC, bus.Word))
+	t.Log("⇒ if bit3 flips 0→1 and a9a0 arms, CONTS IS the lever and 'deliver at power-up' is the fix")
+}
+
+// TestB0A1WritersDiag logs EVERY writer of b0a1 (the sweep-mode byte, bit3=CONTS)
+// across the whole boot — PC + value. The ROM grep shows only bit-ops (bset/bclr/
+// bchg) touch b0a1, none of them bit3 except fcn.5f968's bchg @0x5f980. But a default-
+// STATE block-copy (movem/move (a0)+ into the b0a0 region) would NOT show in a b0a1
+// grep. If a write from a non-bit-op PC sets b0a1 (esp. with bit3), continuous-sweep
+// comes from a state template — find/seed it. If the ONLY writers are the known
+// bit-ops and bit3 is never set, CONTS truly needs the command path. DIAG=1.
+func TestB0A1WritersDiag(t *testing.T) {
+	m := diagBootMachine(t)
+	type w struct{ pc, val uint32 }
+	writes := map[uint32]int{} // PC histogram
+	var bit3Sets []w
+	var samples []w
+	m.Bus.OnWrite = func(addr uint32, sz bus.Size, val uint32) {
+		// b0a1 is byte 1 of the b0a0 word; a word/long write to b0a0 also hits it.
+		if addr != 0xFFB0A1 && !(addr == 0xFFB0A0 && sz != bus.Byte) {
+			return
+		}
+		pc := m.CPU.Reg(cpu.PC)
+		writes[pc]++
+		// capture the resulting b0a1 byte after the write
+		b3 := byte(m.Bus.Read(0xFFB0A1, bus.Byte)) & 0x08
+		if b3 != 0 || (addr == 0xFFB0A0 && sz != bus.Byte) {
+			rec := w{pc, val}
+			if b3 != 0 && len(bit3Sets) < 12 {
+				bit3Sets = append(bit3Sets, rec)
+			}
+		}
+		if len(samples) < 24 {
+			samples = append(samples, w{pc, val})
+		}
+	}
+	m.BootToOperatingWithSweep(260_000_000)
+	m.Bus.OnWrite = nil
+
+	topPCs(t, "b0a1/b0a0 writer PCs", writes, 12)
+	t.Logf("writes that left b0a1 bit3 SET: %d", len(bit3Sets))
+	for _, r := range bit3Sets {
+		t.Logf("  bit3-set from PC=0x%X val=0x%X", r.pc, r.val)
+	}
+	t.Logf("FINAL b0a1=0x%02X b0a0=0x%04X", byte(m.Bus.Read(0xFFB0A1, bus.Byte)), m.Bus.Read(0xFFB0A0, bus.Word))
+	t.Log("⇒ a non-bit-op writer (block copy) ⇒ state-template path; only bit-ops + bit3 never set ⇒ needs command path")
+}
+
+// TestCmdDispatchDiag logs every command the dispatcher fcn.12288 processes during
+// boot. fcn.12288's 2nd-ish instruction `0x12290 bset #12,0xB1F8` runs on EVERY entry;
+// at that point the command code is at a6+8 and the dispatch index is (code>>8)-0xd.
+// This settles the CONTS-delivery question: if the dispatcher runs MANY commands at
+// boot but never the CONTS code, the command path is alive and the power-up default
+// config simply omits/never-reaches CONTS (a config/state issue); if it runs 0×, the
+// executor is never fed at boot (a different gap). The CONTS handler is the (code>>8)
+// whose case is 0x126d8. DIAG=1.
+func TestCmdDispatchDiag(t *testing.T) {
+	m := diagBootMachine(t)
+	codeHi := map[uint32]int{} // histogram of (code>>8) dispatch classes
+	codeFull := map[uint32]int{}
+	total := 0
+	m.Bus.OnWrite = func(addr uint32, sz bus.Size, val uint32) {
+		if addr != 0xFFB1F8 {
+			return
+		}
+		if pc := m.CPU.Reg(cpu.PC); pc >= 0x12290 && pc <= 0x12296 {
+			code := m.Bus.Read(m.CPU.Reg(cpu.A6)+8, bus.Word) & 0xFFFF
+			codeHi[code>>8]++
+			codeFull[code]++
+			total++
+		}
+	}
+	m.BootToOperatingWithSweep(260_000_000)
+	m.Bus.OnWrite = nil
+
+	t.Logf("fcn.12288 command dispatches during boot: %d (distinct codes=%d)", total, len(codeFull))
+	topPCs(t, "dispatch class (code>>8)", codeHi, 16)
+	topPCs(t, "full command code", codeFull, 16)
+	t.Log("⇒ many dispatches but no CONTS code ⇒ power-up config omits/never-reaches CONTS; 0 ⇒ executor never fed")
+}
+
+// TestIdleStackScanDiag resolves the DERAIL-vs-STEPPED ambiguity: is the stuck
+// analog DLP at 0xFC9A32 a derail (firmware jumped there, can't return to dispatch
+// CONTS) or the FOREGROUND DLP being stepped by the operating loop fcn.18568 (so
+// fcn.18568/fcn.34EE8 sit ABOVE it on the stack)? The a6 chain breaks at the DLP
+// boundary, so walk the RAW A7 stack for ROM return addresses in the operating
+// loop (0x18568..0x18B00), DLP interpreter (0x34EE8..0x35200), and DLP scheduler
+// (0x34690..0x34700). If present ⇒ stepped-by-op-loop (blocker is downstream);
+// if absent ⇒ derail. DIAG=1.
+func TestIdleStackScanDiag(t *testing.T) {
+	m := diagBootMachine(t)
+	m.BootToOperatingWithSweep(260_000_000)
+
+	type rng struct {
+		name   string
+		lo, hi uint32
+		seen   int
+	}
+	rngs := []rng{
+		{"opLoop(18568)", 0x18568, 0x18B00, 0},
+		{"dlpInterp(34EE8)", 0x34EE8, 0x35200, 0},
+		{"dlpSched(34690)", 0x34690, 0x34700, 0},
+		{"cmdDisp(12288)", 0x12288, 0x12800, 0},
+		{"cmdExec(12b10)", 0x12B10, 0x12D00, 0},
+	}
+	samples := 0
+	m.Bus.OnRead = func(addr uint32, sz bus.Size, val uint32) {
+		if addr != 0xFFF75E || samples >= 200 {
+			return
+		}
+		samples++
+		sp := m.CPU.Reg(cpu.A7)
+		for off := uint32(0); off < 0x600; off += 2 {
+			w := m.Bus.Read(sp+off, bus.Long) & 0xFFFFFF
+			for i := range rngs {
+				if w >= rngs[i].lo && w < rngs[i].hi {
+					rngs[i].seen++
+				}
+			}
+		}
+	}
+	m.bootLoop(2_000_000, nil)
+	m.Bus.OnRead = nil
+
+	t.Logf("stack-scan over %d idle analog-reads (ret-addrs found in range, summed):", samples)
+	for _, r := range rngs {
+		verdict := "ABSENT"
+		if r.seen > 0 {
+			verdict = "PRESENT"
+		}
+		t.Logf("  %-18s [0x%05X..0x%05X): %-7s (hits=%d)", r.name, r.lo, r.hi, verdict, r.seen)
+	}
+	t.Log("⇒ opLoop/dlpInterp PRESENT ⇒ stepped by op-loop (blocker downstream); ABSENT ⇒ derail")
 }
 
 // TestIdleLoopDiag finds the DOMINANT post-boot idle loop in the SWEEP-DRIVEN boot
