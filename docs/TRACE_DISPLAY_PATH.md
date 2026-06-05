@@ -572,3 +572,23 @@ slow sweep, the orchestrator hand off, and the trace/graticule self-sustain.
 (Practical-but-unfaithful alternative, per "a half-mock is worse than the clean
 screen": force `a9a0`+`befa` continuously renders the UI but the firmware never
 latches CONTS, so it needs permanent forcing — not a real fix.)
+
+### CONVERGENCE (2026-06-05) — the sweep-arm IS the DLP/operating-loop blocker
+
+Traced the setter the rest of the way. `b0a1` bit 3 ← `fcn.5f968` ← `fcn.12288`
+(command-code dispatcher, `(code>>8)-0xd → jump table`) ← **`fcn.12b10 @ 0x12DCE`,
+the COMMAND EXECUTOR** (pulls a command word from a record and dispatches). And
+`CONTS` is NOT issued by any power-up DLP preset — it appears in ROM only as a
+parser vocabulary word (~0x5A283) and inside the `__PZZOOM` peak-zoom macro
+(0x630AB/0x63193). So continuous-sweep mode is applied only when the **command
+executor runs the power-up default-config commands** — and that executor is the same
+operating-loop / DLP command engine that, per this whole document, never runs.
+
+**So the sweep-arm dead-end is not a separate problem — it is one more facet of THE
+blocker** (the firmware never runs its operating-loop DLP/command sources), exactly
+like the trace-draw (`__GTTDRW`), the front-panel key consume, the annunciator
+update, and the timedate display. They all unblock together when the firmware runs
+its operating loop. The session's net contribution: ruled out CRT-sync / plane /
+phosphor, and pinned the sweep-arm facet to the precise gate (`b0a1` bit 3 / the
+continuous-sweep command via `fcn.12b10`). Cracking it = cracking the operating-loop
+/ DLP-render obstruction (docs/DRIVETICK_BLOCKER.md), not a sweep-specific fix.
