@@ -222,12 +222,13 @@ func TestSendCONTSDiag(t *testing.T) {
 	a9a0Before := m.Bus.Read(0xFFA9A0, bus.Word)
 	vecBefore := len(chip.LineLog)
 
-	// Watch the CONTS handler (bchg @0x5f980) + dispatcher (b1f8 @0x12290) +
-	// the receive→parse chain: bc28 = parser-FIFO write index (RECEIVE lands
-	// bytes), bc12 = parser FIFO (the parser POPS bytes — only if the deep block
-	// PC 0x18F3E runs). If bc28 advances but bc12 is never read, the parser never
-	// runs ⇒ the DRIVETICK deep-block-never-reached blocker eats the command.
+	// Track the full command chain: receive (bc28), parse (bc12 FIFO),
+	// name-lookup fcn.320fe, DLP scheduler fcn.349b6, dispatcher fcn.12288
+	// (b1f8 @0x12290), and the CONTS handler (bchg @0x5f980). Per docs/
+	// HPIB_E2E_FLOW.md the 2026-06-02 trace: commands reach the lookup but the
+	// handler/scheduler never fires — this re-measures that for CONTS.
 	contsHandler, dispatches, fifoWrites, fifoReads := 0, 0, 0, 0
+	lookup, scheduler := false, false
 	m.Bus.OnWrite = func(addr uint32, sz bus.Size, val uint32) {
 		pc := m.CPU.Reg(cpu.PC)
 		switch addr {
@@ -247,12 +248,27 @@ func TestSendCONTSDiag(t *testing.T) {
 		if addr >= 0xFFBC12 && addr <= 0xFFBC27 { // parser FIFO body
 			fifoReads++
 		}
+		switch pc := m.CPU.Reg(cpu.PC); {
+		case pc >= 0x320fe && pc <= 0x32300: // fcn.320fe name-lookup
+			lookup = true
+		case pc >= 0x349b6 && pc <= 0x349e0: // fcn.349b6 DLP scheduler
+			scheduler = true
+		}
 	}
-	m.GPIBSend("CONTS;", 60_000_000)
-	// a few sweeps after, to let an armed sweep paint
-	m.bootLoop(20_000_000, nil)
+	// LF (0x0A) is the HP-IB message terminator — NOT ';'. AND the command must be
+	// driven IRQ5-only: the sweep STARVES command execution (HPIB_E2E_FLOW.md:118).
+	// So: receive via SendHPIB (IRQ4, no sweep), then an IRQ5-only operating drive.
+	m.MMIO.GPIB.AddressListener()
+	m.SendHPIB([]byte("CONTS\n"), 30_000_000)
+	for i := 0; i < 300; i++ { // IRQ5-only operating drive (NO DriveOneSweepChunk)
+		m.CPU.Run(100_000)
+		m.CPU.SetIRQ(5)
+		m.CPU.Run(400)
+		m.CPU.SetIRQ(0)
+	}
 	m.Bus.OnWrite, m.Bus.OnRead = nil, nil
 	t.Logf("receive: parser-FIFO writes(bc28)=%d   parse: FIFO reads(bc12)=%d", fifoWrites, fifoReads)
+	t.Logf("name-lookup fcn.320fe reached: %v   DLP scheduler fcn.349b6 reached: %v", lookup, scheduler)
 
 	t.Logf("BEFORE: b0a1=0x%02X(bit3=%d) a9a0=0x%04X vec=%d",
 		b0a1Before, (b0a1Before>>3)&1, a9a0Before, vecBefore)

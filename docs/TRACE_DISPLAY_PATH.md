@@ -649,6 +649,17 @@ from "the operating loop / measure-mode state is blocked" to the exact missing e
    never wholesale-written; its only writer is `0x5f980 bchg` in `fcn.5f968`, whose only call
    site is `0x126d8 jsr fcn.00000550` — the CONTS *case* of dispatcher `fcn.12288`
    (`move.w -0x8(a6),d0` = command arg → `jsr`). So CONTS is set ONLY when the command
-   executor dispatches a CONTS opcode+arg. ⇒ the blocker is precisely **command DELIVERY**:
-   find what should feed a CONTS command to `fcn.12288` at power-up (ROM default-config
-   command list vs. NVRAM state-recall). That is the bounded next task.
+   executor dispatches a CONTS opcode+arg.
+
+### CORRECTION (2026-06-05, later) — the gap is RESOLVE→DISPATCH, not "command delivery"
+
+Sent a real `CONTS` over HP-IB the faithful way (`TestSendCONTSDiag`), fixing two things: the
+message terminator is **LF (`\n`)** not `;`, and the command must be driven **IRQ5-only** (the
+sweep starves command execution — HPIB_E2E_FLOW.md). Result: `CONTS\n` is received + parsed and
+the **name-lookup `fcn.320fe` IS reached** — but the **DLP scheduler `fcn.349b6` is NOT** (the
+dispatcher `fcn.12288` 0×, CONTS handler 0×, `b0a1` unchanged). So this is NOT a "delivery" gap
+and NOT the "0x18F3E deep-block never reached" story (superseded — 0x18F3E IS reached). The
+operating tick, parser, and name-lookup all run; the gap is one step later: **a resolved command
+name never invokes its handler** (the `fcn.320fe`→`fcn.349b6`/`fcn.12288`-slot dispatch). Same gap
+hits CAL DISP / CAL DUMP / MEASOFF (HPIB_E2E_FLOW.md 2026-06-02). Bounded next task: RE why a
+resolved command's handler/DLP-source is never scheduled after `fcn.320fe`.

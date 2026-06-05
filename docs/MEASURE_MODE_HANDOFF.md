@@ -123,21 +123,24 @@ scheduled (DLP scheduler `fcn.d18` = 0× during the sweep).
    decoding `fcn.12288`'s PC-relative jump table after `0x12798 jsr fcn.6862` (table data at
    `0x127a4+`); grep where that code is moved into a command record (`0x8(a4)`).
 
-   **★ RECONCILIATION (2026-06-05) — CONTS delivery = command-EXECUTION = the DRIVETICK blocker.**
-   Tried the faithful command path directly: boot with HP-IB installed, `GPIBSend("CONTS;")`
-   (`TestSendCONTSDiag`). Result: the bytes ARE received (parser-FIFO write index `bc28` +6) and
-   the parser DOES run (FIFO body `bc12` read 957×), but CONTS still does NOT dispatch
-   (`fcn.12288` 0×, handler `fcn.5f968` 0×, `b0a1` unchanged). This is the SAME wall as the two
-   SKIPPED hpib_test cases: HP-IB command EXECUTION (the parser dispatching a parsed command's
-   side-effect, via slot 0x69A `fcn.58C2E` called from PC **0x18F3E**) has never worked on Rev L
-   because **0x18F3E — the operating-tick deep block — is never reached** (docs/DRIVETICK_BLOCKER.md:
-   `fcn.568F6 → fcn.11DF4` enters a 31+ deep annunciator/checksum chain that doesn't unwind). So
-   the trace-draw gap, the HP-IB-command-execution gap, and the DRIVETICK deep-block are ONE root:
-   **the operating tick never executes parsed/queued commands.** Forcing CONTS is NOT a shortcut
-   (`TestForceContModeDiag`: arms `a9a0` but +570 vectors only — mode `b0ec`→spectrum + the
-   trace-draw DLP are also gated behind the same deep block). ⇒ the real bounded target is
-   **why fcn.18568 never reaches its command/parser deep block (0x18F3E / 0x183B6)** —
-   docs/DRIVETICK_BLOCKER.md's `fcn.568F6 → fcn.11DF4` non-unwinding chain.
+   **★ RECONCILIATION (2026-06-05, CORRECTED) — the root is the command RESOLVE→DISPATCH gap.**
+   Sent a real `CONTS` over the faithful HP-IB path (`TestSendCONTSDiag`), correcting two mistakes
+   the docs warned about: (1) the message terminator is **LF (`\n`/0x0A)**, NOT `;` (the `;` is a
+   command separator — `;`-terminated messages are received+parsed but never executed); (2) drive
+   the command **IRQ5-only** — the sweep STARVES command execution (HPIB_E2E_FLOW.md). With both:
+   `CONTS\n` is received (`bc28` +6), parsed (`bc12` read), and the **name-lookup `fcn.320fe` IS
+   reached (resolved=true)** — BUT the **DLP scheduler `fcn.349b6` is NOT reached (false)**, the
+   dispatcher `fcn.12288` runs 0×, the CONTS handler 0×, `b0a1` unchanged.
+   So the operating tick / parser / name-lookup all RUN — the gap is one step later: a resolved
+   command name never DISPATCHES its handler. This matches HPIB_E2E_FLOW.md's 2026-06-02 trace
+   (CAL DISP, CAL DUMP, and direct-handler MEASOFF `0x3EC9A` all reach `fcn.320fe` ×18 but their
+   handler/`fcn.349b6` fires 0×). It SUPERSEDES the earlier "0x18F3E deep-block never reached"
+   framing (that was an artifact of the `;` terminator + forced-PC drive; 0x18F3E IS reached).
+   So the trace-draw gap, HP-IB command execution, and CAL DISP are ONE root: **a resolved command
+   never invokes its handler (the `fcn.320fe`→`fcn.349b6`/`fcn.12288` dispatch step).** Forcing
+   CONTS is NOT a shortcut (`TestForceContModeDiag`: arms `a9a0` but +570 vectors only). ⇒ the real
+   bounded target is **why does name-lookup `fcn.320fe` resolve a command but the dispatch to its
+   handler (`fcn.349b6` for DLP sources, the `fcn.12288` slot for direct like CONTS) never fire?**
 2. **DONE (2026-06-05) — `0x9A` status cadence fixed.** `analogbus.go` now presents the
    ready/settled bits (`0x06`) statically on every read and pulses only EOC (bit0) via the
    conversion state machine (the `statusReadyEveryNReads=256` "busy 0x00" hack is removed). Frees
