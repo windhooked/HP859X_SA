@@ -38,12 +38,12 @@ func TestACRTCCalcOffset(t *testing.T) {
 		wantOff uint32
 		wantBit uint8
 	}{
-		{0, 0, 0x3a45, 0},     // logical origin → dpa
-		{15, 0, 0x3a45, 15},   // last bit of the origin word
-		{16, 0, 0x3a46, 0},    // next word
-		{32, 0, 0x3a47, 0},    // two words over
-		{0, 1, 0x3a45 - 64, 0},// one line UP (Y subtracted) = −MWR
-		{0, 209, 0x0605, 0},   // graph top (firmware ymax): 0x3a45 − 209*64
+		{0, 0, 0x3a45, 0},      // logical origin → dpa
+		{15, 0, 0x3a45, 15},    // last bit of the origin word
+		{16, 0, 0x3a46, 0},     // next word
+		{32, 0, 0x3a47, 0},     // two words over
+		{0, 1, 0x3a45 - 64, 0}, // one line UP (Y subtracted) = −MWR
+		{0, 209, 0x0605, 0},    // graph top (firmware ymax): 0x3a45 − 209*64
 		{16, 209, 0x0606, 0},
 	}
 	for _, c := range cases {

@@ -59,9 +59,9 @@ var allowedUnmodeled = map[string]string{
 	"ar:0xea": "ZFR zoom factor (=0, no zoom). Our render applies no hardware zoom; the firmware always programs ZFR=0.",
 
 	// ── Recognised-but-stubbed commands (framed, side-effect not modelled) ─────
-	"cmd:0xd000": "Per-glyph attribute/terminator command (1 arg), emitted after every text glyph (docs/research.md §7 trailer 0805 0000 D000 0907). The argument tracks glyph content but has no observable effect on the 1bpp monochrome render. Framed (1 arg consumed) for stream sync; effect not modelled.",
+	"cmd:0xd000":    "Per-glyph attribute/terminator command (1 arg), emitted after every text glyph (docs/research.md §7 trailer 0805 0000 D000 0907). The argument tracks glyph content but has no observable effect on the 1bpp monochrome render. Framed (1 arg consumed) for stream sync; effect not modelled.",
 	"cmd:sclr-area": "SCLR-area (0x5C00|logical-op; 3 args: pattern, ΔX, ΔY). The pattern is a 50%-dither (0x5555/0xAAAA): this is a PATTERNED FILL (background dither / dotted gridlines), not a clear-to-dark — applying it as a region clear erases the trailing characters of labels (verified). Framed (3 args consumed) for stream sync; faithful dither rendering into the dim background plane is a separate task.",
-	"cmd:rpr":   "RPR read-parameter-register (0 args; the firmware reads back registers it wrote, e.g. WPR5). The chip read-FIFO is not modelled, so the read returns via the data-port stub (ReadData). The boot's visible render does not depend on the read-back value; framed (no args) for stream sync.",
+	"cmd:rpr":       "RPR read-parameter-register (0 args; the firmware reads back registers it wrote, e.g. WPR5). The chip read-FIFO is not modelled, so the read returns via the data-port stub (ReadData). The boot's visible render does not depend on the read-back value; framed (no args) for stream sync.",
 }
 
 // allowed reports whether key is on the explicit allowlist (a permitted,

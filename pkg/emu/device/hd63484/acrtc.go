@@ -110,15 +110,15 @@ func (a *acrtc) scanTagBit(off uint32, bit int) uint8 {
 
 // Command-class tags (cmdTag values).
 const (
-	tagNone uint8 = iota
-	tagPoly        // APLL / RPLL polyline
-	tagSCLR        // SCLR area op
-	tagCLR         // CLR area op
-	tagRect        // ARCT / RRCT / AFRCT / RFRCT
-	tagLine        // ALINE / RLINE
-	tagDot         // DOT
-	tagGlyph       // WPTN glyph
-	tagRaster      // raster pattern fill (0x4400)
+	tagNone   uint8 = iota
+	tagPoly         // APLL / RPLL polyline
+	tagSCLR         // SCLR area op
+	tagCLR          // CLR area op
+	tagRect         // ARCT / RRCT / AFRCT / RFRCT
+	tagLine         // ALINE / RLINE
+	tagDot          // DOT
+	tagGlyph        // WPTN glyph
+	tagRaster       // raster pattern fill (0x4400)
 	tagOther
 )
 

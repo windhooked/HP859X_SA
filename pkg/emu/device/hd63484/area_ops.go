@@ -1,6 +1,5 @@
 package hd63484
 
-
 // area_ops.go is a faithful port of the HD63484's RWP-addressed memory engine
 // from MAME (src/devices/video/hd63484.cpp) — specifically the CLR (0x5800) and
 // SCLR (0x5C00) area-fill commands. Unlike the pen-based line/rect/glyph
@@ -83,7 +82,6 @@ func (c *Chip) execClear(cr, pattern uint16, ax, ay int16) {
 	mwr := c.areaMWR()
 	mm := cr & 0x03
 	logical := cr&0x0400 != 0 // BIT(cr,10)
-
 
 	// === NO DITHERING ===
 	// On the real instrument the display is 1-BIT: every pixel is on or off, one
