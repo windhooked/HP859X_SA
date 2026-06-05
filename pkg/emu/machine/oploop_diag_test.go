@@ -1,6 +1,7 @@
 package machine
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/windhooked/HP859X_SA/pkg/emu/bus"
@@ -44,4 +45,47 @@ func TestOpLoopEntryDiag(t *testing.T) {
 	} else {
 		t.Log("⇒ fcn.18568 IS entered ⇒ the block is INSIDE the loop (DRIVETICK deep path), not entry")
 	}
+}
+
+// TestCalGatesMeasureModeDiag is the DECISIVE check (option c): does cal-validity /
+// cal data gate the measure mode at all? A/B: boot cal-INVALID (blank NVRAM →
+// startup checksum FAILS) vs cal-VALID (the default Synthesize → checksum passes),
+// and compare the measure-mode cells (0xB0EC mode, a9a0 sweep-arm, b0a1 CONTS) +
+// vectors drawn. Also counts NON-checksum reads of the cal NVRAM (0x200000) — if
+// the only cal reads are the checksum loop (0x454A) and the A/B cells are identical,
+// cal is PROVEN irrelevant to the measure-mode blocker. DIAG=1 to run.
+func TestCalGatesMeasureModeDiag(t *testing.T) {
+	run := func(blankCal bool) string {
+		m := diagBootMachine(t)
+		if blankCal {
+			m.CalNVRAM.LoadImage([]byte{}) // all-zero ⇒ Σ≠1 ⇒ checksum FAILS ⇒ "USING DEFAULTS"
+		}
+		nonChecksumCalReads := 0
+		calReadPC := map[uint32]int{}
+		m.Bus.OnRead = func(addr uint32, sz bus.Size, val uint32) {
+			if addr >= 0x200000 && addr <= 0x20FFFF {
+				if pc := m.CPU.Reg(cpu.PC); pc < 0x4540 || pc > 0x4580 { // exclude checksum loop
+					nonChecksumCalReads++
+					calReadPC[pc]++
+				}
+			}
+		}
+		chip := m.MMIO.Display.Chip
+		chip.EnableLineLog()
+		vectors := 0
+		const seg = 5_000_000
+		for done := 0; done < 260_000_000; done += seg {
+			m.BootToOperatingWithSweep(seg)
+			vectors += len(chip.LineLog)
+			chip.LineLog = chip.LineLog[:0]
+		}
+		m.Bus.OnRead = nil
+		return fmt.Sprintf("b0ec=0x%X a9a0=0x%04X b0a1=0x%02X bb2c=0x%04X vectors=%d nonChecksumCalReads=%d (from %d PCs)",
+			m.Bus.Read(0xFFB0EC, bus.Word), m.Bus.Read(0xFFA9A0, bus.Word),
+			byte(m.Bus.Read(0xFFB0A1, bus.Byte)), m.Bus.Read(0xFFBB2C, bus.Word),
+			vectors, nonChecksumCalReads, len(calReadPC))
+	}
+	t.Logf("cal-INVALID (blank): %s", run(true))
+	t.Logf("cal-VALID   (synth): %s", run(false))
+	t.Log("⇒ if the measure-mode cells (b0ec/a9a0/b0a1) match, cal-validity does NOT gate the measure mode")
 }
