@@ -2,12 +2,14 @@ package machine
 
 import (
 	"fmt"
+	"image/png"
 	"os"
 	"sort"
 	"testing"
 
 	"github.com/windhooked/HP859X_SA/pkg/emu/bus"
 	"github.com/windhooked/HP859X_SA/pkg/emu/cpu"
+	"github.com/windhooked/HP859X_SA/pkg/emu/device"
 	"github.com/windhooked/HP859X_SA/pkg/emu/romloader"
 )
 
@@ -210,7 +212,10 @@ func TestSendCONTSDiag(t *testing.T) {
 		t.Skip("rom not available")
 	}
 	m, _ := New8593A(rom)
-	m.MMIO.InstallHPIB()
+	// Match the GUI EXACTLY (it runs CAL DISP): NO InstallHPIB — that routes IRQ4 to
+	// the HP-IB path (b05f bit0) and starves the AT keyboard at 0xEF8000, so the typed
+	// command never reaches the parser. The AT keyboard works natively (IRQ4 → PIT
+	// path 0x26DC → scancode→ASCII → parser FIFO 0xBC12).
 	m.CPU.Reset()
 	m.MMIO.SweepActive = true
 	m.SweepDrive = true
@@ -244,9 +249,13 @@ func TestSendCONTSDiag(t *testing.T) {
 			fifoWrites++
 		}
 	}
+	calExec := false
 	m.Bus.OnRead = func(addr uint32, sz bus.Size, val uint32) {
 		if addr >= 0xFFBC12 && addr <= 0xFFBC27 { // parser FIFO body
 			fifoReads++
+		}
+		if addr >= 0x50500 && addr <= 0x50700 { // CAL DISP label region (0x5057c/0x50620)
+			calExec = true
 		}
 		switch pc := m.CPU.Reg(cpu.PC); {
 		case pc >= 0x320fe && pc <= 0x32300: // fcn.320fe name-lookup
@@ -255,20 +264,59 @@ func TestSendCONTSDiag(t *testing.T) {
 			scheduler = true
 		}
 	}
-	// LF (0x0A) is the HP-IB message terminator — NOT ';'. AND the command must be
-	// driven IRQ5-only: the sweep STARVES command execution (HPIB_E2E_FLOW.md:118).
-	// So: receive via SendHPIB (IRQ4, no sweep), then an IRQ5-only operating drive.
-	m.MMIO.GPIB.AddressListener()
-	m.SendHPIB([]byte("CONTS\n"), 30_000_000)
-	for i := 0; i < 300; i++ { // IRQ5-only operating drive (NO DriveOneSweepChunk)
-		m.CPU.Run(100_000)
-		m.CPU.SetIRQ(5)
-		m.CPU.Run(400)
-		m.CPU.SetIRQ(0)
+	// Replicate the PROVEN GUI keyboard path (which runs CAL DISP): F8 enters
+	// remote-commands mode, then type the command + Enter as AT scancodes over IRQ4,
+	// then DRIVE LONG (driveHPIB = Run+IRQ4+IRQ5+sweep) — command execution takes many
+	// operating-loop ticks. atKeyFor maps a rune to its ATKey.
+	atKeyFor := func(r rune) (device.ATKey, bool) {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			return device.ATKeyA + device.ATKey(r-'A'), true
+		case r >= '0' && r <= '9':
+			return device.ATKey0 + device.ATKey(r-'0'), true
+		case r == ' ':
+			return device.ATKeySpace, true
+		case r == ';':
+			return device.ATKeySemicolon, true
+		case r == '.':
+			return device.ATKeyPeriod, true
+		case r == '-':
+			return device.ATKeyMinus, true
+		}
+		return 0, false
 	}
+	typeKey := func(k device.ATKey) {
+		m.ATKeyboard.Enqueue(device.ATMake(k)...)
+		m.driveHPIB(4_000_000, func() bool { return !m.ATKeyboard.Pending() })
+		m.ATKeyboard.Enqueue(device.ATBreak(k)...)
+		m.driveHPIB(4_000_000, func() bool { return !m.ATKeyboard.Pending() })
+	}
+	// Type CAL DISP; over the keyboard and drive long; assert it EXECUTES (cal-label
+	// region read). This is the positive proof that the keyboard command path works —
+	// correcting the earlier (wrong) "commands never dispatch" conclusion, which was a
+	// harness artifact (InstallHPIB routed IRQ4 off the keyboard + too-short drive).
+	// NOTE: CONTS; reaches the same lookup+scheduler but its handler fcn.5f968 does NOT
+	// fire (b0a1 bit3 stays 0) — a separate open question (see docs/MEASURE_MODE_HANDOFF).
+	typeKey(device.ATKeyF8) // remote-commands mode
+	for _, r := range "CAL DISP;" {
+		if k, ok := atKeyFor(r); ok {
+			typeKey(k)
+		}
+	}
+	typeKey(device.ATKeyEnter)
+	m.driveHPIB(1_500_000_000, func() bool { return calExec })
 	m.Bus.OnWrite, m.Bus.OnRead = nil, nil
+
+	if f, err := os.Create("../../../screens/cal_disp_kbd.png"); err == nil {
+		png.Encode(f, chip.RenderScanout())
+		f.Close()
+	}
+	t.Logf("CAL DISP executed (cal-label region read): %v", calExec)
 	t.Logf("receive: parser-FIFO writes(bc28)=%d   parse: FIFO reads(bc12)=%d", fifoWrites, fifoReads)
 	t.Logf("name-lookup fcn.320fe reached: %v   DLP scheduler fcn.349b6 reached: %v", lookup, scheduler)
+	if !calExec {
+		t.Error("CAL DISP did NOT execute via the keyboard path — harness regression")
+	}
 
 	t.Logf("BEFORE: b0a1=0x%02X(bit3=%d) a9a0=0x%04X vec=%d",
 		b0a1Before, (b0a1Before>>3)&1, a9a0Before, vecBefore)

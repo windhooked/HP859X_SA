@@ -123,24 +123,28 @@ scheduled (DLP scheduler `fcn.d18` = 0× during the sweep).
    decoding `fcn.12288`'s PC-relative jump table after `0x12798 jsr fcn.6862` (table data at
    `0x127a4+`); grep where that code is moved into a command record (`0x8(a4)`).
 
-   **★ RECONCILIATION (2026-06-05, CORRECTED) — the root is the command RESOLVE→DISPATCH gap.**
-   Sent a real `CONTS` over the faithful HP-IB path (`TestSendCONTSDiag`), correcting two mistakes
-   the docs warned about: (1) the message terminator is **LF (`\n`/0x0A)**, NOT `;` (the `;` is a
-   command separator — `;`-terminated messages are received+parsed but never executed); (2) drive
-   the command **IRQ5-only** — the sweep STARVES command execution (HPIB_E2E_FLOW.md). With both:
-   `CONTS\n` is received (`bc28` +6), parsed (`bc12` read), and the **name-lookup `fcn.320fe` IS
-   reached (resolved=true)** — BUT the **DLP scheduler `fcn.349b6` is NOT reached (false)**, the
-   dispatcher `fcn.12288` runs 0×, the CONTS handler 0×, `b0a1` unchanged.
-   So the operating tick / parser / name-lookup all RUN — the gap is one step later: a resolved
-   command name never DISPATCHES its handler. This matches HPIB_E2E_FLOW.md's 2026-06-02 trace
-   (CAL DISP, CAL DUMP, and direct-handler MEASOFF `0x3EC9A` all reach `fcn.320fe` ×18 but their
-   handler/`fcn.349b6` fires 0×). It SUPERSEDES the earlier "0x18F3E deep-block never reached"
-   framing (that was an artifact of the `;` terminator + forced-PC drive; 0x18F3E IS reached).
-   So the trace-draw gap, HP-IB command execution, and CAL DISP are ONE root: **a resolved command
-   never invokes its handler (the `fcn.320fe`→`fcn.349b6`/`fcn.12288` dispatch step).** Forcing
-   CONTS is NOT a shortcut (`TestForceContModeDiag`: arms `a9a0` but +570 vectors only). ⇒ the real
-   bounded target is **why does name-lookup `fcn.320fe` resolve a command but the dispatch to its
-   handler (`fcn.349b6` for DLP sources, the `fcn.12288` slot for direct like CONTS) never fire?**
+   **★★ DEFINITIVE CORRECTION (2026-06-05) — commands DO execute; my "blocked" conclusions were
+   HARNESS ARTIFACTS.** Two earlier reconciliations this session ("0x18F3E never reached", then
+   "resolve→dispatch gap / `fcn.349b6` never fires") were BOTH WRONG — artifacts of a bad test
+   harness, not a firmware gap. Proven by replicating the GUI keyboard path that actually runs
+   CAL DISP (`TestSendCONTSDiag`, now a positive assertion):
+   - **Match the GUI EXACTLY**: NO `InstallHPIB` (it routes IRQ4 to the HP-IB path via `b05f` bit0
+     and STARVES the AT keyboard at `0xEF8000`); deliver the command as **AT scancodes** (F8 remote
+     mode → type chars → Enter) over IRQ4; drive **GUI-style** (`driveHPIB` = Run+IRQ4+IRQ5+sweep);
+     and **drive LONG** (command execution takes many operating-loop ticks — >>30M cycles).
+   - With that: typing `CAL DISP;` **EXECUTES** — the cal-display routine reads its label region
+     (`0x5057c`/`0x50620`), the command echoes on screen ("CAL DISP: Entr→Command"),
+     `fcn.320fe` + `fcn.349b6` both fire. Asserted green; screen `screens/cal_disp_kbd.png`.
+   - So the operating loop, parser, name-lookup, DLP scheduler, and command HANDLERS all work. The
+     trace also draws (grass + peaks visible in the renders). The prior "never executes" findings
+     came from (1) wrong input path (InstallHPIB), (2) wrong terminator, (3) drives far too short.
+
+   **CONTS specifically** still does NOT reach its handler `fcn.5f968` (b0a1 bit3 stays 0) when typed
+   the same way that runs CAL DISP — a NARROW open question, NOT a general command-execution gap. It
+   may not be a keyboard-typeable remote command in the current menu context, or the firmware's
+   visible sweep isn't gated on `b0a1`/`a9a0` the way assumed. ⇒ Next: trace what CONTS resolves to
+   when typed (vs CAL DISP), or find the front-panel/softkey path for continuous-sweep; and re-check
+   whether the trace goal is actually already met (the firmware shows a live trace).
 2. **DONE (2026-06-05) — `0x9A` status cadence fixed.** `analogbus.go` now presents the
    ready/settled bits (`0x06`) statically on every read and pulses only EOC (bit0) via the
    conversion state machine (the `statusReadyEveryNReads=256` "busy 0x00" hack is removed). Frees

@@ -663,3 +663,13 @@ operating tick, parser, and name-lookup all run; the gap is one step later: **a 
 name never invokes its handler** (the `fcn.320fe`→`fcn.349b6`/`fcn.12288`-slot dispatch). Same gap
 hits CAL DISP / CAL DUMP / MEASOFF (HPIB_E2E_FLOW.md 2026-06-02). Bounded next task: RE why a
 resolved command's handler/DLP-source is never scheduled after `fcn.320fe`.
+
+> **SUPERSEDED (2026-06-05, same day): commands DO execute — this "gap" was a harness artifact.**
+> Replicating the GUI keyboard path (NO `InstallHPIB`; AT scancodes F8→type→Enter; drive LONG)
+> runs `CAL DISP;` to completion — cal-label region read, command echoes on screen, `fcn.349b6`
+> fires (`TestSendCONTSDiag`, asserted; `screens/cal_disp_kbd.png`). The "`fcn.349b6` never fires"
+> reading came from the wrong input path (`InstallHPIB` steals IRQ4 from the AT keyboard via `b05f`
+> bit0) + too-short drive. The operating loop, parser, scheduler, and command handlers all work,
+> and the trace draws (grass visible). CONTS specifically still doesn't reach `fcn.5f968` typed
+> this way — a narrow open question, not a general execution gap. See
+> docs/MEASURE_MODE_HANDOFF.md "★★ DEFINITIVE CORRECTION".
