@@ -478,3 +478,97 @@ Three polish items, all on branch sweep-cycle-model:
 Tests: TestSweepEngineSetSignals (boundary), TestBootToOperatingWithSweep (still
 green with pacing+grass), full suite green. Render: screens/sweeprun2.png shows the
 grass baseline + live operating UI.
+
+## WHY a9a0 SETTLES -1 (2026-06-05) — the sweep-arm gate is b0a1 bit 3 (CONTS), and it's a deadlock
+
+Traced the "operating loop never sustains" blocker down to the exact bit, measured
+end-to-end (probes: `pkg/emu/machine/sweeparm_diag_test.go`, DIAG=1). The whole
+chain — from the un-repainted graticule / un-drawn trace to the root — is:
+
+```
+graticule eroded where the trace is  ← fcn.18568 (operating loop) never entered (measured 0×)
+  ← the boot sweep-orchestrator (0x17460 `tst a9a0; blt`) only marks sweep-DONE / hands off when a9a0 >= 0
+  ← a9a0 = -1 (slow sweep DISABLED) because fcn.8f04 @ 0x8F5A `btst #3,0xb0a1; beq 0x92b2` sees b0a1 bit 3 CLEAR
+  ← the CONTS-mode handler fcn.5f968 (sets b0a1 bit3) runs 0× — only reachable via the command
+     dispatcher fcn.12288 @ 0x126D8, which runs IN the operating loop (never entered)
+  ← DEADLOCK
+```
+
+### The gate (fcn.8f04, the sweep point-count function)
+
+`fcn.8f04(d0=sweep-time-µs)` computes the point counter `a9a0`. Thresholds:
+0x4E20=20 ms, 0x3A98=15 ms, 0x30D40=200 ms, 0xC3500=800 ms, 0xF4240=1 s.
+- **Fast sweeps (<20 ms)** take the 0x8F10 `blt 0x8F9C` branch and arm regardless
+  (`a9a0=20` seen at 0x90C8) — the engine works.
+- **Slow sweeps (≥20 ms — the boot's coupled ~58 ms)** fall through to 0x8F5A
+  `btst #3,b0a1`; with bit 3 clear they jump to **0x92B2 → a9a0 = 0xFFFF (-1)**.
+  (Probe note: the write at 0x92B2 is 6 bytes, so the captured PC reads 0x92B8.)
+
+### b0a1 bit 3 = continuous-sweep mode (CONTS)
+
+`b0a1` bit 3 is written in exactly one place — `fcn.5f968` (dispatch slot 0x550,
+`jmp 0x5f968`), which sets bit 3 to match a command argument (`btst→sne→eor→bchg`).
+Its only caller is the command dispatcher `fcn.12288 @ 0x126D8`. `CONTS`/`SNGLS`
+exist as command strings in ROM (~0x5A283). So bit 3 = the **CONTS continuous-sweep
+mode**, set by parsing that command — which never happens at boot.
+
+### The deadlock, measured
+
+- `fcn.5f968` (CONTS setter) reached **0×**, `fcn.18568` (operating loop) reached **0×**.
+- The orchestrator reads `a9a0=-1` **6377×** (idle poll 0x17464) vs armed only **16×**
+  (the transient fast sweeps); sweeps DO complete (`befa` bit13 set 44×) but never hand off.
+- So: full-span sweep disabled (no CONTS) → no hand-off → no operating loop → no CONTS
+  → disabled. Self-reinforcing.
+
+### Lever confirmed — necessary but NOT sufficient
+
+Holding `b0a1` bit 3 set across the boot makes `fcn.8f04` arm the **slow full-span
+sweep — `a9a0 = 252` (0xFC)** appears, vs only -1/20 without it. That *proves* bit 3
+is the arm gate. But it is **not sufficient** — measured by the reliable signal
+(**vectors drawn**, `chip.LineLog`, = the operating UI rendering): forcing `b0a1`
+bit 3 draws **+570** vectors over baseline, whereas the direct force-arm draws
+**+19248** (the full operating UI). So one bit arms the counter but the sweep still
+doesn't complete+persist+hand off. This matches the historic force-arm result: only
+forcing the *end state* (`a9a0` positive AND `befa` bit13, **persistently**) ever
+renders the operating UI.
+
+> **Detector caveat:** the `fcn.18568`-entry signal "a `b0a1` write from PC
+> 0x18568–0x1A000" is **unreliable** — the operating loop renders (+19248 vectors)
+> while that detector reads 0, because the loop doesn't always hit the `bclr #7,b0a1`
+> at 0x1933A. Use **vectors drawn** as the "operating UI rendered" signal, not that.
+
+### Ruled out (with evidence)
+- **CRT-controller sync** — the HD63484 has no frame/vsync MPU interrupt (datasheet
+  §2.3.3: command-error/command-end/edge/light-pen/4×FIFO only); its vsync/hsync are
+  raster outputs to the A2 display. The sweep is self-timed (HSWP is an output) and
+  can be ~100 s ≫ a 60 Hz frame.
+- **Plane separation** (`GraticuleToUpper`) and **phosphor/persistence** —
+  disproven, see docs/DISPLAY_FINDINGS.md.
+
+### Kickstart experiment (2026-06-05) — forcing into the op-loop does NOT set CONTS
+
+Tested whether a temporary KICK (force `a9a0=0x190` + `befa` bit13 for ~20M cycles)
+bootstraps self-sustaining operation. Result: the kick **renders the operating UI**
+(6416 vectors) but **`b0a1` bit 3 stays 0 the whole time** — i.e. even inside the
+forced operating loop the firmware does **not** issue CONTS. Stop forcing and it does
+not self-sustain (no natural arm; `a9a0` just keeps the leftover forced value).
+
+`b0a1` bit 3 is set in exactly one way — `fcn.5f968`, reached only from the command
+dispatcher `fcn.12288 @ 0x126D8` (parsing the `CONTS` command); there is NO whole-byte
+write or default-table store of `b0a1`. So continuous-sweep mode is applied by
+**parsing a CONTS command**, which must come from the **power-up default-config /
+saved-state recall** — and that path never executes in our boot.
+
+### Bounded next task — REVISED
+
+The real missing piece is the **power-up default configuration / state-0 recall**
+that issues `CONTS` (and the other default-mode commands) at boot. It is NOT the
+sweep handoff (forcing past it doesn't set CONTS) and NOT a one-bit poke. Trace where
+the firmware applies its power-up defaults — what feeds the `fcn.12288` dispatcher at
+init (the instrument-preset / recall-state path), and why it stalls before issuing
+`CONTS`. That is the faithful fix; only after CONTS is set will `fcn.8f04` arm the
+slow sweep, the orchestrator hand off, and the trace/graticule self-sustain.
+
+(Practical-but-unfaithful alternative, per "a half-mock is worse than the clean
+screen": force `a9a0`+`befa` continuously renders the UI but the firmware never
+latches CONTS, so it needs permanent forcing — not a real fix.)
