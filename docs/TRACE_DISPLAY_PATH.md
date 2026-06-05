@@ -587,8 +587,35 @@ operating-loop / DLP command engine that, per this whole document, never runs.
 **So the sweep-arm dead-end is not a separate problem — it is one more facet of THE
 blocker** (the firmware never runs its operating-loop DLP/command sources), exactly
 like the trace-draw (`__GTTDRW`), the front-panel key consume, the annunciator
-update, and the timedate display. They all unblock together when the firmware runs
-its operating loop. The session's net contribution: ruled out CRT-sync / plane /
-phosphor, and pinned the sweep-arm facet to the precise gate (`b0a1` bit 3 / the
-continuous-sweep command via `fcn.12b10`). Cracking it = cracking the operating-loop
-/ DLP-render obstruction (docs/DRIVETICK_BLOCKER.md), not a sweep-specific fix.
+update, and the timedate display.
+
+### CORRECTION + reconciliation with DRIVETICK_BLOCKER (2026-06-05, later)
+
+Two corrections to the above, both from re-measuring with reliable signals:
+
+1. **`fcn.18568` IS entered — 699× in the sweep-driven boot** (reliable detector:
+   `b010` write @0x1856C, the loop's 2nd instruction). The "never entered (0×)"
+   claims above used the *unreliable* `b0a1`-write-@0x1933A detector (the loop
+   renders without hitting that conditional deep-path bclr). NB: the *passive* boot
+   (`BootToOperating`, no sweep drive) does NOT enter it — matching DRIVETICK
+   2026-05-31 "cont." — so sweep-driving is what advances the firmware into the loop.
+   ⇒ the block is INSIDE the loop / the measure-mode state, **not** a loop-entry
+   deadlock.
+
+2. **This sweep-arm facet IS DRIVETICK's "Gate 1."** docs/DRIVETICK_BLOCKER.md already
+   established `a9a0=-1` is the multi-layered sweep-arm gate and pinned one layer —
+   the **`0xB0EC` display-mode** (0x90CE: `cmpi #0x31,b0ec`; the firmware boots into
+   CONFIG mode `0x1A`, never spectrum `0x31`). **This session adds another layer: the
+   `b0a1` bit 3 / CONTS gate at 0x8F5A.** Both are necessary, neither sufficient (the
+   doc proved mode-alone isn't; I proved CONTS-alone isn't) — exactly the doc's
+   "multi-layered measure-mode state, not a single lever" conclusion. DRIVETICK's
+   "Gate 2" (the trace-draw DLP source `0x5ECEE`/`__GTTDRW` never scheduled) is
+   unchanged.
+
+**Net (corrected):** the session ruled out CRT-sync / plane / phosphor, settled the
+`fcn.18568`-entry question reliably (entered, sweep-driven), and pinned one more layer
+of DRIVETICK Gate 1 (`b0a1` bit 3 / CONTS). The root is unchanged and is the
+documented multi-session task: the firmware boots into CONFIG mode and never enters
+the continuous-sweep **MEASURE-mode** DLP state (`0xB0EC`→spectrum + the measure-mode
+DLP that schedules the trace-draw). See docs/DRIVETICK_BLOCKER.md for the full Gate
+1+2 map.
