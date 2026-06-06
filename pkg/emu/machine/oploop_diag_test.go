@@ -251,6 +251,8 @@ func TestSendCONTSDiag(t *testing.T) {
 	}
 	calExec := false
 	gttdrw, measoff := 0, 0
+	// Dispatch-path milestones (in order) for the CAL-DISP-vs-CONTS differential.
+	ms := map[string]int{}
 	m.Bus.OnRead = func(addr uint32, sz bus.Size, val uint32) {
 		if addr >= 0xFFBC12 && addr <= 0xFFBC27 { // parser FIFO body
 			fifoReads++
@@ -258,17 +260,36 @@ func TestSendCONTSDiag(t *testing.T) {
 		if addr >= 0x50500 && addr <= 0x50700 { // CAL DISP label region (0x5057c/0x50620)
 			calExec = true
 		}
-		if pc := m.CPU.Reg(cpu.PC); pc >= 0x65986 && pc <= 0x65a40 { // __GTTDRW trace-paint
-			gttdrw++
+		if addr >= 0x71D76 && addr <= 0x72400 { // dispatch table read (base 0xa74=0x71D76)
+			ms["4_secTable"]++
+			// token = (addr-base)/4; val = the handler PC jsr'd at 0x34C94.
+			ms[fmt.Sprintf("4c_token0x%X->handler0x%X", (addr-0x71D76)/4, val&0xFFFFFF)]++
 		}
-		if pc := m.CPU.Reg(cpu.PC); pc >= 0x3ec9a && pc <= 0x3ed20 { // MEASOFF direct-C handler
-			measoff++
-		}
-		switch pc := m.CPU.Reg(cpu.PC); {
-		case pc >= 0x320fe && pc <= 0x32300: // fcn.320fe name-lookup
+		pc := m.CPU.Reg(cpu.PC)
+		switch {
+		case pc >= 0x58c2e && pc <= 0x58ebc:
+			ms["1_parser(58c2e)"]++
+		case pc >= 0x580b4 && pc <= 0x58400:
+			ms["2_asciiExec(580b4)"]++
+		case pc >= 0x320fe && pc <= 0x32300:
+			ms["3_resolve(320fe)"]++
 			lookup = true
-		case pc >= 0x349b6 && pc <= 0x349e0: // fcn.349b6 DLP scheduler
+		case pc >= 0x56d1a && pc <= 0x56e60:
+			ms["5_disp_hi(56d1a)"]++
+		case pc >= 0x567e0 && pc <= 0x56900:
+			ms["5_disp_lo(567e0)"]++
+		case pc >= 0x12288 && pc <= 0x12800:
+			ms["6_paramDisp(12288)"]++
+		case pc >= 0x349b6 && pc <= 0x349e0:
+			ms["7_dlpSched(349b6)"]++
 			scheduler = true
+		case pc >= 0x5f968 && pc <= 0x5f9da:
+			ms["8_CONTShandler(5f968)"]++
+		case pc >= 0x3ec9a && pc <= 0x3ed20:
+			ms["8_MEASOFFhandler(3ec9a)"]++
+			measoff++
+		case pc >= 0x65986 && pc <= 0x65a40:
+			gttdrw++
 		}
 	}
 	// Replicate the PROVEN GUI keyboard path (which runs CAL DISP): F8 enters
@@ -323,6 +344,17 @@ func TestSendCONTSDiag(t *testing.T) {
 	}
 	t.Logf("ATCMD=%q | CAL-DISP-exec=%v MEASOFF-handler=%d __GTTDRW=%d | bc28=%d bc12=%d lookup=%v sched=%v",
 		cmd, calExec, measoff, gttdrw, fifoWrites, fifoReads, lookup, scheduler)
+	{
+		var keys []string
+		for k := range ms {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		t.Logf("--- dispatch milestones (in order) for %q ---", cmd)
+		for _, k := range keys {
+			t.Logf("    %-26s = %d", k, ms[k])
+		}
+	}
 	t.Logf("b0ec=0x%X a9a0=0x%04X b0a1=0x%02X(bit3=%d) CONTS-handler=%d vec=%d → screens/atcmd_kbd.png",
 		m.Bus.Read(0xFFB0EC, bus.Word), m.Bus.Read(0xFFA9A0, bus.Word),
 		byte(m.Bus.Read(0xFFB0A1, bus.Byte)), (byte(m.Bus.Read(0xFFB0A1, bus.Byte))>>3)&1,
