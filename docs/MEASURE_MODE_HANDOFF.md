@@ -158,10 +158,23 @@ scheduled (DLP scheduler `fcn.d18` = 0× during the sweep).
    its caller's `d0`), and restores from `b058`/`b248` (`0x11C1A`/`0x11CB8`). The mode setter's caller
    `fcn.220a0` is invoked from `0x1a2xx` (boot, passes `0x01`/`0x1A`) and `0x1c2xx` (command handlers,
    pass `0x0`/`0x1`) — **none pass `0x31`**. Typed commands TS / CONTS / CAL DISP do NOT move `b0ec`
-   to `0x31`. ⇒ Bounded next target: find what sets `b0ec=0x31` (the `fcn.220a0(0x31)` caller, or the
-   `b058`/`b248` saved-state restore source) and its precondition — likely tied to the measurement
-   subsystem completing. Probe: `TestSendCONTSDiag` is now env-parameterized (`ATCMD="…"`) to type
-   any command; `TestTraceLongRunDiag` measures `__GTTDRW`.
+   to `0x31`.
+
+   **REFINED (2026-06-06) — typed DIRECT-C command handlers never fire; only DLP-source commands do.**
+   Tested several commands the same way that runs CAL DISP (`TestSendCONTSDiag ATCMD="…"`):
+   - `CAL DISP` (public command, DLP-source handler) — **EXECUTES** (cal-label region read).
+   - `MEASOFF` (public, direct-C handler `0x3EC9A`) — handler fires **0×**.
+   - `CONTS` (direct-C, `fcn.5f968`) — **0×**. `TS` (take sweep) — no `__GTTDRW`, no mode change.
+   All reach `fcn.320fe` (lookup) + the DLP scheduler, but the **public direct-C handler PC is never
+   CALLED** by the parser, while DLP-source commands schedule + run. This CONFIRMS HPIB_E2E_FLOW.md's
+   old "MEASOFF `0x3EC9A` ×0" finding (which was right) — the broader "no commands execute" was the
+   wrong part (CAL DISP, a DLP command, runs). Since CONTS and the sweep/measure commands are all
+   DIRECT-C, that is exactly why they don't take effect. ⇒ **Bounded next target: RE the parser
+   `fcn.58C2E`'s DIRECT-C dispatch** — why a resolved public command's direct-C handler PC (from the
+   secondary table `0x71E02`, e.g. MEASOFF→`0x3EC9A`, CONTS→slot 0x550→`fcn.5f968`) is never invoked,
+   while the DLP-trampoline path is. Fixing that should let CONTS / the measure-mode commands run.
+   Probes: `TestSendCONTSDiag` (env `ATCMD`, tracks CAL-DISP/MEASOFF/CONTS handlers + `__GTTDRW`);
+   `TestTraceLongRunDiag` (`__GTTDRW` over a long natural run).
 2. **DONE (2026-06-05) — `0x9A` status cadence fixed.** `analogbus.go` now presents the
    ready/settled bits (`0x06`) statically on every read and pulses only EOC (bit0) via the
    conversion state machine (the `statusReadyEveryNReads=256` "busy 0x00" hack is removed). Frees

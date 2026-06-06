@@ -250,7 +250,7 @@ func TestSendCONTSDiag(t *testing.T) {
 		}
 	}
 	calExec := false
-	gttdrw := 0
+	gttdrw, measoff := 0, 0
 	m.Bus.OnRead = func(addr uint32, sz bus.Size, val uint32) {
 		if addr >= 0xFFBC12 && addr <= 0xFFBC27 { // parser FIFO body
 			fifoReads++
@@ -260,6 +260,9 @@ func TestSendCONTSDiag(t *testing.T) {
 		}
 		if pc := m.CPU.Reg(cpu.PC); pc >= 0x65986 && pc <= 0x65a40 { // __GTTDRW trace-paint
 			gttdrw++
+		}
+		if pc := m.CPU.Reg(cpu.PC); pc >= 0x3ec9a && pc <= 0x3ed20 { // MEASOFF direct-C handler
+			measoff++
 		}
 		switch pc := m.CPU.Reg(cpu.PC); {
 		case pc >= 0x320fe && pc <= 0x32300: // fcn.320fe name-lookup
@@ -310,7 +313,7 @@ func TestSendCONTSDiag(t *testing.T) {
 	}
 	typeKey(device.ATKeyEnter)
 	m.driveHPIB(1_500_000_000, func() bool {
-		return calExec || gttdrw > 0 || byte(m.Bus.Read(0xFFB0A1, bus.Byte))&0x08 != 0
+		return calExec || measoff > 0 || gttdrw > 0 || byte(m.Bus.Read(0xFFB0A1, bus.Byte))&0x08 != 0
 	})
 	m.Bus.OnWrite, m.Bus.OnRead = nil, nil
 
@@ -318,8 +321,8 @@ func TestSendCONTSDiag(t *testing.T) {
 		png.Encode(f, chip.RenderScanout())
 		f.Close()
 	}
-	t.Logf("ATCMD=%q | CAL-DISP-exec=%v __GTTDRW=%d | bc28=%d bc12=%d lookup=%v sched=%v",
-		cmd, calExec, gttdrw, fifoWrites, fifoReads, lookup, scheduler)
+	t.Logf("ATCMD=%q | CAL-DISP-exec=%v MEASOFF-handler=%d __GTTDRW=%d | bc28=%d bc12=%d lookup=%v sched=%v",
+		cmd, calExec, measoff, gttdrw, fifoWrites, fifoReads, lookup, scheduler)
 	t.Logf("b0ec=0x%X a9a0=0x%04X b0a1=0x%02X(bit3=%d) CONTS-handler=%d vec=%d → screens/atcmd_kbd.png",
 		m.Bus.Read(0xFFB0EC, bus.Word), m.Bus.Read(0xFFA9A0, bus.Word),
 		byte(m.Bus.Read(0xFFB0A1, bus.Byte)), (byte(m.Bus.Read(0xFFB0A1, bus.Byte))>>3)&1,
