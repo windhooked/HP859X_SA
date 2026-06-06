@@ -17,6 +17,35 @@ a sweep and a trace line lands in the framebuffer. That is the single end-to-end
 success signal; everything below is in service of reaching it FAITHFULLY (no forced
 cells).
 
+## ★★★ ROOT, rigorously traced (2026-06-06) — it's CONTS, and CONTS is blocked by direct-C dispatch
+
+A single-decision backward trace (the right method — see the meta-note in chat) converged:
+
+1. **The boot-sweep arm gate is CONTS, NOT `b0ec`.** Read `fcn.8f04` (the sweep-point/arm
+   function) instruction-by-instruction. The boot sweep is **58 ms (slow, ≥ 0x4E20=20 ms)** so it
+   takes the slow path, whose arm decision is **`0x8f5a: btst #3,b0a1; beq 0x92b2`** → if CONTS
+   (`b0a1` bit3) is clear, `0x92b2` writes `a9a0=-1` (disable). The `cmpi #0x31,b0ec` checks only
+   affect sweep-TIME LIMITS (`0x8f22`–`0x8f48`), not the arm. So the long `b0ec→0x31` hunt was a
+   RED HERRING; `b0ec` (config `0x1A`/`0x01`, never a spectrum mode) is not the arm gate. (`b0ec`
+   write timeline: `TestModeTraceDiag`; mode setter `fcn.21c96` is a pure clamp `fcn.7978`, so
+   `b0ec`=whatever caller passes — and no caller passes a spectrum mode at boot anyway.)
+2. **CONTS (`b0a1` bit3) is set ONLY by `fcn.5f968`** (proven: 0 other writers all boot,
+   `TestB0A1WritersDiag`).
+3. **`fcn.5f968` is a DIRECT-C command handler that never fires** — same as typed `CONTS`/`MEASOFF`
+   (`TestSendCONTSDiag`): direct-C command dispatch doesn't invoke the handler PC, while DLP-source
+   commands (CAL DISP) run.
+
+⇒ **ONE root, two symptoms:** the broken direct-C command dispatch swallows BOTH typed `CONTS` AND
+the power-up CONTS that should set continuous sweep → arm the slow boot sweep → (then the
+measure-mode DLP schedules `__GTTDRW`). Forcing `b0a1` bit3 arms `a9a0` (252) but draws only +570
+vectors — CONTS is the FIRST gate, not the whole chain, but it is the blocking one.
+
+**Next drill (in progress): WHY the parser never calls a resolved direct-C handler PC.** The bus
+parser `fcn.58c2e` branches on the HP-IB addressing gate (`0x58c98`: `btst #13,bc64`; `0x58ca2`:
+`b1ee`==`0x60/0x61`; `0x58cba`: `b1e4`==`0x34`) — addressed-as-talker ⇒ output path, else ⇒ command
+dispatch (`fcn.56d1a`/`fcn.567e0`); the ASCII command executor is deeper (`fcn.580b4`↓). Differential
+trace CAL DISP (works) vs CONTS (doesn't) through this to find the first divergence.
+
 ## READ FIRST (canonical, already committed)
 
 - [docs/TRACE_DISPLAY_PATH.md](TRACE_DISPLAY_PATH.md) — esp. "WHY a9a0 SETTLES -1" + the 2026-06-05 CORRECTION
