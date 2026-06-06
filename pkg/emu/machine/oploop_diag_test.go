@@ -250,12 +250,16 @@ func TestSendCONTSDiag(t *testing.T) {
 		}
 	}
 	calExec := false
+	gttdrw := 0
 	m.Bus.OnRead = func(addr uint32, sz bus.Size, val uint32) {
 		if addr >= 0xFFBC12 && addr <= 0xFFBC27 { // parser FIFO body
 			fifoReads++
 		}
 		if addr >= 0x50500 && addr <= 0x50700 { // CAL DISP label region (0x5057c/0x50620)
 			calExec = true
+		}
+		if pc := m.CPU.Reg(cpu.PC); pc >= 0x65986 && pc <= 0x65a40 { // __GTTDRW trace-paint
+			gttdrw++
 		}
 		switch pc := m.CPU.Reg(cpu.PC); {
 		case pc >= 0x320fe && pc <= 0x32300: // fcn.320fe name-lookup
@@ -291,42 +295,77 @@ func TestSendCONTSDiag(t *testing.T) {
 		m.ATKeyboard.Enqueue(device.ATBreak(k)...)
 		m.driveHPIB(4_000_000, func() bool { return !m.ATKeyboard.Pending() })
 	}
-	// Type CAL DISP; over the keyboard and drive long; assert it EXECUTES (cal-label
-	// region read). This is the positive proof that the keyboard command path works —
-	// correcting the earlier (wrong) "commands never dispatch" conclusion, which was a
-	// harness artifact (InstallHPIB routed IRQ4 off the keyboard + too-short drive).
-	// NOTE: CONTS; reaches the same lookup+scheduler but its handler fcn.5f968 does NOT
-	// fire (b0a1 bit3 stays 0) — a separate open question (see docs/MEASURE_MODE_HANDOFF).
+	// Type a command over the keyboard (F8 remote mode → chars → Enter) and drive long.
+	// Command from env ATCMD (default "CAL DISP;" — the validated positive case). Try
+	// e.g. ATCMD="TS" (take sweep), "CONTS", "MKPK HI" to find the measure-mode lever.
+	cmd := os.Getenv("ATCMD")
+	if cmd == "" {
+		cmd = "CAL DISP;"
+	}
 	typeKey(device.ATKeyF8) // remote-commands mode
-	for _, r := range "CAL DISP;" {
+	for _, r := range cmd {
 		if k, ok := atKeyFor(r); ok {
 			typeKey(k)
 		}
 	}
 	typeKey(device.ATKeyEnter)
-	m.driveHPIB(1_500_000_000, func() bool { return calExec })
+	m.driveHPIB(1_500_000_000, func() bool {
+		return calExec || gttdrw > 0 || byte(m.Bus.Read(0xFFB0A1, bus.Byte))&0x08 != 0
+	})
 	m.Bus.OnWrite, m.Bus.OnRead = nil, nil
 
-	if f, err := os.Create("../../../screens/cal_disp_kbd.png"); err == nil {
+	if f, err := os.Create("../../../screens/atcmd_kbd.png"); err == nil {
 		png.Encode(f, chip.RenderScanout())
 		f.Close()
 	}
-	t.Logf("CAL DISP executed (cal-label region read): %v", calExec)
-	t.Logf("receive: parser-FIFO writes(bc28)=%d   parse: FIFO reads(bc12)=%d", fifoWrites, fifoReads)
-	t.Logf("name-lookup fcn.320fe reached: %v   DLP scheduler fcn.349b6 reached: %v", lookup, scheduler)
-	if !calExec {
+	t.Logf("ATCMD=%q | CAL-DISP-exec=%v __GTTDRW=%d | bc28=%d bc12=%d lookup=%v sched=%v",
+		cmd, calExec, gttdrw, fifoWrites, fifoReads, lookup, scheduler)
+	t.Logf("b0ec=0x%X a9a0=0x%04X b0a1=0x%02X(bit3=%d) CONTS-handler=%d vec=%d → screens/atcmd_kbd.png",
+		m.Bus.Read(0xFFB0EC, bus.Word), m.Bus.Read(0xFFA9A0, bus.Word),
+		byte(m.Bus.Read(0xFFB0A1, bus.Byte)), (byte(m.Bus.Read(0xFFB0A1, bus.Byte))>>3)&1,
+		contsHandler, len(chip.LineLog))
+	if cmd == "CAL DISP;" && !calExec {
 		t.Error("CAL DISP did NOT execute via the keyboard path — harness regression")
 	}
+	_, _, _ = b0a1Before, a9a0Before, vecBefore
+	_ = dispatches
+}
 
-	t.Logf("BEFORE: b0a1=0x%02X(bit3=%d) a9a0=0x%04X vec=%d",
-		b0a1Before, (b0a1Before>>3)&1, a9a0Before, vecBefore)
-	t.Logf("AFTER : b0a1=0x%02X(bit3=%d) a9a0=0x%04X vec=%d",
-		byte(m.Bus.Read(0xFFB0A1, bus.Byte)), (byte(m.Bus.Read(0xFFB0A1, bus.Byte))>>3)&1,
-		m.Bus.Read(0xFFA9A0, bus.Word), len(chip.LineLog))
-	t.Logf("CONTS handler (bchg @0x5f980) reached: %d   command dispatches during send: %d",
-		contsHandler, dispatches)
-	t.Logf("b0ec=0x%X (spectrum=0x2D/0x31/0x36)", m.Bus.Read(0xFFB0EC, bus.Word))
-	t.Log("⇒ if bit3 flips 0→1 and a9a0 arms, CONTS IS the lever and 'deliver at power-up' is the fix")
+// TestTraceLongRunDiag re-measures the ACTUAL trace-draw question with the corrected
+// methodology (long GUI-style drive, not a short/forced run): over a long natural
+// sweep-driven run, does the firmware's own trace-paint DLP command __GTTDRW (0x65986)
+// execute and read the trace buffer (0x2FD508) to draw the line? Prior "__GTTDRW 0×"
+// findings used short or force-armed runs. Renders the steady-state screen. DIAG=1.
+func TestTraceLongRunDiag(t *testing.T) {
+	m := diagBootMachine(t)
+	gttdrw, bufReads := 0, 0
+	m.Bus.OnRead = func(addr uint32, sz bus.Size, val uint32) {
+		if pc := m.CPU.Reg(cpu.PC); pc >= 0x65986 && pc <= 0x65a40 { // __GTTDRW trace-paint
+			gttdrw++
+		}
+		if addr >= 0x2FD508 && addr <= 0x2FD82A { // trace buffer (401 words) — read = paint
+			if pc := m.CPU.Reg(cpu.PC); pc >= 0x60000 && pc <= 0x71000 { // from DLP-paint region
+				bufReads++
+			}
+		}
+	}
+	chip := m.MMIO.Display.Chip
+	chip.EnableLineLog()
+	const seg = 250_000_000
+	for done := 0; done < 2_000_000_000; done += seg {
+		m.BootToOperatingWithSweep(seg)
+	}
+	m.Bus.OnRead = nil
+
+	if f, err := os.Create("../../../screens/trace_longrun.png"); err == nil {
+		png.Encode(f, chip.RenderScanout())
+		f.Close()
+	}
+	t.Logf("__GTTDRW (0x65986) executed: %d   trace-buffer paint-reads (DLP region): %d", gttdrw, bufReads)
+	t.Logf("vectors drawn=%d  b0ec=0x%X a9a0=0x%04X b0a1=0x%02X  rendered screens/trace_longrun.png",
+		len(chip.LineLog), m.Bus.Read(0xFFB0EC, bus.Word), m.Bus.Read(0xFFA9A0, bus.Word),
+		byte(m.Bus.Read(0xFFB0A1, bus.Byte)))
+	t.Log("⇒ __GTTDRW >0 ⇒ the firmware paints the trace itself; 0 ⇒ the trace seen is the emulator's sweep injection")
 }
 
 // TestB0A1WritersDiag logs EVERY writer of b0a1 (the sweep-mode byte, bit3=CONTS)

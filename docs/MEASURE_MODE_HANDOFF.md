@@ -142,9 +142,26 @@ scheduled (DLP scheduler `fcn.d18` = 0× during the sweep).
    **CONTS specifically** still does NOT reach its handler `fcn.5f968` (b0a1 bit3 stays 0) when typed
    the same way that runs CAL DISP — a NARROW open question, NOT a general command-execution gap. It
    may not be a keyboard-typeable remote command in the current menu context, or the firmware's
-   visible sweep isn't gated on `b0a1`/`a9a0` the way assumed. ⇒ Next: trace what CONTS resolves to
-   when typed (vs CAL DISP), or find the front-panel/softkey path for continuous-sweep; and re-check
-   whether the trace goal is actually already met (the firmware shows a live trace).
+   visible sweep isn't gated on `b0a1`/`a9a0` the way assumed.
+
+   **THE TRACE BLOCKER, re-confirmed CORRECTLY (long 2B-cycle natural run, not short/forced):**
+   `TestTraceLongRunDiag` — over 2e9 cycles of GUI-style sweep-driven run, the firmware's own
+   trace-paint command **`__GTTDRW` (`0x65986`) fires 0×** and the trace buffer (`0x2FD508`, which
+   HOLDS the CAL peak max=0x17F) is **never paint-read**. `b0ec=0x1` (not spectrum `0x31`), `a9a0=-1`.
+   The 235k vectors drawn are graticule/labels/menus; the flat noise-floor "trace" at the bottom is
+   NOT painted from the buffer. So the trace blocker is REAL (not a harness artifact like the command
+   stuff): the firmware never enters the continuous-sweep spectrum MEASURE state that schedules
+   `__GTTDRW`. Steady-state render: `screens/trace_longrun.png` (full SA UI, no CAL peak).
+
+   The gate is **`b0ec`→`0x31`** (spectrum measure; `fcn.8f04` arms the sweep only when `b0ec==0x31`).
+   `b0ec` is written by: PRESET `0x4E01C` (→`0x01`), the mode setter `fcn.21c96` (`0x21CD8`, clamps
+   its caller's `d0`), and restores from `b058`/`b248` (`0x11C1A`/`0x11CB8`). The mode setter's caller
+   `fcn.220a0` is invoked from `0x1a2xx` (boot, passes `0x01`/`0x1A`) and `0x1c2xx` (command handlers,
+   pass `0x0`/`0x1`) — **none pass `0x31`**. Typed commands TS / CONTS / CAL DISP do NOT move `b0ec`
+   to `0x31`. ⇒ Bounded next target: find what sets `b0ec=0x31` (the `fcn.220a0(0x31)` caller, or the
+   `b058`/`b248` saved-state restore source) and its precondition — likely tied to the measurement
+   subsystem completing. Probe: `TestSendCONTSDiag` is now env-parameterized (`ATCMD="…"`) to type
+   any command; `TestTraceLongRunDiag` measures `__GTTDRW`.
 2. **DONE (2026-06-05) — `0x9A` status cadence fixed.** `analogbus.go` now presents the
    ready/settled bits (`0x06`) statically on every read and pulses only EOC (bit0) via the
    conversion state machine (the `statusReadyEveryNReads=256` "busy 0x00" hack is removed). Frees
