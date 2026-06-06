@@ -63,11 +63,28 @@ CAL DISP vs CONTS through the dispatch (`TestSendCONTSDiag` env `ATCMD`, milesto
 
 ⇒ **Root locus (pinned): command-ACTION generation** — translating a resolved command's
 handler-bytes into an executed dispatch token. CONTS resolves but its handler-byte form yields no
-action token, so nothing is dispatched (hence `fcn.5f968` 0×). Note BOTH direct-C commands fail
-(CONTS, MEASOFF `0x3EC9A` 0×), so the broken step is the public/direct-C action-generation, not
-CONTS-specific. **Next:** RE how a resolved command's handler-bytes (`80 ss ss` / `00 00 74 10 05`)
-are turned into the dispatch token/jsr — and why the direct-C form produces nothing.
-Probe: `TestSendCONTSDiag` (env `ATCMD`, dispatch-milestone + `0x34C94` token capture).
+action token, so nothing is dispatched (hence `fcn.5f968` 0×).
+
+### ★ REFRAME (2026-06-06) — CONTS is a SOFTKEY/state command (type 0x10), not a typed command
+
+`cmd/jumptable` decodes the parser-table handler-bytes. Of 410 commands, **395 use the slot form**
+(`TYPE SlotHi SlotLo`, e.g. `MEASOFF (80 05 67) → slot 0x721AA → jmp 0x03EC9A`) and only **15 are
+non-slot**. CONTS/SNGLS are non-slot with the form **`00 00 7X 10`** (CONTS=`00 00 74 10`,
+SNGLS=`00 00 75 10`, MKFC=`01 00 7D 10`) — the trailing **`10`** is the catalog's "**softkey
+position/state ID**" handler type (ROM_DATA_CATALOG.md). So CONTS is a **type-0x10 softkey/state
+command** (ID `0x74`) — on the real panel the **SWEEP→CONT softkey**. That is why typing CONTS
+RESOLVES it but never dispatches the action: type-0x10 commands go through the **softkey/menu-state**
+mechanism, not the typed-command slot dispatch.
+
+**Implication for the trace:** the power-up CONTS (continuous sweep, the real-instrument default)
+is set by the **menu/softkey DEFAULT STATE** selecting CONT — i.e. via the boot-menu loader
+([[boot-menu-loader]]: `fcn.358C → fcn.5ACB2 → fcn.5AA88`, per-menu vtable `0xFF9594+menu*0xE0`) /
+softkey-ID-`0x74` dispatch → (eventually) `fcn.12288` case `0x126d8` → `fcn.5f968` → `b0a1` bit3.
+None of that runs at our boot. **Next:** RE how a type-0x10 softkey/state ID is dispatched (the
+softkey/menu state machine, ID `0x74`→CONTS), and why the power-up menu default doesn't select CONT
+→ set `b0a1` bit3. (Open: MEASOFF is a SLOT command yet also didn't dispatch when typed — so the
+typed-command immediate dispatch may ALSO be incomplete; verify separately.)
+Probe: `TestSendCONTSDiag` (env `ATCMD`, dispatch-milestone + `0x34C94` token capture); `cmd/jumptable`.
 
 ## READ FIRST (canonical, already committed)
 
