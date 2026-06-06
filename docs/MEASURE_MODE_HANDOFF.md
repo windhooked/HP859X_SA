@@ -46,6 +46,29 @@ parser `fcn.58c2e` branches on the HP-IB addressing gate (`0x58c98`: `btst #13,b
 dispatch (`fcn.56d1a`/`fcn.567e0`); the ASCII command executor is deeper (`fcn.580b4`↓). Differential
 trace CAL DISP (works) vs CONTS (doesn't) through this to find the first divergence.
 
+### DIFFERENTIAL RESULT (2026-06-06) — divergence pinned to command-ACTION generation
+
+CAL DISP vs CONTS through the dispatch (`TestSendCONTSDiag` env `ATCMD`, milestone+token capture):
+- **Both reach every dispatch function identically** (`fcn.58c2e`, `fcn.320fe`, the `0x71D76`
+  dispatch table, the DLP interpreter token dispatch at **`0x34C94`** = `jsr (a1)`,
+  `a1=table[token]`). So it's NOT control-flow divergence at the function level.
+- At `0x34C94` each DLP source dispatches its tokens. Diff of token→handler:
+  - CAL DISP: unique **token `0x1B` → handler `0x492EA`** (its action; leads to the cal-label read).
+  - CONTS: **NO command-specific token** — only the shared background tokens
+    (`0x7C/0x91/0x96/0x99/0x9A`). Its action is never generated.
+- Both commands DO resolve (both in the parser-name table `0x7D500`): `CONTS` @`0x7def0`
+  (`30 07 "CONTS \0"` + handler-bytes `00 00 74 10 05`); working direct-C `MEASOFF` @`0x7d64e`
+  (`30 07 "MEASOFF"` + `20 00 80 05 67` → slot `0x567`, the **`0x80` = direct-C flag**). CONTS's
+  handler-bytes **lack the `0x80` direct-C flag** that MEASOFF/EDITDLP (`80 01 41`) carry.
+
+⇒ **Root locus (pinned): command-ACTION generation** — translating a resolved command's
+handler-bytes into an executed dispatch token. CONTS resolves but its handler-byte form yields no
+action token, so nothing is dispatched (hence `fcn.5f968` 0×). Note BOTH direct-C commands fail
+(CONTS, MEASOFF `0x3EC9A` 0×), so the broken step is the public/direct-C action-generation, not
+CONTS-specific. **Next:** RE how a resolved command's handler-bytes (`80 ss ss` / `00 00 74 10 05`)
+are turned into the dispatch token/jsr — and why the direct-C form produces nothing.
+Probe: `TestSendCONTSDiag` (env `ATCMD`, dispatch-milestone + `0x34C94` token capture).
+
 ## READ FIRST (canonical, already committed)
 
 - [docs/TRACE_DISPLAY_PATH.md](TRACE_DISPLAY_PATH.md) — esp. "WHY a9a0 SETTLES -1" + the 2026-06-05 CORRECTION
