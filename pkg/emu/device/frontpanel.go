@@ -54,6 +54,33 @@ import (
 // The semantic key-code map (which matrix bit = which front-panel key) is not
 // yet decoded — InjectMatrix takes the raw 6-byte bitmap. SetBit presses one
 // matrix bit by (byte,bit) position for experiments.
+//
+// ── Rev L key/RPG read path (re-derived 2026-06-06) ─────────────────────────
+//
+// The 0x1582/0x3AB52 addresses above are the 17.12.90 build. On Rev L:
+//
+//   - IRQ3 handler is fcn.2B1E: `bset #0,$bc67` then `clr.b $EF401B` (ACK).
+//     It ONLY signals — it does not read the key.
+//   - The operating loop fcn.18568 consumes it: at PC 0x18F42 `bclr #0,$bc67`,
+//     then reads the µC TWICE via the handshake fcn.59998 —
+//       fcn.59e2c (slot 0x430) → RAM 0xA39C : the KEY frame (6 packed bytes;
+//                  this is what the command handlers read — ~10 readers of 0xA39C)
+//       fcn.59d2a (slot 0x736) → RAM 0xA3A4 : same 6-byte packing PLUS a decimal
+//                  decode of the first nibble pair (10*(4017&F)+(4015&F), range-
+//                  checked vs 87/99). The µC reports BCD/decimal-coded values,
+//                  not just a raw bitmap.
+//   - VERIFIED (TestFrontPanelEntryDiag): under the sweep-driven boot the
+//     consume at 0x18F42 IS reached (the old "key consumer never reached" note
+//     was stale, from the broken passive boot). So front-panel ENTRY works; what
+//     remains unmodeled is the semantic encoding (which decimal/bit = which key).
+//
+// RPG (data knob) — NOT modeled, exact encoding UNRESOLVED. The knob count is
+// reported in the same µC frame, but the static trace did not pin its field:
+// the apparent accumulator 0xbf22 (+= step 0xbf1e at 0x18DBC) is gated on bef9.4
+// / bf22<=0 and bf1e is set by a DLP command handler (0x3B396) — a step/repeat
+// mechanism, not the raw count. A faithful RPG model needs an EMPIRICAL probe
+// (inject frame values, observe the firmware's active-value response), like
+// cmd/keymatrix for keys — see docs and TestFrontPanelEntryDiag.
 // ───────────────────────────────────────────────────────────────────────────
 
 const (
