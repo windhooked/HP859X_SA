@@ -39,6 +39,22 @@ type SweepEngine struct {
 	NoiseFloorDBm float64
 	NoiseAmpDB    float64
 
+	// Tune, when TuneActive, derives the sweep CENTRE frequency from the
+	// firmware's real YTO coil DACs (via analog.FrequencyModel) instead of the
+	// fixed StartHz/StopHz — so the displayed spectrum tracks wherever the
+	// firmware has actually tuned the YTO (★ 2026-07-12 A7 map; the machine
+	// feeds Tune's DACs from HP8593AMMIO.YTOCoilDACs each sweep). The window is
+	// [centre-SpanHz/2, centre+SpanHz/2], clamped to ≥0.
+	//
+	// SpanHz is the swept width. It stays a CONFIGURED value (band-0 default
+	// 2.9 GHz) — the span→Hz DAC mapping is not yet reverse-engineered (a single
+	// coil-DAC snapshot gives the centre; the analog ramp generates the span),
+	// so only the CENTRE is DAC-derived today. See docs/A7_ANALOG_IO_BUS.md
+	// "Still open" and freqAt.
+	Tune       analog.FrequencyModel
+	TuneActive bool
+	SpanHz     float64
+
 	pos int        // current sweep position (advances per DetectADC)
 	rng *rand.Rand // per-point noise generator (seeded → reproducible)
 }
@@ -58,12 +74,39 @@ func NewSweepEngine() *SweepEngine {
 		StartHz:  0,
 		StopHz:   2.9e9,
 		Points:   401,
+		SpanHz:   2.9e9, // band-0 default swept width (see SpanHz doc)
 		// Visible grass: centre ~10% up the 80 dB window (−72 dBm at 0 dBm ref)
 		// with ±6 dB of per-point random texture. Seeded for reproducibility.
 		NoiseFloorDBm: -72,
 		NoiseAmpDB:    6,
 		rng:           rand.New(rand.NewSource(0x8593)),
 	}
+}
+
+// Window returns the effective [start, stop] sweep frequencies (the DAC-derived
+// window when TuneActive, else the fixed StartHz/StopHz) — for diagnostics and
+// the GUI frequency-axis labels.
+func (s *SweepEngine) Window() (start, stop float64) { return s.window() }
+
+// window returns the effective [start, stop] sweep frequencies. When TuneActive
+// (and the firmware has tuned the YTO — non-zero coil DACs), it derives the
+// centre from the live DACs and applies SpanHz around it, clamped to ≥0; else
+// it falls back to the fixed StartHz/StopHz. This is the one place the firmware
+// tuning enters the frequency axis.
+func (s *SweepEngine) window() (start, stop float64) {
+	if s.TuneActive && (s.Tune.CoarseDAC != 0 || s.Tune.FineDAC != 0 || s.Tune.FMDAC != 0) {
+		center := s.Tune.TunedHz()
+		span := s.SpanHz
+		if span <= 0 {
+			span = s.StopHz - s.StartHz
+		}
+		start, stop = center-span/2, center+span/2
+		if start < 0 {
+			start = 0
+		}
+		return start, stop
+	}
+	return s.StartHz, s.StopHz
 }
 
 // SetSignals validates and installs the injected CW tones (the signal
@@ -73,9 +116,10 @@ func NewSweepEngine() *SweepEngine {
 // Returns how many signals were dropped for being out of band.
 func (s *SweepEngine) SetSignals(sigs []analog.Signal) (dropped int) {
 	lo, hi := s.Detector.RefLevelDBm-80, s.Detector.RefLevelDBm
+	start, stop := s.window()
 	valid := make([]analog.Signal, 0, len(sigs))
 	for _, sig := range sigs {
-		if sig.Hz < s.StartHz || sig.Hz > s.StopHz {
+		if sig.Hz < start || sig.Hz > stop {
 			dropped++
 			continue
 		}
@@ -93,10 +137,11 @@ func (s *SweepEngine) SetSignals(sigs []analog.Signal) (dropped int) {
 
 // freqAt returns the centre input frequency tuned at sweep point p.
 func (s *SweepEngine) freqAt(p int) float64 {
+	start, stop := s.window()
 	if s.Points <= 1 {
-		return s.StartHz
+		return start
 	}
-	return s.StartHz + float64(p)/float64(s.Points-1)*(s.StopHz-s.StartHz)
+	return start + float64(p)/float64(s.Points-1)*(stop-start)
 }
 
 // bucketPeakDBm peak-detects the input spectrum across point p's frequency
@@ -106,10 +151,11 @@ func (s *SweepEngine) freqAt(p int) float64 {
 // that contains it (rather than being missed between point samples).
 func (s *SweepEngine) bucketPeakDBm(p int) float64 {
 	pts := s.Points
+	start, stop := s.window()
 	if pts <= 1 {
-		return s.Spectrum.LevelDBm(s.StartHz)
+		return s.Spectrum.LevelDBm(start)
 	}
-	bw := (s.StopHz - s.StartHz) / float64(pts-1) // bucket width
+	bw := (stop - start) / float64(pts-1) // bucket width
 	center := s.freqAt(p)
 	best := s.Spectrum.LevelDBm(center)
 	const sub = 32

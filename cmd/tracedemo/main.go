@@ -8,6 +8,8 @@
 //	go run ./cmd/tracedemo                       # default full-span (CAL on left)
 //	go run ./cmd/tracedemo -cf 300e6 -span 10e6  # zoom to the 300 MHz CAL
 //	go run ./cmd/tracedemo -cf 1e9 -span 2e9 -sig 1.2e9:-30  # injected tone
+//	go run ./cmd/tracedemo -live                 # LIVE: window centred on the
+//	                                             # firmware's real YTO coil DACs
 package main
 
 import (
@@ -31,32 +33,52 @@ func main() {
 	sigHz := flag.Float64("sigHz", 0, "injected signal frequency Hz (0=none)")
 	sigDBm := flag.Float64("sigDBm", -30, "injected signal level dBm")
 	rbw := flag.Float64("rbw", 1e6, "resolution bandwidth Hz")
+	live := flag.Bool("live", false, "render the machine's own SweepEngine with the window centred on the firmware's real YTO coil DACs (★ 2026-07-12 A7 map) instead of a CLI-parameterised span")
 	out := flag.String("out", "screens/trace_demo.png", "output PNG")
 	flag.Parse()
 
 	rom, _ := romloader.LoadDir("hp8593a_eeproms")
 	m, _ := machine.New8593A(rom)
 	m.CPU.Reset()
-	m.BootToOperating(165_000_000)
-	img := m.MMIO.Display.RenderFrame()
 
-	se := device.NewSweepEngine()
-	se.StartHz = *cf - *span/2
-	if se.StartHz < 0 {
-		se.StartHz = 0
+	var se *device.SweepEngine
+	if *live {
+		// Sweep-driven boot: syncSweepTune feeds the live coil DACs into the
+		// machine's own SweepEngine, so its window centres on the firmware's
+		// actual YTO tuning. Render THAT engine (not a fresh parameterised one).
+		m.MMIO.SweepActive = true
+		m.BootToOperatingWithSweep(200_000_000)
+		se = m.MMIO.Sweep
+		se.Detector.RefLevelDBm = *refl
+		se.Spectrum.RBWHz = *rbw
+		if *sigHz > 0 {
+			se.SetSignals([]analog.Signal{{Hz: *sigHz, DBm: *sigDBm}})
+		}
+		fm, fine, coarse := m.MMIO.YTOCoilDACs()
+		fmt.Printf("live coil DACs: FM=%#04x fine=%#04x coarse=%#04x → centre %.3f GHz (TuneActive=%v)\n",
+			fm, fine, coarse, se.Tune.TunedHz()/1e9, se.TuneActive)
+	} else {
+		m.BootToOperating(165_000_000)
+		se = device.NewSweepEngine()
+		se.StartHz = *cf - *span/2
+		if se.StartHz < 0 {
+			se.StartHz = 0
+		}
+		se.StopHz = *cf + *span/2
+		se.Detector.RefLevelDBm = *refl
+		se.Spectrum.RBWHz = *rbw
+		if *sigHz > 0 {
+			se.Spectrum.Signals = []analog.Signal{{Hz: *sigHz, DBm: *sigDBm}}
+		}
 	}
-	se.StopHz = *cf + *span/2
-	se.Detector.RefLevelDBm = *refl
-	se.Spectrum.RBWHz = *rbw
-	if *sigHz > 0 {
-		se.Spectrum.Signals = []analog.Signal{{Hz: *sigHz, DBm: *sigDBm}}
-	}
+	img := m.MMIO.Display.RenderFrame()
 
 	drawTrace(img, se)
 	f, _ := os.Create(*out)
 	png.Encode(f, img)
 	f.Close()
-	fmt.Printf("wrote %s  (start=%.0fMHz stop=%.0fMHz ref=%.0fdBm)\n", *out, se.StartHz/1e6, se.StopHz/1e6, *refl)
+	start, stop := se.Window()
+	fmt.Printf("wrote %s  (start=%.0fMHz stop=%.0fMHz ref=%.0fdBm)\n", *out, start/1e6, stop/1e6, *refl)
 }
 
 func drawTrace(img *image.RGBA, se *device.SweepEngine) {

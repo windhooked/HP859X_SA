@@ -59,6 +59,9 @@ func (f *FrequencyModel) ytoHz() float64 {
 	return base
 }
 
+// YTOHz returns the modelled YTO (first LO) frequency for the current tune DACs.
+func (f *FrequencyModel) YTOHz() float64 { return f.ytoHz() }
+
 // TunedHz is the input frequency currently tuned (band 0): YTO - 1st IF.
 func (f *FrequencyModel) TunedHz() float64 { return f.ytoHz() - firstIFHz }
 

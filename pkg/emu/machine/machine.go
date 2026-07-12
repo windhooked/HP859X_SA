@@ -399,6 +399,7 @@ func (m *Machine) driveSweepCycle() {
 	if bf34 != 0x40B8 && bf34 != 0x410A {
 		return
 	}
+	m.syncSweepTune()
 	// Pace to real sweep time: accumulate elapsed boot-chunk cycles and emit one
 	// sweep point (IRQ1 step + IRQ6 capture) per sweepCyclesPerPoint, so a
 	// 401-point sweep spans ~58 ms rather than completing in a single burst.
@@ -419,6 +420,24 @@ func (m *Machine) driveSweepCycle() {
 	if m.CPU.Reg(cpu.A5) >= bf30 && m.sweepAccum > sweepCyclesPerPoint {
 		m.sweepAccum = sweepCyclesPerPoint
 	}
+}
+
+// syncSweepTune feeds the firmware's real YTO coil DACs (direct ports
+// 0xFFF700/702/704 = FM/fine/coarse — the ★ 2026-07-12 A7 map) into the
+// SweepEngine's FrequencyModel, so the swept frequency window centres on
+// wherever the firmware has actually tuned the YTO rather than a fixed span.
+// Called each sweep cycle while the capture handler is armed; reading the
+// centre DACs is idempotent (the analog ramp, not the CPU, sweeps around them).
+// The span stays SweepEngine.SpanHz (band-0 default) pending the span-DAC RE.
+func (m *Machine) syncSweepTune() {
+	if m.MMIO.Sweep == nil {
+		return
+	}
+	fm, fine, coarse := m.MMIO.YTOCoilDACs()
+	m.MMIO.Sweep.Tune.FMDAC = int(fm)
+	m.MMIO.Sweep.Tune.FineDAC = int(fine)
+	m.MMIO.Sweep.Tune.CoarseDAC = int(coarse)
+	m.MMIO.Sweep.TuneActive = true
 }
 
 // OperatingTickEntry is the ROM address of the firmware's main UI tick —

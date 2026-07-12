@@ -70,6 +70,38 @@ func TestSweepEngineTunes(t *testing.T) {
 	}
 }
 
+// TestSweepEngineTuneFromDACs verifies the ★ 2026-07-12 wiring: when TuneActive,
+// the sweep CENTRE is derived from the YTO coil DACs (via FrequencyModel) rather
+// than the fixed StartHz/StopHz, so the window tracks the firmware's tuning.
+func TestSweepEngineTuneFromDACs(t *testing.T) {
+	s := NewSweepEngine()
+	s.SpanHz = 200e6 // narrow span so the CAL peak is a sharp centre check
+
+	// Pick a coarse DAC that tunes the input to 300 MHz (the CAL), so the CAL
+	// peak should land at screen centre when the window centres on it.
+	// tuned = YTOlo + coarse/4095*(YTOhi-YTOlo) - IF = 300 MHz.
+	// Solve coarse: YTO = 300e6 + 3.9214e9 = 4.2214e9;
+	// coarse = (4.2214e9-3.0e9)/(6.8214e9-3.0e9)*4095.
+	coarse := (4.2214e9 - 3.0e9) / (6.8214e9 - 3.0e9) * 4095
+	s.Tune.CoarseDAC = int(coarse)
+	s.TuneActive = true
+
+	// Sanity: the derived centre is ≈300 MHz.
+	if c := s.Tune.TunedHz(); c < 290e6 || c > 310e6 {
+		t.Fatalf("derived centre = %.1f MHz, want ≈300", c/1e6)
+	}
+	if peak, mid := peakPoint(s), s.Points/2; peak < mid-8 || peak > mid+8 {
+		t.Errorf("DAC-tuned CAL peak at point %d, want ≈centre %d", peak, mid)
+	}
+
+	// With all DACs zero the wiring falls back to StartHz/StopHz (no false tune).
+	s.Tune = analog.FrequencyModel{}
+	start, stop := s.window()
+	if start != s.StartHz || stop != s.StopHz {
+		t.Errorf("zero-DAC fallback window = [%.0f,%.0f], want [%.0f,%.0f]", start, stop, s.StartHz, s.StopHz)
+	}
+}
+
 func peakPoint(s *SweepEngine) int {
 	best, bp := uint16(0), -1
 	for p := 0; p < s.Points; p++ {

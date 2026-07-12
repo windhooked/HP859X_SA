@@ -192,6 +192,27 @@ frequency (`fcn.23e56`) · `0x7f4`=per-band tune setup · `0xba0`=span-mode swit
 A Path-5 minimal monitor can drive the analog hardware by calling these slots —
 no DLP/UI needed. **[V]**
 
+## Emulator wiring + a calibration cross-check (2026-07-12)
+
+The direct coil-DAC ports are now fed into the SweepEngine's frequency axis
+([sweepengine.go](../pkg/emu/device/sweepengine.go) `Tune`/`window()`;
+[machine.go](../pkg/emu/machine/machine.go) `syncSweepTune`): the swept window
+CENTRES on the firmware's real YTO tuning instead of a fixed span. Render it with
+`go run ./cmd/tracedemo -live` (→ `screens/trace_a7_live.png`).
+
+**Ground-truth cross-check surfaced by the live render** `[V]`: at a sweep-driven
+boot the firmware paints **CENTER 1.450 GHz, SPAN 2.90 GHz** (band-0 full span,
+START 0 / STOP 2.9) while the coil DACs read `coarse(F704)=0x08E8` (2280),
+`fine=0x0818`, `FM=0x087E`. Our linear model (`analog.FrequencyModel`: YTO
+3.0–6.8214 GHz across coarse 0–4095, IF 3.9214 GHz) maps that to tuned **1.206 GHz**
+— a **~244 MHz** gap vs the firmware's own 1.450 GHz centre. So coarse `0x08E8`
+↔ true centre 1.45 GHz (YTO ≈ 5.3714 GHz) is a real calibration point: the linear
+DAC→freq mapping is ~10 % off (either the YTO endpoint constants or the curve's
+non-linearity). Refining `FrequencyModel` against the firmware's freq→DAC math
+(`fcn.23e56`, partially decoded) is a follow-up — the *wiring* is faithful; the
+*DAC→Hz calibration* is the residual. Span stays the band-0 default (`SpanHz`,
+2.9 GHz) pending the span-DAC RE.
+
 ## Still open (ordered by value)
 
 1. **reg-0 chain physical label** — which A7 DACs the 2+3+3 nibble groups load
