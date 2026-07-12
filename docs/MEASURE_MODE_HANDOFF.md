@@ -86,6 +86,17 @@ softkey/menu state machine, ID `0x74`→CONTS), and why the power-up menu defaul
 typed-command immediate dispatch may ALSO be incomplete; verify separately.)
 Probe: `TestSendCONTSDiag` (env `ATCMD`, dispatch-milestone + `0x34C94` token capture); `cmd/jumptable`.
 
+**UPDATE (2026-07-12, en route to the A7 map):** `fcn.12288` is now fully decoded — it is the
+**typed-command CLASS dispatcher**: `d0 = cmdword; lsr #8; subi #0xd` → 33-case signed-offset table
+at ROM `0x12754` (bounds `word@base-6 = 0x21`, dispatch helper `fcn.6862` pops the return addr
+`0x1279c` as table base). Case index 26 (class `0x27`) = `0x126d4/0x126d8: move.w -0x8(a6),d0;
+jsr fcn.550` → slot `0x550 = jmp 0x5f968` = CONTS. **The service softkey IDs (0x99–0xB1, menu
+template ROM `0x7cc30`) can NOT enter this dispatcher as-is** — their class `(ID>>8)=0` is below
+the table floor `0xd`; the `10 NN 00 00` menu-record trailer binds ID→display-label only (via
+`fcn.E7A2`, RAM `0xFF9914+`). The ID→action binding is produced upstream by the softkey key-event
+emit layer — the same machinery as the Gate-2 front-panel keystone. At boot the dispatcher runs
+exactly once, class `0x12` (code `0x12D6`).
+
 ## READ FIRST (canonical, already committed)
 
 - [docs/TRACE_DISPLAY_PATH.md](TRACE_DISPLAY_PATH.md) — esp. "WHY a9a0 SETTLES -1" + the 2026-06-05 CORRECTION
