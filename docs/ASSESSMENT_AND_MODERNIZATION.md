@@ -33,6 +33,16 @@
   CLASS dispatcher, 33-case table `0x12754`; class 0x27 → CONTS); the service
   softkey IDs dispatch through the key-event emit layer = Gate 2's machinery.
   **C2 remains the top capture; the C1 precedent says try reader-side RE first.**
+- **★ SAME-DAY OUTCOME of that reader-side RE: Gate 2 as framed is REFUTED** (see
+  the corrected §5 and FRONTPANEL_UC_SCOPE.md): the "µC keystone" block is the
+  TIMEDATE clock renderer; `0xEF40xx` is the RTC; the "gates" are firmware-owned
+  display flags (the zero-`bset` evidence was a grep artifact). The dispatch spine
+  is now fully decoded (ring → `fcn.12b10` → `fcn.12288`; typed CONTS = no-op by
+  design; CONTS action = class `0x27`), and a **legitimate CONTS dispatch was
+  verified in-emulator** (`TestCONTSDispatchDiag`: `b0a1.3` sets via the firmware's
+  own dispatcher; the post-boot sweep-restart is the next link). The sharpened
+  open question: **which port the front-panel key scan reads** (not EF40xx/PPI/PIT)
+  and the softkey emitter that writes class-bearing words into `b1e4`.
 - §3a orphan `musashi_config.h` deleted (footgun closed). Five commits:
   `1b7616d…c704050`.
 
@@ -208,7 +218,22 @@ above was the *pre-reframe* lead; the handoff doc demoted it (`b0ec` gates sweep
 arm). Practical consequence: the Gate-2 bus-probe capture (**C2**) is likely to unblock **both** gates,
 which raises its priority relative to the standalone C3 capture (§8).
 
-### Gate 2 — Front-panel µC keystone `[VERIFIED via disasm]`
+### Gate 2 — Front-panel µC keystone — **★ CORRECTED 2026-07-12: REFUTED**
+
+> **The entire Gate-2 framing below is disproven** (three independent decodes +
+> byte verification, see the corrected [FRONTPANEL_UC_SCOPE.md](FRONTPANEL_UC_SCOPE.md)):
+> the `0x18F42–0x18FA4` block is the **TIMEDATE on-screen clock renderer**;
+> `0xEF4000–401F` is exclusively the RTC chip (no key matrix); IRQ3 is the RTC
+> tick; `bc67.1` is set by the TIMEDATE ON command (word-RMW on `0xbc66` @`0x12668`
+> — the "zero `bset` refs" evidence was a grep-scope artifact); `ba86.0`/`b072.14`
+> are firmware display flags. There is no evidence of a bus-master µC writing key
+> frames. The REAL front-panel input port is an open question (not EF40xx/PPI/PIT);
+> the dispatch spine downstream is now fully decoded (MEASURE_MODE_HANDOFF ★) and
+> a legitimate CONTS dispatch was verified in-emulator (`TestCONTSDispatchDiag`).
+> Capture C2's premise (log bus-master RAM writes) is void — what a capture would
+> now resolve is *which port the key scan reads*. Original (disproven) text:
+
+`[VERIFIED via disasm]` *(superseded)*
 - The dispatch gate cells **`0xFFBC67` bit1** (zero `bset` refs in all of Rev L) and **`0xFFB072`
   bit14** (one `bset` at `0x1C48A`, an init context — never on the key path) are confirmed by
   grepping the disassembly. `[VERIFIED]`

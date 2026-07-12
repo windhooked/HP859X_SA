@@ -97,6 +97,46 @@ the table floor `0xd`; the `10 NN 00 00` menu-record trailer binds ID→display-
 emit layer — the same machinery as the Gate-2 front-panel keystone. At boot the dispatcher runs
 exactly once, class `0x12` (code `0x12D6`).
 
+### ★★★ 2026-07-12 — the DISPATCH SPINE is cracked; legitimate CONTS dispatch VERIFIED in-emulator
+
+Full decode (softkey-dispatch RE agent + verified):
+
+1. **The spine:** operating loop `fcn.18348` drains the command-source ring (`bb96`/`bb98`
+   head/tail) → dequeue+parse (`fcn.427c`→`fcn.1a6e2`) → builds a 0xE-byte record at `0xbb82`:
+   `record[0..7] = (0xb03e)` context longs, `record+8 = 0xb1e4` (**the command WORD**, writer
+   `fcn.11750 @0x11798`, ~14 call sites), `record+0xa = 0xb1fe` — gated on **`b1e0 < 0`**
+   (command-pending) → `jsr fcn.12b10 @0x183b6`. `fcn.12b10` (sole caller of `fcn.12288`,
+   @`0x12dce`): **class byte == 0 → the class-0 data-entry path (`0x12dd6`→`0x1344c`), class ≠ 0 →
+   `fcn.12288`** with the record word pushed and `movem.l record,d0-d1`.
+2. **Typed CONTS is a NO-OP by design:** its parser form `00 00 74 10` yields class `0x10` →
+   `fcn.12288` index 3 → jump-table entry `0x1278e = 0x0000` → the `0x1279c` unlk. The differential
+   result ("CONTS resolves but no action token") is root-caused: **the class-0x10 slot is
+   intentionally empty**; the CONTS *action* exists only as **class 0x27**.
+3. **Handler semantics:** `fcn.5f968(d0)` — arg = record[0..1] (incoming d0 HIGH word); bit0 =
+   desired on/off; on state mismatch `bchg #3,b0a1` (@`0x5f980`, the sole CONTS-bit writer) then
+   runs the continuous-sweep arm block (b068/b06c checks, b0a2 windows, `fcn.eca2/1ea/178/5d4`).
+4. **Menu machinery** (for the emitter hunt): label vtable `0xFF9594+menu*0xE0` (56×4-byte ptrs
+   to 16-byte Pascal buffers, built by `fcn.5aa88` from ROM ptr table `0x2611C`); per-menu state
+   block ptr `0xFF957C+menu*4`, 6-byte per-slot records `{w0,w2,w4}` with **w4.low = softkey ID**,
+   **w4.bit13 = highlight/state**, template cloned from ROM `0x25FD2` (165 words); active menu
+   installed via `fcn.5a918` (`0xFF9562` state base / `0xFF9566` vtable); **`b1e4` itself is
+   per-menu saved/restored state** (`fcn.5a946 @0x5aa0e`). The default template has NO ID `0x74` —
+   the CONT binding appears when the SWEEP menu is built.
+5. **★ VERIFIED EXPERIMENT** (`TestCONTSDispatchDiag`, pkg/emu/machine): the minimal legitimate
+   dispatch — `push.w #0x2701; d0=0x00010000; d1=0; jsr fcn.12288` (exactly what the SWEEP→CONT
+   softkey emit would produce) — **sets CONTS through the firmware's own dispatcher**
+   (`b0a1: 0x00→0x08`). No RAM-cell forcing. **However** the sweep-arm counter `a9a0` stays `-1`
+   and paints don't increase on resume: post-boot, the arm decision (`fcn.8f04 @0x8f5a
+   btst #3,b0a1`) doesn't re-run without a **sweep-restart trigger** — the next link to chase
+   (candidates: the `fcn.5f968` post-bchg arm block's bail conditions — `b1e4==3` check,
+   `b0a2` window — and whatever re-invokes the sweep-setup path after a mode change).
+6. **The remaining unknown (sharpened):** the softkey key-event EMITTER — what writes a
+   class-bearing word (`0x27xx`) into `b1e4`/the record for a softkey press, and **where
+   front-panel key/RPG events physically enter** (NOT `0xEF40xx` — that is the RTC, see the
+   corrected [FRONTPANEL_UC_SCOPE.md](FRONTPANEL_UC_SCOPE.md); not the PPI `0xF000` (init-only);
+   not the PIT beyond the AT-keyboard regs). Attack: walk `fcn.11750`'s ~14 callers and the
+   ring-producer sites back to their hardware reads.
+
 ## READ FIRST (canonical, already committed)
 
 - [docs/TRACE_DISPLAY_PATH.md](TRACE_DISPLAY_PATH.md) — esp. "WHY a9a0 SETTLES -1" + the 2026-06-05 CORRECTION

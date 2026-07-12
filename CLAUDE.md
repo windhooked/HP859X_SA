@@ -110,7 +110,7 @@ internal/emutest/       DiffCores, LoopBreaker, RunUntilPC harness helpers
 - ROM `0x000000–0x0FFFFF` (1 MB read-only — Rev L; 17.12.90 only used 0x000000–0x07FFFF)
 - **CalNVRAM** `0x200000–0x20FFFF` (64 KB battery-backed cal SRAM; selected by U114 PAL's `LCAL` = `/MA23·MA21·/MA20`; [pkg/emu/device/calnvram.go](pkg/emu/device/calnvram.go))
 - **CalRAM** `0x2FC000–0x2FFFFF` (16 KB scratch RAM; firmware copies cal NVRAM here at boot then uses it as a working buffer — 490 firmware references in [docs/rom.asm](docs/rom.asm) with offsets in 0x000–0xDF5. With this mapped, the trace-buffer pointer A5 properly initialises into the region at `0x2FD508`; without it, A5 stays at a placeholder and the IRQ6 sample-capture handler at ROM 0x4088 can never store samples. The IRQ6 handler also tests `btst #4, $2fc013.l` to pick between "store sample" and "end-of-sweep" dispatch paths.)
-- FrontPanel `0xEF4000–0xEF401F` (front-panel μC; PAL `LRTC` select)
+- RTC `0xEF4000–0xEF401F` (battery-backed BCD real-time clock, OKI MSM6242-class; PAL `LRTC` select — **CORRECTED 2026-07-12: this window is EXCLUSIVELY the clock chip** (12 odd-offset BCD regs + 3 control regs); there is NO key matrix here. The front-panel key/RPG input port is an OPEN question — see docs/FRONTPANEL_UC_SCOPE.md)
 - PIT stub `0xEF8000–0xEF80FF` (256 B; MC68230 PIT zeroed RAM; PAL `LKBD` select; IRQ4 reads/writes here)
 - TestRAM `0xFEC000–0xFEFFFF` (16 KB; march-test target)
 - RAM `0xFF0000–0xFFEFFF` (60 KB; Rev L stack SP=`0xFF948A`)
@@ -121,7 +121,7 @@ internal/emutest/       DiffCores, LoopBreaker, RunUntilPC harness helpers
 **Rev L IRQ vector handlers** (from ROM longwords at 0x60–0x7C):
 - IRQ1 → `0x002AB8` — sweep update (writes f200/f300/f400; loads sample via jsr to RAM 0xCA)
 - IRQ2 → `0x003A94` — rte-only (noop)
-- IRQ3 → `0x002B1E` — front-panel
+- IRQ3 → `0x002B1E` — **RTC tick** (CORRECTED 2026-07-12: sets `bc67.0` + ACKs `0xEF401B`; drives the TIMEDATE clock redraw, NOT key input)
 - IRQ4 → `0x002642` — HP-IB
 - IRQ5 → `0x003ECE` — timer tick (Rev L equivalent of 17.12.90's 0x19E2)
 - IRQ6 → `0x004088` — sweep sample capture: `move.w $f200.w, D7` (read ADC) → optional scaling → vectored dispatch via `move.l $bf34.w, -(A7); rts`. The dispatch pointer at `0xFFBF34` selects between "store sample to (A5)+ until A5≥FFBF30" (capture mode at 0x40B8) and "end-of-sweep flag set" (idle at 0x40C2). After boot, FFBF34=0x40C2 (idle handler); the firmware swaps it to 0x40B8 only when actively sweeping.
