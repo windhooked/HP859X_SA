@@ -434,9 +434,13 @@ func (m *Machine) syncSweepTune() {
 		return
 	}
 	fm, fine, coarse := m.MMIO.YTOCoilDACs()
-	m.MMIO.Sweep.Tune.FMDAC = int(fm)
-	m.MMIO.Sweep.Tune.FineDAC = int(fine)
-	m.MMIO.Sweep.Tune.CoarseDAC = int(coarse)
+	// F704 packs coarse-DAC[0:11] | RF-atten[12:14] | flag[15] (reg-2 field-map
+	// RE, 2026-07-12) — mask to the low 12 bits for the DAC value. F700/F702 are
+	// pure FM/fine DACs. (At boot atten==0 so the raw word already equals the
+	// DAC, but mask so a non-zero attenuator setting can't corrupt the tune.)
+	m.MMIO.Sweep.Tune.FMDAC = int(fm & 0x0FFF)
+	m.MMIO.Sweep.Tune.FineDAC = int(fine & 0x0FFF)
+	m.MMIO.Sweep.Tune.CoarseDAC = int(coarse & 0x0FFF)
 	m.MMIO.Sweep.TuneActive = true
 }
 

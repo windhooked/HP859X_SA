@@ -114,16 +114,22 @@ ADR0–ADR4 (U18 latch, service guide Ch.5/14) are decoded as `n = (offset−0x7
 giving 32 word ports `0xF700–0xF73E`; `F728/F72A` (n=0x14/0x15) is then just one
 sub-addressed *device* on that bus (the A7 serial select/data pair).
 
+Several ports are PACKED — a 12-bit DAC in bits [0:11] with a 3–4-bit gain/atten
+control in the top nibble (refined by the reg-2/gain-map RE 2026-07-12, below).
+
 | Port | Shadow | Function | Evidence | Tag |
 |---|---|---|---|---|
 | `0xF700` | `B1A4` | **YTO FM-coil DAC** (set `0x800` midscale at tune) | `fcn.7ac8`: `31f8 b1a4 f700`; midscale writes `0x241f6/0x24252/0x2447a` | [V] |
 | `0xF702` | `B1A6` | **YTO fine-tune DAC** (12-bit) | `fcn.7ac8`: `31f8 b1a6 f702`; computed `0x24200` | [V] |
-| `0xF704` | `B1A8` | **YTO main-coil (coarse) DAC** — `clamp((master+0x8000)>>16 + B1A8, 0xFFF)` | `0x24094`, latch `0x7b26`/`0x1d264` | [V] |
+| `0xF704` | `B1A8` | **YTO coarse DAC [0:11] + RF attenuator [12:14] + flag(b0a1.6) [15]** (8593E path) | `0x24094` (DAC), `fcn.7ac8` `0x7b02–0x7b20` (pack) | [V] |
 | `0xF708` | `B1AE` | tune re-commit latch (cleared at tune `0x23f7e`; ← `b1ae` in `fcn.1ce80`) | agent A + C | [M] |
 | `0xF70A` | — | sweep re-arm (known from DRIVETICK RE) | docs/DRIVETICK_BLOCKER.md | [V] |
-| `0xF712` | `B204` | sweep/band digital control latch (write gated `b212.13`) | `0x23168` | [M] |
+| `0xF70C` | `B1AC` | extra tune DAC (model-gated `bfee≥0x218F & b212.15`) | `fcn.7ac8` `0x7b3c` | [M] |
+| `0xF70E` | `B1AA` | extra tune DAC (same gate) | `fcn.7ac8` `0x7b42` | [M] |
+| `0xF712` | `B204` | **3rd-conv DAC [0:7] + IF step/lin gain code [8:13] + uncal/mode [14:15]** | `fcn.080a0` `0x8290–0x82ae`; CAL AMPTD `fcn.48344` `0x48432` | [V] mech / [M] which-gain |
+| `0xF714` | `B1B2` | **YTF-preselector DAC [0:11] + RF atten [12:14]** (alt/YTF path) | `fcn.7ac8` `0x7b50–0x7b72` | [V] |
 | `0xF716` | `B1B4` | sweep control (`B1B4 & 0xFFF0`; sweep re-arm path writes it) | `0x23f8c`; DRIVETICK | [V] |
-| `0xF718` | — | timebase/reference + misc control latch | `fcn.233f2` @ `0x23428` | [M] |
+| `0xF718` | `AF34` | **cal-attenuator [8:12] (5-bit, code == dB) + strobe [12] + b1f6.7 [13]** | `fcn.080a0` `0x8326`; assemble `0x23864`; setter `fcn.4515c` | [V] |
 | `0xF728/F72A` | `AD7C` | A7 serial sub-bus select/data (Level 2) | driver module | [V] |
 
 ## Level 2 — the F728/F72A serial sub-bus registers
@@ -136,7 +142,7 @@ the live mode shadow OR'd into every access. **[V]**
 | Reg | Dir | Function | Key evidence | Tag |
 |---|---|---|---|---|
 | **0** | W | **YTO serial DAC chain** — `fcn.223b6(value=AD60)`: 8 nibble-writes, sub-index in select bits 4–7 (`addi #0x10` per nibble — bits 4–7, NOT the reg field), groups 2+3+3 nibbles; value split `÷3` (variant `b213.4`) or `÷40`, `0x7D0`(2000)-complement; third group constant `0x32`(50) | `0x223be–0x2249c`; two-point lock check loads `0x7C3`/`0x735` (`0x23daa/0x23ddc`) | [V] mech / [M] label |
-| **2** | W | **multiplexed control-latch port**: pointer byte `(group<<6)\|0x30\|(sub<<1)` written in bank-3 mode, then 16-bit data as two byte-writes in bank=`group` (AD7C bits 13–14 = bank). Also: **`0xE2` = settle strobe** (`fcn.227f2`), **`0xE0\|(2<<n)` = gain/measure-path select** (`fcn.2287e`). Band-switch seq (`fcn.22830`): grp0,sub1←arg; grp1,sub2←0; grp2,sub2←0xFFFF | `0x225a6/0x2260a/0x2280e/0x228a2` | [V] mech / [M] fields |
+| **2** | W | **multiplexed MEASUREMENT-path / test-point-MUX select** (NOT band-switch — corrected 2026-07-12): pointer byte `(group<<6)\|0x30\|(sub<<1)` in bank-3, then 16-bit data as two byte-writes with **AD7C bits 13–14 = bank ≡ group** (routes to dest latch 0/1/2, or 3 = pointer). Strobes: **`0xE2` settle** (`fcn.227f2`), **`0xE4`/`0xE8`** (`0xE0\|(2<<n)`, n∈{1,2}) = dual internal-detector select then reg-3 readback (`fcn.2287e`). The `fcn.22830` group seq (grp0←`0x1C9C` const, grp1←0, grp2←`0xFFFF`) is called ONLY by the self-cal `fcn.22afe` — a measurement-MUX preset, not a frequency band. | `0x225a6/0x2260a/0x2287e` | [V] mech / [M] MUX-bit labels |
 | **3** | R | **status + 16-bit readback**: settle gate `(x&0xC0)==0x80` polled after reg2←0xE2 (the boot-freeze poll, `fcn.227f2` `0x2281a`); bit6 = data-invalid; two consecutive reads = hi/lo bytes of a measurement (negated) (`fcn.2287e` `0x228d4/0x228de`) | | [V] |
 | **4** | W | latch, only ever cleared to 0 at band-config end (`fcn.227e0`, sole caller `0x22876`) | | [V] |
 | **5** | W | **10 MHz TIMEBASE reference DAC** (8-bit): live shadow RAM `0x9ED7`, cal-NVRAM byte `0x2FC037` (checksummed store via `fcn.42f60`, slot `0x3d6`); mixer-bias excluded (band-indexed per ROM strings `"mixer bias B <band>"`) | writer `0x22574` (slot `0x514`); callers `0x141e6/0x160e2/0x42f76/0x435b6/0x4e206` | [V] path / [M] label |
@@ -170,6 +176,31 @@ to F728 alone (select-only strobe, AD7C bit12 = flag) during band/mode setup. **
   annunciator `0x2f` on failure. **[V]**
 - **`fcn.2269e`** (slot `0x7f4`) — per-band tune setup: band cal struct at
   `0xADC8+band*8` / `0xAEB8+band*4`, calls `fcn.23128` + `fcn.23e56`. **[V]**
+
+## The gain / attenuator map (`ANALYZER GAINS`, 2026-07-12)
+
+The amplitude-control chain is programmed by **`fcn.080a0`** (the amplitude setter,
+keyed on ref level / atten mode) and committed by **`fcn.7ac8`** (the "commit
+YTO+atten" routine, 40 xrefs). All are **direct packed ports**, not the sub-bus.
+Label table at ROM `0x50330`. `[V]` mechanism / `[M]` some line assignments.
+
+| Control | Range | Port field | RAM | dB→code | Evidence |
+|---|---|---|---|---|---|
+| **RF attenuator** | 0..−70 dB / 10 dB | `F704[12:14]` (or `F714[12:14]` YTF path) | `b074[2:0]` | active-low 3-line: step 0–3 → `~step`, 4–7 → `~(step+1)` | `fcn.080a0` `0x817c–0x818a`; `fcn.7ac8` `0x7ae4–0x7b20` |
+| **3rd-conv (ref-level cal) DAC** | 0..255 (8-bit) | `F712[0:7]` | `b204[0:7]` | binary; CAL AMPTD binary-search | `fcn.48344` `0x48432`; seed `0x82`/`0x46` |
+| **21.4 step gain + lin gain** (IFG1-6) | 0..50 / 0..40 dB, 10 dB | `F712[8:13]` (6-bit) | `b204[13:8]` | table `0x7734` = `00 01 02 03 06 07 0F 1F 2F 3F` (10 ref zones → 6 IFG lines) | `fcn.080a0` `0x8290–0x82ae` |
+| **cal attenuator** (IFA1-5) | 0..−31 dB / 1 dB | `F718[8:12]` (5-bit) | `af34[12:8]` | binary-weighted 1/2/4/8/16 → **code == dB** | `fcn.080a0` `0x8326`; setter `fcn.4515c` |
+
+Auto-atten is gated by `b070.9` (AT MAN). Uncal/overload flag = `b204.14` (set when
+ref level `< 0xA`). Cal-atten `af34` inits `0x4000`, bit12 = write strobe.
+
+**Service handlers (partly bound):**
+- **`SET ATTN ERROR`** (menu ID `0x9A`) → the cal-attenuator path: characterises the
+  5 A12 step attenuators, stores corrections in NVRAM `0x2FCB1E`; loader `fcn.450f2`
+  (5-entry loop at `0x45122`), live setter `fcn.4515c`. `[V]` path.
+- **`STP GAIN ZERO`** (ID `0x9E`) → forces the two 20 dB step-gain amps (IFG2/IFG3
+  bits in `b204[13:8]`) off. The exact softkey handler PC is **not bound** — the
+  service IDs dispatch through the key-event/command-class layer (Gate 2). `[M]`
 
 ## RAM shadow cells (the A7 state the firmware owns)
 
@@ -218,23 +249,34 @@ non-linearity). Refining `FrequencyModel` against the firmware's freq→DAC math
 1. **reg-0 chain physical label** — which A7 DACs the 2+3+3 nibble groups load
    (interpolation pair + fixed 50); the ÷3/÷40 split semantics. Schematic OCR or
    the component-level binder would settle it. [M]
-2. **reg-2 group/sub field map** — band-switch bit meanings; step-gain/cal-atten
-   attribution (`SET ATTN ERROR`, `STP GAIN ZERO` handlers not yet bound). [M]
-3. **Direct-map hypothesis** `F700+2n = ADR n` — consistent with U18/ADR0–4 but
+2. **DAC→Hz calibration** — the linear `FrequencyModel` mapping is ~10 % off vs
+   the firmware's own centre readout (the 244 MHz cross-check above). Refine
+   against `fcn.23e56`'s float math + the per-band cal. [M]
+3. **RF-atten line-code → dB decode** — `F704[12:14]` is the active-low 3-line
+   control; the inverse of `~step` / `~(step+1)` (+ the A7J5/A7J2 differential
+   maps, service Table 6-3/6-10) is not yet coded. Needed to drive the Detector
+   reference level from the real attenuator. [M]
+4. **Span-DAC → Hz** — where the sweep span is programmed (so the SweepEngine's
+   window WIDTH, not just centre, is DAC-derived). Not on the coil ports. [A]
+5. **Direct-map hypothesis** `F700+2n = ADR n` — consistent with U18/ADR0–4 but
    unproven. [A]
-4. **Softkey ID→handler binding** (service IDs `0x99–0xB1` from menu template ROM
+6. **Softkey ID→handler binding** (service IDs `0x99–0xB1` from menu template ROM
    `0x7cc30`; `0x99`=CAL TIMEBASE … `0xAB`=COARSE TUNE DAC … `0xB1`=−10V REF):
    the `10 NN 00 00` trailer is label-only; the action binding lives in the
    softkey key-event emit layer (same machinery as Gate 2). Bonus decoded en
    route: **`fcn.12288` is the typed-command CLASS dispatcher** — class =
    `(cmdword>>8)−0xd`, 33-case offset table at `0x12754`, class `0x27` → slot
    `0x550` → CONTS `fcn.5f968`; boot fires only class `0x12` (code `0x12D6`).
-5. **Mixer-bias / 3rd-conv (ref-level) DAC** location — band-indexed, not found
-   on the sub-bus yet; likely behind reg 2 or a direct port. [A]
-6. **Emulator freeze note**: `fcn.223b6`'s tail busy-waits on the tick counter
+7. **Emulator freeze note**: `fcn.223b6`'s tail busy-waits on the tick counter
    `0xbf12` (deadline +3 ticks, poll loop `0x224aa`) — if the emulator's IRQ5
    timer doesn't advance `0xbf12`, every chain load hangs. Relevant to
    [[no-autonomous-irq-generation]].
+
+**RESOLVED since the first cut:** reg-2 field map (it's the measurement/test-point
+MUX, not band-switch — corrected above); the gain/attenuator map (RF-atten `F704`,
+3rd-conv + IF gain `F712`, cal-atten `F718` — all direct packed ports); mixer-bias
+excluded (band-indexed, separate); `SET ATTN ERROR`/`STP GAIN ZERO` paths bound to
+their control fields (handler PCs still Gate-2-gated).
 
 ## Sources
 

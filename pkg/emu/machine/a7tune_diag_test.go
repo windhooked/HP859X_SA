@@ -22,14 +22,15 @@ func TestA7TuneDiag(t *testing.T) {
 
 	fm, fine, coarse := m.MMIO.YTOCoilDACs()
 	g0, g1, g2 := m.MMIO.A7YTOChain()
-	t.Logf("YTO coil DACs: FM(F700)=%#04x  fine(F702)=%#04x  coarse(F704)=%#04x", fm, fine, coarse)
+	t.Logf("YTO coil DACs: FM(F700)=%#04x  fine(F702)=%#04x  coarse(F704)=%#04x (DAC %#03x, RFatten=%d)",
+		fm, fine, coarse, coarse&0x0FFF, m.MMIO.RFAttenCode())
 	t.Logf("reg-0 serial chain: g0(8b)=%#02x g1(12b)=%#04x g2(12b)=%#04x", g0, g1, g2)
 	t.Logf("timebase DAC (reg5)=%#02x  settle strobes=%d", m.MMIO.A7TimebaseDAC(), m.MMIO.A7SettleStrobes())
 
 	freq := analog.FrequencyModel{
-		CoarseDAC: int(coarse),
-		FineDAC:   int(fine),
-		FMDAC:     int(fm),
+		CoarseDAC: int(coarse & 0x0FFF), // low 12 bits; top nibble = atten+flag
+		FineDAC:   int(fine & 0x0FFF),
+		FMDAC:     int(fm & 0x0FFF),
 	}
 	tuned := freq.TunedHz()
 	t.Logf("derived: YTO=%.4f GHz  tuned(YTO-IF)=%.4f GHz", freq.YTOHz()/1e9, tuned/1e9)
@@ -50,7 +51,7 @@ func TestA7TuneDiag(t *testing.T) {
 	if !m.MMIO.Sweep.TuneActive {
 		t.Error("SweepEngine.TuneActive not set — syncSweepTune never ran during boot")
 	}
-	if got := m.MMIO.Sweep.Tune.CoarseDAC; got != int(coarse) {
-		t.Errorf("SweepEngine coarse DAC = %#x, want %#x (live port)", got, coarse)
+	if got := m.MMIO.Sweep.Tune.CoarseDAC; got != int(coarse&0x0FFF) {
+		t.Errorf("SweepEngine coarse DAC = %#x, want %#x (live port, masked)", got, coarse&0x0FFF)
 	}
 }

@@ -294,13 +294,25 @@ func (l *A16AddrLatch) Write(addr uint32, sz bus.Size, val uint32) {}
 
 // YTOCoilDACs returns the three direct YTO coil-DAC word ports (★ 2026-07-12
 // A7 map, docs/A7_ANALOG_IO_BUS.md): fm = 0xF700 (shadow B1A4, 0x800 midscale
-// at tune), fine = 0xF702 (B1A6), coarse = 0xF704 (B1A8, the 12-bit main-coil
-// value). These are what the firmware's freq→DAC math (fcn.23e56) programs;
-// a future FrequencyModel integration can derive the LO frequency from them.
+// at tune), fine = 0xF702 (B1A6), coarse = 0xF704 (B1A8). These are the RAW
+// ports; note F704 packs coarse-DAC in bits [0:11] with the RF attenuator in
+// bits [12:14] and a flag in bit 15 (reg-2 field-map RE), so the 12-bit YTO
+// coarse value is (coarse & 0x0FFF) — see RFAttenCode for the top field. F700/
+// F702 are pure DACs. The firmware's freq→DAC math (fcn.23e56) programs these.
 func (m *HP8593AMMIO) YTOCoilDACs() (fm, fine, coarse uint16) {
 	return uint16(beRead(m.b[:], 0x700, bus.Word)),
 		uint16(beRead(m.b[:], 0x702, bus.Word)),
 		uint16(beRead(m.b[:], 0x704, bus.Word))
+}
+
+// RFAttenCode returns the 3-bit RF-attenuator control field the firmware packs
+// into F704 bits [12:14] (reg-2 field-map RE 2026-07-12; committed by fcn.7ac8).
+// It is an active-low, non-binary line code — steps 0–3 map ~step, steps 4–7
+// map ~(step+1) for the 0..−70 dB / 10 dB range — so this is the raw control
+// field, not the dB value (dB decode is a documented follow-up). 8593E path;
+// the alt/YTF path uses F714 instead.
+func (m *HP8593AMMIO) RFAttenCode() uint16 {
+	return uint16(beRead(m.b[:], 0x704, bus.Word)>>12) & 0x7
 }
 
 // A7YTOChain returns the assembled A7 reg-0 YTO serial DAC chain (8-bit group,

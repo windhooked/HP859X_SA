@@ -141,3 +141,19 @@ func TestMMIO_YTOCoilDACs(t *testing.T) {
 		t.Fatalf("YTOCoilDACs = %#04x/%#04x/%#04x, want 0x0800/0x0123/0x0ABC", fm, fine, coarse)
 	}
 }
+
+// TestMMIO_F704Packing checks the F704 field split (reg-2 field-map RE): the
+// coarse DAC is the low 12 bits and the RF attenuator control is bits [12:14].
+// Writing atten=5 (0b101) + DAC=0x123 → F704 = 0x5123; RFAttenCode reads 5 and
+// the DAC value is 0x123.
+func TestMMIO_F704Packing(t *testing.T) {
+	m := NewHP8593AMMIO()
+	m.Write(0x704, bus.Word, 0x5123) // atten=5 in [12:14], coarse DAC=0x123
+	if code := m.RFAttenCode(); code != 5 {
+		t.Errorf("RFAttenCode = %d, want 5", code)
+	}
+	_, _, coarse := m.YTOCoilDACs()
+	if coarse&0x0FFF != 0x123 {
+		t.Errorf("coarse DAC = %#x, want 0x123", coarse&0x0FFF)
+	}
+}
