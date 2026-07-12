@@ -12,6 +12,30 @@
 > several historical docs say "Opt-027"; that framing is stale). `[VERIFIED]` via CLAUDE.md +
 > the working faithful boot.
 
+## Changes since the 2026-06-14 assessment (light refresh, 2026-07-12)
+
+- **★ Gating item 1 — the A7-bus register→DAC map — is RESOLVED, without hardware.**
+  Capture C1 was assumed to need GPIB/bus access; it fell to *reader-side
+  disassembly RE* + the text-extractable service guide instead (`pdftotext` works
+  on `08590-90316.pdf`). Full map: [A7_ANALOG_IO_BUS.md](A7_ANALOG_IO_BUS.md)
+  ★-sections. Headlines: the YTO coil DACs are **direct packed word ports**
+  (`F704` = coarse[0:11]+RF-atten[12:14], `F702` fine, `F700` FM; `F712` =
+  3rd-conv+IF-gain; `F718` = cal-atten), NOT behind the F728/72A select pair;
+  the sub-bus registers are named (reg 0 YTO chain, reg 2 measurement-MUX,
+  reg 3 status/readback, reg 5 timebase DAC, reg 7 status/ID); the low-memory
+  6-byte-stride jmp table `0x502–0xd00` is the firmware's **A7 driver API**
+  (Path-5 gold). Emulator now models the map (chain assembly, getters) and the
+  sweep window **centres on the firmware's real YTO tuning** (`syncSweepTune`).
+- **New residuals replacing item 1:** DAC→Hz calibration (~10 % off — firmware
+  paints 1.450 GHz where the linear model derives 1.206 GHz from coarse `0x08E8`);
+  RF-atten line-code→dB decode; span-DAC location.
+- **Gate-1/Gate-2 convergence hardened:** `fcn.12288` fully decoded (typed-command
+  CLASS dispatcher, 33-case table `0x12754`; class 0x27 → CONTS); the service
+  softkey IDs dispatch through the key-event emit layer = Gate 2's machinery.
+  **C2 remains the top capture; the C1 precedent says try reader-side RE first.**
+- §3a orphan `musashi_config.h` deleted (footgun closed). Five commits:
+  `1b7616d…c704050`.
+
 ## 0. What was actually run this session (the evidence base)
 
 - `make build` → exit 0. `[VERIFIED]`
@@ -50,7 +74,7 @@ gates, not data gaps (§5).
 | **HD63484 ACRTC** | U301 | `0xFFF5FC/E` | FAITHFUL | High | `[VERIFIED]` hd63484 pkg 41 pass/2 skip; full command decode | Status byte `0x27` always-ready (STUB, no observable effect); **trace-line render unasserted** (test gap) |
 | **Analog physics model** | (behavioral) | — | FAITHFUL | High | `[VERIFIED]` analog_test; YTO 3.0–6.8214 GHz, IF 3.9214 GHz, MU 0..8000, 300 MHz CAL | Behavioral, not circuit-level; RBW fixed 1 MHz |
 | **Indirect ADC bus** | U47 12-bit ADC + mux | `0xFFF75C/E` | FAITHFUL (ch0/1/3-7) / FUNCTIONAL-APPROX (ch2) | High/Med | `[VERIFIED]` analogbus_test; 0x9A conversion state machine | ch2 (+2VREF) returns a constant — true transfer function unknown |
-| **A7 analog I/O bus** | A16→A7 iface | `0xFFF728/A` | FUNCTIONAL-APPROX | Med | `[VERIFIED]` a7iobus_test (protocol) | **register→DAC SEMANTIC map UNKNOWN** (which reg = YTO/atten/RBW) — see §4 |
+| **A7 analog I/O bus** | A16→A7 iface | `0xFFF700–73E` | FUNCTIONAL-APPROX (map KNOWN) | High | `[VERIFIED]` 2026-07-12 disasm RE + a7iobus_test; sweep window rides real YTO DACs | **map RESOLVED** (see refresh note): direct packed DAC ports + named sub-bus regs; residuals = DAC→Hz cal (~10 %), atten→dB, span-DAC |
 | **SweepEngine** | sweep+detector | `0xFFF200` | FAITHFUL | High | `[VERIFIED]` sweepengine_test; CAL peak lands at right point | feeds correct data; the *paint* is Gate 1 |
 | **Sweep-status `0xFFF300`** | sweep clock | `0xFFF300` | STUB-TUNED (bit12) / GAP (bit11) | High | `[VERIFIED]` sweepgate_test (region classifier) | bit12 always-ready; **bit11 sweep-complete not auto-asserted** → DRIVETICK root |
 | **Front-panel µC** | sep. µC (LRTC) | `0xEF4000` | UNKNOWN-CONTRACT | High | `[VERIFIED]` disasm (§5 Gate 2); frontpanel_test (RTC/IRQ3 only) | bus-master RAM write-set unknown; **key dispatch impossible from passive model** |
@@ -81,7 +105,9 @@ and the device models; cross-checked against `docs/HARDWARE.md`.
 | `0xFFF600–60F` | byte | R/W | TMS9914A (2-byte stride) | STUB-TUNED |
 | `0xFFF700–77F` | word | W | A16 data-path block; write-index latched for POST | partial |
 | `0xFFF780–7FF` | word | R | **mirror of `0xFFF700`** (A7 bit not decoded) — POST loopback | FAITHFUL (models real decode) |
-| `0xFFF728 / 72A` | word | W→sel / R/W | **A7 analog I/O bus** (LO/atten/RBW/refdac + counterlock readback) | protocol FAITHFUL, **semantics UNKNOWN** |
+| `0xFFF728 / 72A` | word | W→sel / R/W | **A7 serial sub-bus** (reg 0 YTO chain, reg 2 measurement-MUX, reg 3 status/readback, reg 5 timebase DAC, reg 6 mode, reg 7 status/ID) | FAITHFUL protocol + **map KNOWN (2026-07-12)** |
+| `0xFFF700/702/704` | word | W | **YTO coil DACs** FM / fine / coarse — F704 packs coarse[0:11]+RF-atten[12:14]+flag[15] | map KNOWN (2026-07-12) |
+| `0xFFF712 / 714 / 718` | word | W | 3rd-conv DAC+IF-gain / YTF DAC+atten / cal-atten latches | map KNOWN (2026-07-12) |
 | `0xFFF73C/73E/77C/77E` | word | R | system-ID straps → IDNUM | FUNCTIONAL-APPROX |
 | `0xFFF75C / 75E` | word | W→sel / R/W | **indirect ADC bus** (mux + DAC + 12-bit ADC, status select `0x9A`) | FAITHFUL (state machine) |
 | `0xFFF614/616` | word | (init) | POST bypass straps `=0xFF` | STUB-TUNED |
@@ -142,20 +168,20 @@ DLP/UI — is what a minimal-firmware or native-reimplement path depends on.
 |---|---|---|---|---|
 | **Video detector / trace** | `0xFFF200` R | (read-only) | 9-bit ADC per IRQ6 sample → trace buf `0x2FD508` | **`[VERIFIED]`** faithful (SweepEngine) |
 | **ADC mux + convert** | `0xFFF75C/75E` | sel `0x91`=channel, `0x95-97`=offset DAC, trigger via DAC-low write | sel `0x9A` status (state machine), `0x9F/9D` 12-bit result | **`[VERIFIED]`** (ch2 transfer fn approximate) |
-| **LO / YTO tune** | `0xFFF728/72A` (A7) | nibble-loaded 12-bit DAC into some A7 register | counterlock count (servo) | protocol `[VERIFIED]`; **which register = UNKNOWN** |
-| **Sweep span** | `0xFFF728/72A` (A7) | span DAC | — | **UNKNOWN register** |
-| **RF attenuator / step gain** | `0xFFF728/72A` (A7) | step/cal-atten control bits | — | **UNKNOWN register** (stored, not applied to ADC) |
-| **IF gain / resolution BW** | `0xFFF728/72A` (A7) | BW companding DACs | — | **UNKNOWN register** (RBW fixed 1 MHz) |
-| **Reference-level DAC** | `0xFFF728/72A` (A7) | 8-bit REF_LVL_CAL | — | **UNKNOWN register** |
+| **LO / YTO tune** | direct `F700/F702/F704` + serial reg 0 | coil DACs (F704 = coarse[0:11]+atten[12:14]) + `fcn.223b6` chain (AD60 ÷3/÷40) | reg-7 bit1 lock-error (two-point check) — tune is OPEN-LOOP (cal-based) | **`[VERIFIED]` 2026-07-12** — RESOLVED; residual = DAC→Hz cal (~10 %) |
+| **Sweep span** | ? | span DAC location still unknown (main/FM span mode = AD7C bit5 via reg 6) | — | **UNKNOWN port** (the one remaining tune unknown) |
+| **RF attenuator / step gain** | `F704[12:14]` / `F714[12:14]`; cal-atten `F718[8:12]` | active-low 3-line code (~step / ~(step+1)); cal-atten code==dB | — | **`[VERIFIED]` 2026-07-12** — RESOLVED; residual = line-code→dB decode in the model |
+| **IF gain / resolution BW** | `F712[8:13]` (IF step/lin gain, table `0x7734`) | 6-bit IFG1-6 line code | — | gain **`[VERIFIED]`**; RBW/BW-companding DACs still unmapped (RBW fixed 1 MHz in model) |
+| **Reference-level DAC** | `F712[0:7]` (3rd-conv variable gain) | 8-bit, CAL AMPTD binary-search calibrated | — | **`[VERIFIED]` 2026-07-12** — RESOLVED |
 | **Analog settle/lock** | `0xFFF728/72A` (A7) | — | reg 3: `(x & 0xC0)==0x80` settled gate | **`[VERIFIED]`** gate; other bits passthrough |
 | **Sweep arm / complete** | `0xFFF300` | bit13 arm, write to ACK/clear bit11 | bit12 ready (forced), bit11 complete (**GAP**) | STUB/GAP |
 
-**Critical conclusion for the user's preferred Path 5:** the analog **protocol** is fully modeled,
-the **physics** (DAC→freq→spectrum→detector) is faithful, and the **ADC/detector data path is
-`[VERIFIED]` correct** — but the **A7-bus register→DAC semantic mapping is the gating unknown**.
-You cannot author a minimal firmware (or a native driver) that *tunes the instrument* without
-knowing which A7 register is YTO-coarse vs attenuator vs RBW. This single unknown blocks Paths 2
-and 5 and is the highest-ROI thing to resolve (§8).
+**Critical conclusion for the user's preferred Path 5 — UPDATED 2026-07-12:** the gating unknown
+is **resolved**. The analog protocol, physics, ADC/detector data path AND the register→DAC map are
+now known (which port/field = YTO coarse/fine/FM, RF atten, IF gain, cal-atten, timebase; plus the
+firmware's own A7 driver API at jmp-slots `0x502–0xd00`). A minimal firmware/monitor that tunes the
+instrument is now authorable; the remaining polish items are the DAC→Hz calibration curve, the
+atten line-code→dB decode, and the span-DAC port. **Path 5 is unblocked at the driver layer.**
 
 ---
 
@@ -230,7 +256,9 @@ layout reverse-engineered, which is itself partly a ground-truth task (dump a re
 ## 7. Modernization blueprint (five paths)
 
 **Cross-cutting gating items (resolve these and every path improves):**
-1. **A7-bus register→DAC semantic map is UNKNOWN** — blocks Paths 2 & 5 (can't tune the analog HW).
+1. ~~**A7-bus register→DAC semantic map is UNKNOWN**~~ — **RESOLVED 2026-07-12 via
+   disassembly RE** (see the refresh note). Residuals: DAC→Hz calibration, atten
+   line-code→dB, span-DAC port. Paths 2 & 5 are unblocked at the driver layer.
 2. **No hardware time model** — blocks Path 3 (FPGA) and weakens Path 1.
 3. **Two UNKNOWN-CONTRACT peripherals** (front-panel µC write-set; CONTS/measure-mode entry) — block
    interactivity and the trace paint on Paths 1 & 4.
@@ -293,7 +321,7 @@ contracts from inside the emulator. These captures resolve the open contracts au
 
 | # | Open contract | Capture | Access needed | Unblocks |
 |---|---|---|---|---|
-| C1 | **A7-bus register→DAC map** (which reg = YTO/atten/RBW/refdac) | Log `0xFFF728/72A` writes on a real unit while changing one parameter at a time (center freq, atten, RBW) via the front panel; correlate | **GPIB dump or bus probe** | **Paths 2, 5** (the #1 unknown) |
+| C1 | ~~**A7-bus register→DAC map**~~ — **RESOLVED 2026-07-12 by reader-side disassembly RE, no hardware** (A7_ANALOG_IO_BUS.md ★). A real-unit log would still *validate* the map + settle the residuals (DAC→Hz curve, span DAC) | Log `0xFFF728/72A` + `0xF700–0xF71E` writes while changing one parameter at a time; correlate | GPIB dump or bus probe (now optional) | validation + Path-5 polish |
 | C2 | **Front-panel µC write-set + valid-key frame** (Gate 2) — capturing the **CONT softkey** press also yields the CONTS→`b0a1.3` write-set, so this likely resolves Gate 1 too (see §5 convergence) | Logic-analyzer on the M68K bus during a keypress; log every RAM write from a **non-CPU master** | **bus probe** (LA) | **interactivity + trace paint**; Paths 1, 4 (top-priority §8 item) |
 | C3 | **CONTS / measure-mode entry** (Gate 1) — *may be subsumed by C2* if the CONT softkey capture there exposes the same cells | Capture the RAM cells (`b0ec`, `a9a0`, `b0a1`) + DLP scheduling on a real unit at power-up and on `CONT` softkey | GPIB dump | trace paint; Paths 1, 4 |
 | C4 | **ADC ch2 (+2VREF) transfer fn** | Read the indirect ADC at GND and +2V refs on a real unit | GPIB dump | measurement accuracy |
@@ -309,13 +337,18 @@ contracts from inside the emulator. These captures resolve the open contracts au
 
 ## 9. Recommended first move
 
-**Resolve the A7-bus register map (C1), then build a Path-5 minimal-control firmware/monitor.**
-Rationale, straight from the audit:
-- It targets the **one cross-cutting unknown** (gating item 1) that blocks the most paths.
-- It is reachable with **GPIB-only** access you appear to already have (`dump.py`).
-- It **sidesteps** both §5 control-flow gates (no front-panel µC, no measure-mode DLP needed).
-- The data path it rides on is **`[VERIFIED]` correct** (detector → trace buffer), and the physics
-  model is **FAITHFUL** — so once tuning works, you get a real, remotely-controllable RF front-end.
+**~~Resolve the A7-bus register map (C1)~~ — DONE (2026-07-12, disassembly-only).**
+The original rationale stands and its precondition is met: the driver layer is
+mapped, so a **Path-5 minimal-control firmware/monitor is now directly buildable**
+(prototype it in the emulator against the jmp-slot A7 API; validate on hardware
+whenever a unit is available). The updated ordering:
+1. **Path-5 monitor PoC** — unblocked, sidesteps both §5 gates, first tangible
+   modernization artifact.
+2. **Gate-2 reader-side RE** (in progress 2026-07-12) — the C1 precedent says the
+   µC contract may also fall to consumer-side disassembly (satisfy the reader:
+   `fcn.430/736` frame acquisition, `fcn.67c`/`fcn.59ef0` decode, the softkey
+   emit layer) without the C2 capture. Unblocks input + trace paint + service keys.
+3. Residual calibration (DAC→Hz, atten→dB, span DAC) as polish.
 
 Parallel, independent quick win: **HD63484 replacement spec (Path 4)** — the decode is already a
 drop-in contract, so it can proceed without any capture.
