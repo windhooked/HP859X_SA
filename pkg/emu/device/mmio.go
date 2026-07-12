@@ -192,6 +192,9 @@ type HP8593AMMIO struct {
 	// register pair at 0xFFF728/0xFFF72A — the digital control + status
 	// readback for the A7 board (LO/YIG/attenuator/gain/bandwidth DACs + A25
 	// counterlock/status). Separate from abus. See a7iobus.go.
+	// NOTE (★ 2026-07-12 map): the YTO coil DACs are NOT behind this pair —
+	// they are direct word ports 0xF700 (FM coil), 0xF702 (fine), 0xF704
+	// (main/coarse) landing in the flat backing buffer; see YTOCoilDACs.
 	a7bus a7IOBus
 
 	// HPIB models the TMS9914A IEEE-488 controller at MMIO offset
@@ -288,6 +291,27 @@ func (m *HP8593AMMIO) AddrLatch() *A16AddrLatch { return &A16AddrLatch{mmio: m} 
 
 func (l *A16AddrLatch) Read(addr uint32, sz bus.Size) uint32       { return uint32(l.mmio.addrLatch) }
 func (l *A16AddrLatch) Write(addr uint32, sz bus.Size, val uint32) {}
+
+// YTOCoilDACs returns the three direct YTO coil-DAC word ports (★ 2026-07-12
+// A7 map, docs/A7_ANALOG_IO_BUS.md): fm = 0xF700 (shadow B1A4, 0x800 midscale
+// at tune), fine = 0xF702 (B1A6), coarse = 0xF704 (B1A8, the 12-bit main-coil
+// value). These are what the firmware's freq→DAC math (fcn.23e56) programs;
+// a future FrequencyModel integration can derive the LO frequency from them.
+func (m *HP8593AMMIO) YTOCoilDACs() (fm, fine, coarse uint16) {
+	return uint16(beRead(m.b[:], 0x700, bus.Word)),
+		uint16(beRead(m.b[:], 0x702, bus.Word)),
+		uint16(beRead(m.b[:], 0x704, bus.Word))
+}
+
+// A7YTOChain returns the assembled A7 reg-0 YTO serial DAC chain (8-bit group,
+// then two 12-bit groups); see a7IOBus.YTOChain.
+func (m *HP8593AMMIO) A7YTOChain() (g0, g1, g2 uint16) { return m.a7bus.YTOChain() }
+
+// A7TimebaseDAC returns the 8-bit 10 MHz timebase reference DAC (A7 reg 5).
+func (m *HP8593AMMIO) A7TimebaseDAC() uint8 { return m.a7bus.TimebaseDAC() }
+
+// A7SettleStrobes returns the count of A7 reg-2 settle strobes (0xE2) issued.
+func (m *HP8593AMMIO) A7SettleStrobes() int { return m.a7bus.SettleStrobes() }
 
 // sweepDetector returns the synthesized detected video level (the ADC reading)
 // for sweep position pt: a low noise floor plus a single CAL-like peak. Values
