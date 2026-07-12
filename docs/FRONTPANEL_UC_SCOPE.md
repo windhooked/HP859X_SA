@@ -15,7 +15,13 @@ Two of those writes are dispatch GATES the firmware itself NEVER sets:
 | Cell | Gate site | Evidence |
 |---|---|---|
 | `0xFFBC67` bit 1 | `0x18F5E btst #1,bc67` | **zero `bset` refs** in all of Rev L |
-| `0xFFB072` bit 14 | `0x18F66 btst #14,b072` | **zero `bset` refs** in all of Rev L |
+| `0xFFB072` bit 14 | `0x18F66 btst #14,b072` | **one `bset`, at `0x1C48A`** — an init context, never on the key path (CORRECTED 2026-07-12: this row previously claimed zero refs) |
+
+A third µC-owned cell sits immediately after the gates: **`0xFFBA86` bit 0**
+(`0x18F6E btst #0,ba86`; zero `bset` refs). It is a dispatch-form **SELECTOR**, not a
+gate: clear → `fcn.67c(0xe1, 0xffe0)`; set → `fcn.67c(0xbe, 0x5)` unless
+`b1e4 == 0x34` (suppressed). Forcing only the two gates takes the ba86.0-clear arm;
+the selector's meaning (key class? RPG vs key?) is part of the unknown write-set below.
 
 So the dispatch `fcn.67c` (`0x5a0e8`) can never run from a passive model.
 
@@ -52,8 +58,9 @@ not what we inject. The exact contract can't be cracked by poking from outside.
 ## The ONE open unknown (gates this)
 
 **The exact valid-key contract** — (a) the full set of RAM cells the µC writes (beyond the 2
-gates; candidates: the `fcn.520`/IP-cleared cells, `0xFFB20E`/`0xFFBF01` touched by the key
-path), and (b) the multi-byte frame encoding `fcn.59ef0` expects for a specific key/softkey.
+gates; candidates: the `ba86.0` dispatch-form selector above, the `fcn.520`/IP-cleared cells,
+`0xFFB20E`/`0xFFBF01` touched by the key path), and (b) the multi-byte frame encoding
+`fcn.59ef0` expects for a specific key/softkey.
 
 Two ways to resolve it (Hypothesis 1 in [INVESTIGATION.md](INVESTIGATION.md)):
 - **RE path:** decode `fcn.59ef0` + `fcn.67c` input fields fully — what frame layout yields a
