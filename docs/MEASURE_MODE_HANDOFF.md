@@ -137,6 +137,50 @@ Full decode (softkey-dispatch RE agent + verified):
    not the PIT beyond the AT-keyboard regs). Attack: walk `fcn.11750`'s ~14 callers and the
    ring-producer sites back to their hardware reads.
 
+### ★★★★ 2026-07-13 — GATE 1 RESOLVED: the sweep-restart trigger found; continuous sweeps run; the firmware DRAWS the trace
+
+**The complete sweep-arm condition** (`fcn.8f04`, all abort edges mapped):
+
+	CONTS (b0a1.3)  AND  ( b068.l|b06c.l == 0   OR   b0ec == 0x31   OR   b0e6 >= 1 )
+	[plus trigger-mode windows: fcn.15a→0x5eca2 / fcn.1ea→0x2ffda checks with
+	 sweep-time caps 0xc3500 (800 ms) / 0x30d40 (200 ms); arm path 0x90c8 loads
+	 a9a0; abort path 0x92b2 writes a9a0 = -1]
+
+- **`b068/b06c` is a PER-BAND ROM CONSTANT** (second float of the 16-byte/band table at
+  ROM `0x20af2`, loaded at `0x20c68`; observed {0, 0x10, 0x29}) — legitimately nonzero in
+  band 0. So the real instrument arms via the **`0x8fa6` rescue: `b0ec == 0x31` (SPECTRUM
+  measure mode)**. The earlier demotion of `b0ec` ("red herring") missed this second check —
+  the ORIGINAL b0ec→0x31 theory was right after all, via a different instruction.
+- **The mode setter:** `fcn.21c96(d0=mode)` → clamp ≤0x39 → `b0ec=mode`, `b05a=1`
+  (mode-changed) — wrapped by `fcn.220a0` = **jump-slot `0x65e`**. The boot's `b0ec=1`
+  (CONFIG) comes from the preset init `0x4e01c`.
+- **THE UNLOCK RECIPE** (`Machine.EnterContinuousSpectrum`, verified `TestSpectrumModeDiag`):
+  (1) CONTS ON via class-0x27 dispatch (`push #0x2701; d0=0x00010000; jsr fcn.12288`);
+  (2) spectrum mode via `fcn.220a0(d0=0x31)`. The arm fires INSIDE the mode-set call
+  (`b05a=1` handling): **`a9a0 = 0xF4` (244) and HOLDS**; `befa.13` cycles, A5 cycles the
+  full buffer, **~58 sweeps per 50M cycles run continuously**, and the firmware **draws the
+  trace** (~1700 lines/sweep incl. 401-segment polylines, X∈[0,400]).
+- **NEW HW-CONTRACT DISCOVERY — the CPU-POLLED sweep path:** in spectrum mode the firmware
+  fills the trace buffer NOT via IRQ6/f200 but by **polling the indirect-ADC result `0x9F`**
+  (0xFFF75C/75E bus) from tight loops at **ROM `0x5f880–0x5f910`** (neg-peak `0x5f8b8`,
+  pos-peak `0x5f886`, sample `0x5f8e4`; variant selected by `94d8`), `a9a2` samples per
+  point, transform **`(adc + 0x200) << 2`** (signed-12-bit video, 0V→0 / 2V→0xFFC display
+  units). Our constant `latchedADC` produced the flat-`0xC00` trace; modeled now via the
+  `analogBus.videoSample` hook (machine wires the SweepEngine through it, PC-region gated,
+  point index paced by `a9a2`; `SweepEngine.ADCAt` uses per-point DETERMINISTIC grass so the
+  firmware's draw-erase polyline cycle cancels cleanly). `driveSweepCycle` stands down while
+  the polled path owns the sweep (`polledReads` counter) — double-writing mixed units.
+- **Sweep-time set path** (the other natural arm trigger): slot `fcn.5d4` = `0x9568`
+  (clamps 20 ms–100 s) → `0x9636 bsr fcn.8f04`.
+- **Emulator surface:** `Machine.EnterContinuousSpectrum()` + the GUI's post-boot one-shot
+  (`spectrumEnterCycles`), locked by `TestSpectrumModeDiag` (b0ec==0x31, CONTS set, a9a0
+  armed, buffer ≥350/401 nonzero). Screen effects verified: detector annunciator PEAK→NEG,
+  SWP 58.0→58.6 ms recompute, graph SCLR on mode entry.
+- **Remaining polish (not gates):** the trace draws INCREMENTALLY (sweeping-pen style), so a
+  static snapshot catches a partial phase — live-GUI persistence integrates it; a
+  phase-locked render or draw-accumulation view is the follow-up for stills. The IRQ6-path
+  units (raw 9-bit) vs polled-path units (<<3) coexist; only one path runs per mode now.
+
 ## READ FIRST (canonical, already committed)
 
 - [docs/TRACE_DISPLAY_PATH.md](TRACE_DISPLAY_PATH.md) — esp. "WHY a9a0 SETTLES -1" + the 2026-06-05 CORRECTION

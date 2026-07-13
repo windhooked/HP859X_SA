@@ -126,6 +126,14 @@ type Machine struct {
 	// driveSweepCycle and docs/TRACE_DISPLAY_PATH.md "TWO-IRQ SWEEP MODEL".
 	SweepDrive bool
 	sweepAccum int // cycle accumulator that paces sweep points (see driveSweepCycle)
+	// polledReads counts CPU-polled sweep samples served through the indirect-ADC
+	// video hook (ROM 0x5f88x loops — see New8593A's SetVideoSample closure);
+	// lastPolledReads is driveSweepCycle's previous observation: when the counter
+	// advanced since the last chunk, the polled path owns the sweep and the IRQ1/
+	// IRQ6 injection stands down (both paths writing the trace buffer mixes their
+	// units and corrupts the trace).
+	polledReads     int
+	lastPolledReads int
 	// sweepHold counts down the driveSweepCycle chunks remaining in the "firmware
 	// is sweeping" hold. Each sweep-wait poll (MMIO.ConsumeSweepRegionPoll) refreshes
 	// it to sweepHoldChunks; while >0 the sweep injection free-runs. It decays to 0
@@ -208,12 +216,43 @@ func New8593A(romImage []byte) (*Machine, error) {
 	// the analog sweep driver gates on (driveSweepCycle).
 	mmio.PCFunc = func() uint32 { return c.Reg(cpu.PC) }
 
-	return &Machine{
+	m := &Machine{
 		Bus: b, CPU: c, ROM: rom, CalNVRAM: calNVRAM, CalRAM: calRAM,
 		ATKeyboard: atKbd, FrontPanel: fp,
 		TestRAM: testRAM, RAM: ram, MMIO: mmio,
 		Timer: Timer{Period: bootChunkCycles * bootIRQPeriod, ServiceCost: bootIRQServiceCost, Enabled: true},
-	}, nil
+	}
+
+	// CPU-polled sweep video (★ 2026-07-13): in spectrum measure mode the
+	// firmware's polled-sweep loops (ROM 0x5f880–0x5f910: neg/pos/sample
+	// detect) read the indirect-ADC result 0x9F once per sample, pacing
+	// a9a2 samples per trace point — expecting the ADC to digitize the video
+	// input. Feed the detector model through that path: the point index
+	// advances every a9a2 reads (read from RAM 0xFFA9A2 live), so the trace
+	// buffer receives the same spectrum the IRQ6 path produces. The counter
+	// also tells driveSweepCycle the polled path owns the sweep (see
+	// polledReads/lastPolledReads) so the IRQ path doesn't double-write.
+	mmio.SetVideoSample(func() (uint16, bool) {
+		if !mmio.SweepActive {
+			return 0, false
+		}
+		if pc := c.Reg(cpu.PC); pc < 0x5f880 || pc > 0x5f910 {
+			return 0, false
+		}
+		spp := int(b.Read(0xFFA9A2, bus.Word))
+		if spp <= 0 {
+			spp = 1
+		}
+		pts := mmio.Sweep.Points
+		if pts <= 0 {
+			pts = 401
+		}
+		p := (m.polledReads / spp) % pts
+		m.polledReads++
+		return mmio.Sweep.ADCAt(p), true
+	})
+
+	return m, nil
 }
 
 // DefaultHPIBAddress is the HP factory-default instrument HP-IB primary address
@@ -399,6 +438,14 @@ func (m *Machine) driveSweepCycle() {
 	if bf34 != 0x40B8 && bf34 != 0x410A {
 		return
 	}
+	// Polled-sweep ownership: while the firmware's CPU-polled sweep loops are
+	// consuming video samples (the indirect-ADC hook counter is advancing),
+	// stand down — injecting IRQ6 as well would double-write the trace buffer
+	// in different units.
+	if m.polledReads != m.lastPolledReads {
+		m.lastPolledReads = m.polledReads
+		return
+	}
 	m.syncSweepTune()
 	// Pace to real sweep time: accumulate elapsed boot-chunk cycles and emit one
 	// sweep point (IRQ1 step + IRQ6 capture) per sweepCyclesPerPoint, so a
@@ -420,6 +467,58 @@ func (m *Machine) driveSweepCycle() {
 	if m.CPU.Reg(cpu.A5) >= bf30 && m.sweepAccum > sweepCyclesPerPoint {
 		m.sweepAccum = sweepCyclesPerPoint
 	}
+}
+
+// EnterContinuousSpectrum puts the booted firmware into continuous-sweep
+// spectrum mode through its own dispatch machinery — the ★ 2026-07-13 Gate-1
+// unlock (docs/MEASURE_MODE_HANDOFF.md):
+//
+//  1. Dispatch CONTS ON: `push.w #0x2701; d0=0x00010000; jsr fcn.12288` —
+//     command class 0x27 → fcn.5f968 → bchg #3,b0a1. This is byte-for-byte
+//     what the SWEEP→CONT softkey emit produces; typed "CONTS" is a designed
+//     no-op (class 0x10 = empty dispatcher slot).
+//  2. Enter SPECTRUM measure mode: fcn.220a0 (jump-slot 0x65e) with d0=0x31 →
+//     fcn.21c96 → b0ec=0x31, b05a=1 (mode-changed). The sweep-arm fcn.8f04
+//     requires CONTS AND (b068==0 OR b0ec==0x31 OR b0e6>=1); b068 is a
+//     per-band ROM constant (nonzero in band 0), so spectrum mode is what
+//     makes the arm succeed — a9a0 arms and continuous sweeps run.
+//
+// Call after BootToOperating*; returns false if either dispatch fails to
+// return. Uses a sentinel-return direct call with IRQ5 tick pumping (the
+// firmware's delay helpers busy-wait on the tick counter 0xbf12).
+func (m *Machine) EnterContinuousSpectrum() bool {
+	const sentinel = 0x000FFFFC
+	call := func(entry, d0 uint32, arg uint32, hasArg bool) bool {
+		sp := m.CPU.Reg(cpu.A7) - 64
+		if hasArg {
+			sp -= 2
+			m.Bus.Write(sp, bus.Word, arg)
+		}
+		sp -= 4
+		m.Bus.Write(sp, bus.Long, sentinel)
+		m.CPU.SetReg(cpu.A7, sp)
+		m.CPU.SetReg(cpu.D0, d0)
+		m.CPU.SetReg(cpu.D1, 0)
+		m.CPU.SetReg(cpu.PC, entry)
+		for i := 0; i < 600; i++ {
+			if _, hit := m.CPU.RunUntil(20_000, sentinel); hit {
+				return true
+			}
+			m.CPU.SetIRQ(5)
+			m.CPU.Run(400)
+			m.CPU.SetIRQ(0)
+		}
+		return false
+	}
+	if !call(0x00012288, 0x00010000, 0x2701, true) { // CONTS ON, class 0x27
+		return false
+	}
+	if !call(0x000220a0, 0x31, 0, false) { // spectrum measure mode
+		return false
+	}
+	// Re-enter the operating loop cleanly.
+	m.CPU.SetReg(cpu.PC, OperatingTickEntry)
+	return true
 }
 
 // syncSweepTune feeds the firmware's real YTO coil DACs (direct ports

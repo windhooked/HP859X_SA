@@ -210,6 +210,38 @@ func powerSumDBm(a, b float64) float64 {
 // Reset rewinds the sweep position (retrace).
 func (s *SweepEngine) Reset() { s.pos = 0 }
 
+// ADCAt returns the video-ADC count at sweep point p WITHOUT advancing the
+// sweep position — for the CPU-polled sweep path (the firmware's 0x5f88x
+// loops read the indirect-ADC result 0x9F per sample; the caller paces the
+// point index from its samples-per-point state).
+//
+// The grass here is DETERMINISTIC PER POINT (a hash of p), NOT freshly random
+// per sweep: the firmware erases the previous trace by re-drawing its polyline
+// from the re-read buffer, so per-sweep-random grass makes every erase miss
+// (values changed) and vertical residue accumulates across sweeps into a wall
+// of bars. Stable per-point grass keeps draw and erase identical → a clean,
+// stable trace (the real instrument's erase uses its saved display copy; until
+// that copy path is modeled, stable grass is the faithful-looking equivalent).
+func (s *SweepEngine) ADCAt(p int) uint16 {
+	pts := s.Points
+	if pts <= 0 {
+		pts = 401
+	}
+	p = p % pts
+	sig := s.bucketPeakDBm(p)
+	if s.NoiseAmpDB != 0 {
+		// xorshift-style hash of the point index → [0,1) — stable across sweeps.
+		h := uint32(p)*2654435761 + 0x8593
+		h ^= h >> 13
+		h *= 0x5bd1e995
+		h ^= h >> 15
+		frac := float64(h&0xFFFF) / 65536
+		grass := s.NoiseFloorDBm + frac*s.NoiseAmpDB
+		return s.levelToADC(powerSumDBm(sig, grass))
+	}
+	return s.levelToADC(sig)
+}
+
 // LevelAt returns the modelled input level (dBm) at sweep point p — for tests
 // and trace-buffer rendering without mutating sweep position.
 func (s *SweepEngine) LevelAt(p int) float64 { return s.bucketPeakDBm(p) }

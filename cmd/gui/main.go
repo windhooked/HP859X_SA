@@ -7,7 +7,7 @@
 //     injected into the MC68230 PIT receiver (0xEF8002/0xEF8000), triggering
 //     IRQ4. The firmware decodes them and dispatches:
 //     - Letters/digits/punctuation: typed text (screen titles, HP-IB commands,
-//       DLP programs).
+//     DLP programs).
 //     - F1–F6: softkeys 1–6 of the current menu.
 //     - F7: prefix mode; F8: remote-commands mode.
 //     - F9: MKR menu; F10: SPAN menu; F11: AMPLITUDE menu; F12: title recall.
@@ -22,7 +22,7 @@
 //     device.FrontPanelKeys and the shortcut works automatically.
 //     Current shortcuts: see fpBindings below.
 //
-//	DYLD_FALLBACK_LIBRARY_PATH=/usr/local/lib go run ./cmd/gui/
+//     DYLD_FALLBACK_LIBRARY_PATH=/usr/local/lib go run ./cmd/gui/
 package main
 
 import (
@@ -192,7 +192,15 @@ type game struct {
 	// immediately (as on the real instrument) instead of waiting for the firmware
 	// to leave sweep mode. Refreshed by every key press; see Update.
 	liveHold int
+	// spectrumEntered latches the one-shot EnterContinuousSpectrum call after
+	// boot — the ★ 2026-07-13 Gate-1 unlock (CONTS + spectrum measure mode), so
+	// the emulator powers up into continuous sweep like the real instrument.
+	spectrumEntered bool
 }
+
+// spectrumEnterCycles is when the post-boot EnterContinuousSpectrum one-shot
+// fires — past the full faithful boot (operating loop + boot measurement).
+const spectrumEnterCycles = 160_000_000
 
 // renderDisplay returns the current display image: the register-derived scanout,
 // either coloured by drawing command (with a legend) or plain amber.
@@ -216,6 +224,18 @@ func (g *game) Update() error {
 			g.cycles += irqServiceCost
 		}
 		g.m.DriveOneSweepChunk()
+	}
+
+	// One-shot after boot: enter continuous-sweep spectrum mode through the
+	// firmware's own dispatch (CONTS class-0x27 + measure-mode 0x31) — the
+	// real instrument's power-up default. See Machine.EnterContinuousSpectrum.
+	if !g.spectrumEntered && g.cycles >= spectrumEnterCycles {
+		g.spectrumEntered = true
+		if g.m.EnterContinuousSpectrum() {
+			g.lastMsg = "continuous spectrum entered (CONTS + mode 0x31)"
+		} else {
+			g.lastMsg = "EnterContinuousSpectrum failed"
+		}
 	}
 
 	// ── Host-side screen save (Ctrl+S) ──────────────────────────────────────

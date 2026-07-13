@@ -103,6 +103,13 @@ type analogBus struct {
 	convState     convPhase // idle → converting → done → (result read) → idle
 	convReadCount int       // sel=0x9A status reads since entering the current phase
 	latchedADC    int16     // ADC sample taken at trigger; returned on 0x9F/0x9D
+
+	// videoSample, when set, supplies the detector video sample for the
+	// CPU-polled sweep path: a 0x9F result read returns (sample*2 - 0x200)
+	// (the signed-12-bit video mapping) whenever the hook reports ok — i.e.
+	// a sweep is active and the PC is inside the firmware's polled-sweep
+	// loops (ROM 0x5f88x). Wired by machine.New8593A via SetVideoSample.
+	videoSample func() (uint16, bool)
 }
 
 // convPhase is the U47 ADC conversion lifecycle.
@@ -276,6 +283,18 @@ func (a *analogBus) readData() uint16 {
 		a.convReadCount = 0
 		if a.sel&0xFF == abSelADCHi {
 			return 0x0000
+		}
+		// CPU-polled sweep path (★ 2026-07-13): during an active sweep the
+		// firmware's polled sweep loops (ROM 0x5f88x, pos/neg/sample detect)
+		// read 0x9F per sample expecting the mux to be on the VIDEO channel —
+		// the transform is (result + 0x200) << 2, i.e. a signed 12-bit sample
+		// in [-0x200, 0x1FF]. When the videoSample hook is armed (sweep active
+		// + PC in the polled-sweep region — see machine.New8593A), return the
+		// detector sample mapped into that range instead of the cal-path latch.
+		if a.videoSample != nil {
+			if v, ok := a.videoSample(); ok {
+				return uint16(int32(v)*2-0x200) & 0xFFFF
+			}
 		}
 		return uint16(a.latchedADC) & 0x1FFF
 	default:

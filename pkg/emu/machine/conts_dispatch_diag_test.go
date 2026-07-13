@@ -36,6 +36,13 @@ func TestCONTSDispatchDiag(t *testing.T) {
 	t.Logf("pre : b0a1=%#02x (CONTS bit3=%d)  a9a0=%#04x  paints=%d",
 		rdB(0xFFB0A1), (rdB(0xFFB0A1)>>3)&1, rdW(0xFFA9A0), m.MMIO.Display.Paints)
 
+	// The CONTS handler's restart-path preconditions (fcn.5f968 bails):
+	//   b068.l|b06c.l must be 0; b0a2.l (sweep time µs) ≥ 0x4e20 (20 ms);
+	//   then fcn.5d4→0x9568 (set sweep time) → 0x9636 bsr fcn.8f04 (arm).
+	rdL := func(a uint32) uint32 { return m.Bus.Read(a, bus.Long) }
+	t.Logf("pre-cond: b068=%#x b06c=%#x b0a2=%d(µs) b1e4=%#x",
+		rdL(0xFFB068), rdL(0xFFB06C), rdL(0xFFB0A2), rdW(0xFFB1E4))
+
 	// Build the minimal fcn.12288 call frame on the live stack:
 	//   sp-2: arg word 0x2701 (class 0x27, low byte arbitrary)
 	//   sp-6: return address = sentinel (RunUntil stops on PC fetch)
@@ -49,9 +56,53 @@ func TestCONTSDispatchDiag(t *testing.T) {
 	m.CPU.SetReg(cpu.D0, 0x00010000) // high word bit0 = 1 → CONTS ON
 	m.CPU.SetReg(cpu.D1, 0)
 	m.CPU.SetReg(cpu.PC, 0x00012288)
+
 	if _, hit := m.CPU.RunUntil(2_000_000, sentinel); !hit {
 		t.Fatalf("fcn.12288 did not return to sentinel (PC=%#06x)", m.CPU.Reg(cpu.PC))
 	}
+	// Known (checkpoint-traced): with b068.l != 0 the CONTS handler bails right
+	// after the bchg — the sweep-time recompute (fcn.5d4→0x9568→0x9636→fcn.8f04)
+	// is skipped, so CONTS toggles but nothing arms. The natural arm lever is
+	// the set-sweep-time entry itself (slot fcn.5d4 = jmp 0x9568), which every
+	// freq/span/sweep-time change funnels through. Invoke it with the current
+	// sweep time (b0a2) and checkpoint the arm.
+	callFn := func(entry uint32, d0 uint32) {
+		sp := m.CPU.Reg(cpu.A7) - 4
+		m.Bus.Write(sp, bus.Long, sentinel)
+		m.CPU.SetReg(cpu.A7, sp)
+		m.CPU.SetReg(cpu.D0, d0)
+		m.CPU.SetReg(cpu.PC, entry)
+	}
+	// runToWithTicks runs toward a target PC while pumping IRQ5 timer ticks —
+	// the firmware's helpers busy-wait on the tick counter 0xbf12 (see the A7
+	// map note), so a bare RunUntil stalls in the delay loops.
+	runToWithTicks := func(target uint32, chunks int) bool {
+		for i := 0; i < chunks; i++ {
+			if _, hit := m.CPU.RunUntil(20_000, target); hit {
+				return true
+			}
+			m.CPU.SetIRQ(5)
+			m.CPU.Run(400)
+			m.CPU.SetIRQ(0)
+		}
+		return false
+	}
+	callFn(0x9568, rdL(0xFFB0A2)) // set sweep time = current value
+	for _, cp := range []struct {
+		pc   uint32
+		what string
+	}{
+		{0x9636, "0x9568 → fcn.8f04 arm call"},
+		{0x90c8, "fcn.8f04 ARM path"},
+		{sentinel, "0x9568 returned"},
+	} {
+		if !runToWithTicks(cp.pc, 400) {
+			t.Logf("checkpoint NOT reached: %#06x %s (PC=%#06x)", cp.pc, cp.what, m.CPU.Reg(cpu.PC))
+			break
+		}
+		t.Logf("checkpoint hit: %#06x %s", cp.pc, cp.what)
+	}
+	t.Logf("after set-sweep-time: a9a0=%#04x  bf34=%#x", rdW(0xFFA9A0), rdL(0xFFBF34))
 
 	conts := (rdB(0xFFB0A1) >> 3) & 1
 	t.Logf("post: b0a1=%#02x (CONTS bit3=%d)  a9a0=%#04x", rdB(0xFFB0A1), conts, rdW(0xFFA9A0))

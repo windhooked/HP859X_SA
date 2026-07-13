@@ -325,6 +325,11 @@ func (m *HP8593AMMIO) A7TimebaseDAC() uint8 { return m.a7bus.TimebaseDAC() }
 // A7SettleStrobes returns the count of A7 reg-2 settle strobes (0xE2) issued.
 func (m *HP8593AMMIO) A7SettleStrobes() int { return m.a7bus.SettleStrobes() }
 
+// SetVideoSample arms the CPU-polled sweep video path on the indirect ADC:
+// when the hook returns ok, a 0x9F result read returns the detector sample
+// mapped to the signed-12-bit video range (see analogBus.videoSample).
+func (m *HP8593AMMIO) SetVideoSample(f func() (uint16, bool)) { m.abus.videoSample = f }
+
 // sweepDetector returns the synthesized detected video level (the ADC reading)
 // for sweep position pt: a low noise floor plus a single CAL-like peak. Values
 // are in the firmware's video-ADC range (≈0..0x1FF, 0 V→bottom graticule, +2 V
