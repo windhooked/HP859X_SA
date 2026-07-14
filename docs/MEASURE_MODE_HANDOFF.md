@@ -181,6 +181,17 @@ Full decode (softkey-dispatch RE agent + verified):
   phase-locked render or draw-accumulation view is the follow-up for stills. The IRQ6-path
   units (raw 9-bit) vs polled-path units (<<3) coexist; only one path runs per mode now.
 
+**SHARPENED (2026-07-14, persistence-composite render):** the drawn trace polyline sits at
+**Y=0 regardless of the capture values** — the draw reads a **DISPLAY trace array that stays
+zeroed**, not the capture buffer at `0x2FD508` (which holds real spectrum data). The next
+link is the **capture→display processing/copy step** (the `fcn.171f6` measurement-processing
+chain: amplitude-correct + copy into the display trace the `__GTTDRW`-era draw consumes).
+Instrumentation: `TestSpectrumModeDiag`'s composite render (persistence union over ~3
+sweeps) logs the graph-interior pixel delta — promote to an assertion (≥400) once the
+processing step runs. Attack: watchpoint the display-trace array's writer (find it by
+tracing what the Y-compute in the draw loop READS), then find why the processing never
+runs (a befa/b1e4 handshake, or another mode/couple flag).
+
 ## READ FIRST (canonical, already committed)
 
 - [docs/TRACE_DISPLAY_PATH.md](TRACE_DISPLAY_PATH.md) — esp. "WHY a9a0 SETTLES -1" + the 2026-06-05 CORRECTION

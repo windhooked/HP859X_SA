@@ -1,6 +1,7 @@
 package machine_test
 
 import (
+	"image"
 	"image/png"
 	"os"
 	"testing"
@@ -198,11 +199,15 @@ func TestSpectrumModeDiag(t *testing.T) {
 		t.Errorf("trace buffer nonzero = %d/401 — polled video path not feeding", nz)
 	}
 
-	// Render just after a trace-draw burst: run small chunks until the Lines
-	// counter jumps by a trace's worth (≥300) inside one chunk, then render the
-	// LIVE frame — catching the drawn (not yet erased) phase of the cycle.
-	burst, prevLines := 0, d.Lines
-	for i := 0; i < 40_000; i++ {
+	// PERSISTENCE-COMPOSITE render: the trace draws incrementally (sweeping-pen
+	// style, erased ahead of the pen), so any single frame holds only fragments
+	// — exactly what a CRT integrates with phosphor persistence. Composite the
+	// lit pixels of live frames across ~3 sweeps: the union shows the full
+	// trace the firmware painted, over the last frame as the base.
+	m.MMIO.Display.Chip.SetRenderLive(true)
+	var composite *image.RGBA
+	litEver := map[int]struct{}{}
+	for i := 0; i < 3000; i++ { // ~6M cycles ≈ 3+ sweeps
 		m.CPU.Run(2000)
 		if i%5 == 0 {
 			m.CPU.SetIRQ(5)
@@ -210,20 +215,56 @@ func TestSpectrumModeDiag(t *testing.T) {
 			m.CPU.SetIRQ(0)
 		}
 		m.DriveOneSweepChunk()
-		delta := d.Lines - prevLines
-		prevLines = d.Lines
-		if delta > 0 {
-			burst += delta
-		} else if burst >= 401 {
-			break // a full trace polyline just finished drawing — render now
-		} else {
-			burst = 0
+		if i%20 != 0 {
+			continue
+		}
+		fr := m.MMIO.Display.RenderFrame()
+		if composite == nil {
+			composite = image.NewRGBA(fr.Bounds())
+		}
+		b := fr.Bounds()
+		for y := b.Min.Y; y < b.Max.Y; y++ {
+			for x := b.Min.X; x < b.Max.X; x++ {
+				r, g, _, _ := fr.At(x, y).RGBA()
+				if r>>8 > 0x40 || g>>8 > 0x40 {
+					composite.Set(x, y, fr.At(x, y))
+					litEver[y*1024+x] = struct{}{}
+				}
+			}
 		}
 	}
-	t.Logf("render point: burst=%d lines", burst)
-	m.MMIO.Display.Chip.SetRenderLive(true)
+	// Trace evidence: lit-ever pixels in the graph interior vs a single frame.
+	single := m.MMIO.Display.RenderFrame()
+	litSingle := 0
+	for k := range litEver {
+		x, y := k%1024, k/1024
+		if x >= 8 && x <= 400 && y >= 16 && y <= 200 {
+			r, g, _, _ := single.At(x, y).RGBA()
+			if r>>8 > 0x40 || g>>8 > 0x40 {
+				litSingle++
+			}
+		}
+	}
+	litComposite := 0
+	for k := range litEver {
+		x, y := k%1024, k/1024
+		if x >= 8 && x <= 400 && y >= 16 && y <= 200 {
+			litComposite++
+		}
+	}
+	t.Logf("graph-interior lit pixels: composite=%d single-frame=%d (delta=%d = persistence-only trace pixels)",
+		litComposite, litSingle, litComposite-litSingle)
+	// KNOWN GAP (2026-07-14): the trace polyline draws at Y=0 regardless of the
+	// capture values — the draw reads a DISPLAY trace array that stays zeroed;
+	// the capture→display processing/copy step (fcn.171f6 chain) is the next
+	// link (see MEASURE_MODE_HANDOFF.md). When it runs, the composite delta
+	// should jump to ≥400 (one pixel per trace column) — promote this log to an
+	// assertion then.
+	if litComposite-litSingle >= 400 {
+		t.Logf("★★★ visible trace painted (delta=%d)", litComposite-litSingle)
+	}
 	if f, err := os.Create("../../../screens/spectrum_mode.png"); err == nil {
-		png.Encode(f, m.MMIO.Display.RenderFrame())
+		png.Encode(f, composite)
 		f.Close()
 	}
 }
