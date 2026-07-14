@@ -136,6 +136,13 @@ Full decode (softkey-dispatch RE agent + verified):
    corrected [FRONTPANEL_UC_SCOPE.md](FRONTPANEL_UC_SCOPE.md); not the PPI `0xF000` (init-only);
    not the PIT beyond the AT-keyboard regs). Attack: walk `fcn.11750`'s ~14 callers and the
    ring-producer sites back to their hardware reads.
+   **→ RESOLVED 2026-07-14** (both walks executed): all 135 `fcn.11750` callers pass
+   constants/RAM (parser + handlers — no hardware); the ONLY operator-input ports in the
+   firmware are HP-IB (`F140/F160`) and the **`EF8000/EF8002` keyboard serial channel**,
+   both IRQ4-muxed (`b05f.0` route) into the raw ring `0xbc12`. **The front panel speaks
+   AT Set-2 on the same line** — instrument keys are the special scan-code block
+   `0x69–0x75` + IDs `0x8d00–0x9c00` decoded in `fcn.57278`. There is NO separate
+   key/RPG port. Next: map the instrument scan codes (see FRONTPANEL_UC_SCOPE ★★).
 
 ### ★★★★ 2026-07-13 — GATE 1 RESOLVED: the sweep-restart trigger found; continuous sweeps run; the firmware DRAWS the trace
 
