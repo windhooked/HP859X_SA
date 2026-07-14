@@ -190,14 +190,46 @@ Full decode (softkey-dispatch RE agent + verified):
 
 **SHARPENED (2026-07-14, persistence-composite render):** the drawn trace polyline sits at
 **Y=0 regardless of the capture values** — the draw reads a **DISPLAY trace array that stays
-zeroed**, not the capture buffer at `0x2FD508` (which holds real spectrum data). The next
-link is the **capture→display processing/copy step** (the `fcn.171f6` measurement-processing
-chain: amplitude-correct + copy into the display trace the `__GTTDRW`-era draw consumes).
-Instrumentation: `TestSpectrumModeDiag`'s composite render (persistence union over ~3
-sweeps) logs the graph-interior pixel delta — promote to an assertion (≥400) once the
-processing step runs. Attack: watchpoint the display-trace array's writer (find it by
-tracing what the Y-compute in the draw loop READS), then find why the processing never
-runs (a befa/b1e4 handshake, or another mode/couple flag).
+zeroed**, not the capture buffer at `0x2FD508` (which holds real spectrum data).
+
+### ★★★★★ 2026-07-14 — THE TRACE PIPELINE IS FULLY DECODED AND PROVEN COMPLETE; residual = the amplitude auto-scale
+
+The whole capture→display→draw chain is mapped and **executes with real data** (static agent
++ live watchpoints, cross-verified — the agent's `b0e6≥1` root was DISPROVED live: `b0e6=−15`,
+so nothing early-exits):
+
+1. **Two buffers (the crux):** CAPTURE buffer = `[0x9552]` = **`0x2FD508`** (401 words, 401/401
+   nonzero, real spectrum). DISPLAY trace arrays = `[0x9546]`/`[0x954a]`/… (base `[0x99f4]`,
+   in DLPRAM `0xFC0002`, 403 words each) — **separate**, and **0/403 nonzero** = the flat trace.
+2. **Draw:** `fcn.c7ac` (+ helper `fcn.c992` @`0xc996` `move.w (a1)+,d6; muls d1; add d2; swap`,
+   and the APLL emitter `fcn.ca5a` @`0xca6e`/`0xca84`) reads Y from the DISPLAY array and emits a
+   401-pt APLL polyline (`0x9841`) to the HD63484 **data port `0xFFF5FE`** (AR=0; `0xFFF5FC` is
+   just the AR selector — commands ride the data port).
+3. **Processor `fcn.cfbe`** (slot `0x568`) DOES run: `0xd364 move.w (a3)+,d6` reads the capture
+   buffer (802×), scales, and `0xd446/0xd448` stores into the display array (3208 writes) — **but
+   stores 0**. The scale at `0xd364–0xd374` is `((capture − d3) × b1c2) << b1c5`, +round, >>16.
+4. **ROOT (live-pinned):** **`b1c5 = 0x7F = 127`** is the left-shift (`0xd368 move.b 0xb1c5,d0;
+   0xd370 lsl.l d0,d6`) — shifting a 32-bit value left by 127 (mod 64 = 63) **zeroes every
+   point**. `b1c2/b1c5 = 0x7FFF/0x7F` is the **stale power-up default** of the longword at
+   `0xB1C2` (`move.l d0,0xb1c2` sets both). The amplitude-scale setup **`fcn.80a0`** (slot
+   `0x1af8`; the only writer of `0xB1C2` @`0x860c/0x8620/0x863a`) **never runs** in the forced
+   continuous-spectrum state (0 writes; `b20a=0` confirms), and even when invoked directly it
+   branches around the scale computation because the ref-level/log-scale inputs (`a582` ref,
+   `b204` 3rd-conv DAC, dB/div, log mode) aren't established.
+5. **PIPELINE PROVEN COMPLETE** (`TestTraceVisibleDiag`): forcing a sane shift **`b1c5:=0`** (a
+   DIAGNOSTIC, not shipped) → the display array fills **401/403 nonzero** and the trace paints a
+   real (amplitude-compressed) spectrum — `screens/trace_visible.png`. So the ENTIRE trace path
+   works; the only residual is the amplitude auto-scale factor.
+6. **`fcn.171f6` is NOT the copy** (per the agent, verified): it's the per-step sweep/LO hardware
+   primitive (DAC writes, ramp spin-wait). **`__GTTDRW`** (`0x65986`) is a DLP FFT-stop tweak, not
+   the vector draw — the polyline is the **C path** `fcn.cfbe→fcn.c7ac`, not DLP.
+
+**RESIDUAL (well-characterized, not a control-flow gate):** the amplitude auto-scale `fcn.80a0`
+must compute `b1c2`(mantissa)/`b1c5`(shift) from the ref-level/log-scale/dB-div state. That state
+isn't established by the synthetic mode-entry — the **amplitude analogue of the DAC→Hz residual**
+(a calibration/state gap). Closing it means establishing the ref-level+log-scale setup (a deep
+float-lib sub-chain) OR triggering `fcn.80a0` with valid inputs. **Do NOT ship a forced `b1c5`**
+(half-mock). Instrumentation lives in `TestTraceVisibleDiag`.
 
 ## READ FIRST (canonical, already committed)
 
