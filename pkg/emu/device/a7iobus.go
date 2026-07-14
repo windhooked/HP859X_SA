@@ -47,21 +47,23 @@ var a7LogOn = os.Getenv("A7_LOG") != ""
 // programs-then-reads-back individual A7 control points.
 //
 // REGISTER SEMANTICS (★ 2026-07-12 map, docs/A7_ANALOG_IO_BUS.md — disasm-derived):
-//   reg 0  W  YTO serial DAC chain — fcn.223b6 writes 8 nibbles (sub-index in
-//             data bits [7:4], nibble in [3:0]): groups 2+3+3 = an 8-bit value
-//             then two 12-bit values, LS-nibble first. Assembled below.
-//   reg 2  W  multiplexed control-latch port: pointer byte (group<<6)|0x30|
-//             (sub<<1) then 16-bit data as two byte writes; 0xE2 = settle
-//             strobe (fcn.227f2, precedes the reg-3 poll); 0xE0|(2<<n) =
-//             gain/measure-path select (fcn.2287e).
-//   reg 3  R  status + 16-bit readback: settle gate (x&0xC0)==0x80; two
-//             consecutive reads = hi/lo measurement bytes.
-//   reg 4  W  latch, cleared to 0 at band-config end only.
-//   reg 5  W  10 MHz TIMEBASE reference DAC (8-bit; cal NVRAM 0x2FC037).
-//   reg 6  W  analog control/mode latch (band/lock-strobe/span-mode bits).
-//   reg 7  R  status/ID: bit1 = YTO lock-error, bit3 = hardware variant
-//             (b213.4: ÷3 vs ÷40 chain split). Register-file zero default =
-//             no lock error, variant B — the values the working boot sees.
+//
+//	reg 0  W  YTO serial DAC chain — fcn.223b6 writes 8 nibbles (sub-index in
+//	          data bits [7:4], nibble in [3:0]): groups 2+3+3 = an 8-bit value
+//	          then two 12-bit values, LS-nibble first. Assembled below.
+//	reg 2  W  multiplexed control-latch port: pointer byte (group<<6)|0x30|
+//	          (sub<<1) then 16-bit data as two byte writes; 0xE2 = settle
+//	          strobe (fcn.227f2, precedes the reg-3 poll); 0xE0|(2<<n) =
+//	          gain/measure-path select (fcn.2287e).
+//	reg 3  R  status + 16-bit readback: settle gate (x&0xC0)==0x80; two
+//	          consecutive reads = hi/lo measurement bytes.
+//	reg 4  W  latch, cleared to 0 at band-config end only.
+//	reg 5  W  10 MHz TIMEBASE reference DAC (8-bit; cal NVRAM 0x2FC037).
+//	reg 6  W  analog control/mode latch (band/lock-strobe/span-mode bits).
+//	reg 7  R  status/ID: bit1 = YTO lock-error, bit3 = hardware variant
+//	          (b213.4: ÷3 vs ÷40 chain split). Register-file zero default =
+//	          no lock error, variant B — the values the working boot sees.
+//
 // Reg 3 stays FORCE-SETTLED (conservative — the always-settled gate is what
 // un-froze the post-boot measurement loop; gating it on the 0xE2 strobe is a
 // future fidelity step once the sweep-event IRQ handshake is modelled).
