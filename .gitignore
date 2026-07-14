@@ -6,3 +6,10 @@ tmp/
 # bin/ (see Makefile); they are rebuilt on demand and never committed.
 /bin/
 /frame.png
+
+# Stray root-level tool binaries from `go build ./cmd/<x>` run in the repo
+# root (the CLAUDE.md footgun — use `make tools` / `go build -o bin/` instead).
+/annunchunt
+/caldump
+/f122check
+/gui
