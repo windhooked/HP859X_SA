@@ -1,5 +1,36 @@
 # Measure-mode / trace-draw blocker — session handoff (2026-06-05)
 
+> ## ★★★★★★ RESOLVED / CORRECTED (2026-07-15) — THE TRACE DRAWS IN THE NATURAL BOOT
+>
+> **The spectrum trace paints correctly with no forced state.** A sweep-driven
+> boot (`BootToOperatingWithSweep`) already draws a real, amplitude-correct
+> spectrum: the firmware's amplitude-scale setup `fcn.80a0` runs during boot and
+> computes a valid scale (`b1c2=0x5cc0`, `b1c5=0x6` — NOT the sentinel), the
+> measurement processor `fcn.cfbe` fills the display trace array `[0x9546]`
+> (401/403 nonzero) from the swept capture buffer, and `fcn.c7ac`/`c992` draws
+> the 401-point polyline, continuously redrawn (~1970 lines/16M cycles). Locked
+> by `TestNaturalTracePaints`; rendered to `screens/trace_natural.png` (noise
+> floor + amplitude-correct CAL peaks).
+>
+> **What was wrong:** the whole "★★★★★ amplitude residual" analysis below, and
+> the `Machine.EnterContinuousSpectrum` "Gate-1 unlock", were an **artifact of a
+> FORCED state**. `EnterContinuousSpectrum` dispatches CONTS + forces measure-mode
+> `0x31` from the natural power-up state; that mode-change RESETS the amplitude
+> scale to the degenerate sentinel (`0x7FFF/0x7F`) and ZEROES the display array →
+> the flat Y=0 trace I then spent a session characterizing. Decisive A/B: natural
+> boot `b1c2=0x5cc0` → after `EnterContinuousSpectrum` `b1c2=0x7FFF`, array 0/403.
+> The GUI's post-boot `EnterContinuousSpectrum` one-shot (which broke its own
+> trace) is REMOVED; `TestSpectrumModeDiag`/`TestTraceVisibleDiag` (which asserted
+> the forced/broken state) are removed; `EnterContinuousSpectrum` carries a footgun
+> warning and survives only as a CONTS-dispatch demo (`TestCONTSDispatchDiag`).
+>
+> **Still valid RE below:** the trace PIPELINE decode (capture→cfbe→display
+> array→c7ac/c992 draw; the `0xd364` scale `(cap−d3)*b1c2<<b1c5`; the buffers
+> `0x2FD508` capture vs `[0x9546]` display) is correct — it's how the natural
+> trace works. Only the "residual"/"forced-unlock" framing was the artifact.
+> **Lesson (again): re-baseline the NATURAL path before characterizing a
+> "residual" measured through a forced/synthetic entry.**
+
 Single entry point for the next session on the trace-draw blocker. The deep detail
 lives in the docs linked below; this is the bridge so a fresh session doesn't
 re-derive — or re-try the ruled-out angles.

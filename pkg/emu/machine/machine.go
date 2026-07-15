@@ -470,8 +470,19 @@ func (m *Machine) driveSweepCycle() {
 }
 
 // EnterContinuousSpectrum puts the booted firmware into continuous-sweep
-// spectrum mode through its own dispatch machinery — the ★ 2026-07-13 Gate-1
-// unlock (docs/MEASURE_MODE_HANDOFF.md):
+// spectrum mode through its own dispatch machinery.
+//
+// ★★ FOOTGUN — DO NOT USE FOR A WORKING TRACE (verified 2026-07-15). Forcing
+// the mode change from the natural power-up state RESETS the amplitude scale
+// (b1c2/b1c5) to the degenerate sentinel (0x7FFF/0x7F) and ZEROES the display
+// trace array → a FLAT trace. The natural sweep-driven boot
+// (BootToOperatingWithSweep) already draws a real, amplitude-correct spectrum
+// (fcn.80a0 computes the scale during boot; TestNaturalTracePaints). This
+// function remains only as a demonstration of the CONTS class-0x27 dispatch
+// (see TestCONTSDispatchDiag); the "Gate-1 unlock" framing below described a
+// forced-state artifact, not the correct path. See docs/MEASURE_MODE_HANDOFF.md.
+//
+// Mechanics (valid RE):
 //
 //  1. Dispatch CONTS ON: `push.w #0x2701; d0=0x00010000; jsr fcn.12288` —
 //     command class 0x27 → fcn.5f968 → bchg #3,b0a1. This is byte-for-byte

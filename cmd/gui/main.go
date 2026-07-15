@@ -192,15 +192,7 @@ type game struct {
 	// immediately (as on the real instrument) instead of waiting for the firmware
 	// to leave sweep mode. Refreshed by every key press; see Update.
 	liveHold int
-	// spectrumEntered latches the one-shot EnterContinuousSpectrum call after
-	// boot — the ★ 2026-07-13 Gate-1 unlock (CONTS + spectrum measure mode), so
-	// the emulator powers up into continuous sweep like the real instrument.
-	spectrumEntered bool
 }
-
-// spectrumEnterCycles is when the post-boot EnterContinuousSpectrum one-shot
-// fires — past the full faithful boot (operating loop + boot measurement).
-const spectrumEnterCycles = 160_000_000
 
 // renderDisplay returns the current display image: the register-derived scanout,
 // either coloured by drawing command (with a legend) or plain amber.
@@ -225,18 +217,13 @@ func (g *game) Update() error {
 		}
 		g.m.DriveOneSweepChunk()
 	}
-
-	// One-shot after boot: enter continuous-sweep spectrum mode through the
-	// firmware's own dispatch (CONTS class-0x27 + measure-mode 0x31) — the
-	// real instrument's power-up default. See Machine.EnterContinuousSpectrum.
-	if !g.spectrumEntered && g.cycles >= spectrumEnterCycles {
-		g.spectrumEntered = true
-		if g.m.EnterContinuousSpectrum() {
-			g.lastMsg = "continuous spectrum entered (CONTS + mode 0x31)"
-		} else {
-			g.lastMsg = "EnterContinuousSpectrum failed"
-		}
-	}
+	// NOTE (2026-07-15): the post-boot EnterContinuousSpectrum() one-shot was
+	// REMOVED here — it forced CONTS + measure-mode 0x31, which RESETS the
+	// amplitude scale (b1c2/b1c5) to the degenerate sentinel and ZEROES the
+	// display trace array → a flat trace. The natural sweep-driven boot already
+	// draws a real amplitude-correct spectrum (fcn.80a0 computes the scale
+	// naturally; DriveOneSweepChunk feeds the polled-video ADC path). See
+	// docs/MEASURE_MODE_HANDOFF.md — the forced entry was an artifact.
 
 	// ── Host-side screen save (Ctrl+S) ──────────────────────────────────────
 	// Saves the current framebuffer to screens/gui_<timestamp>.png.
