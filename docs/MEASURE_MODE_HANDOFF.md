@@ -225,11 +225,19 @@ so nothing early-exits):
    the vector draw — the polyline is the **C path** `fcn.cfbe→fcn.c7ac`, not DLP.
 
 **RESIDUAL (well-characterized, not a control-flow gate):** the amplitude auto-scale `fcn.80a0`
-must compute `b1c2`(mantissa)/`b1c5`(shift) from the ref-level/log-scale/dB-div state. That state
-isn't established by the synthetic mode-entry — the **amplitude analogue of the DAC→Hz residual**
-(a calibration/state gap). Closing it means establishing the ref-level+log-scale setup (a deep
-float-lib sub-chain) OR triggering `fcn.80a0` with valid inputs. **Do NOT ship a forced `b1c5`**
-(half-mock). Instrumentation lives in `TestTraceVisibleDiag`.
+must compute `b1c2`(mantissa)/`b1c5`(shift) from the ref-level/log-scale/dB-div state.
+
+**SHARPENED (2026-07-15, live path-trace of `fcn.80a0`):** it is NOT merely "never called" —
+when invoked in the continuous-spectrum state it **runs the full scale computation and reaches
+the `0x8620 move.l d0,0xb1c2` write, but writes `0x7FFF007F` — the SATURATED sentinel**
+(`0x7FFF` = a saturated float→int conversion via `fcn.64f0`; `0x7F` exponent = a blown-up scale
+factor). So the scale MATH is fine; its INPUTS are degenerate — the reference-level float, the
+log-scale reference (`fcn.7dde`/`fcn.7d84`), and dB/div aren't established by the synthetic
+mode-entry (`b20a` ref-intermediate = 0). This is the **amplitude analogue of the DAC→Hz
+residual**: a calibration/state gap. Closing it = reverse-engineering + establishing the
+reference-level / log-amplitude setup (a582 ref float, the log cal, dB/div) — a separate
+multi-session effort, NOT a one-flag fix. **Do NOT ship a forced `b1c5`** (half-mock). The
+pipeline proof + instrumentation live in `TestTraceVisibleDiag`.
 
 ## READ FIRST (canonical, already committed)
 
