@@ -85,15 +85,29 @@ Measured, not assumed:
   separately). This is the reliable control path today.
 - **Some key ACTIONS complete:** F12 (title recall) visibly enters "Keyboard
   Entry → Title" mode.
-- **BUT menu-switching does NOT complete** (root-caused, `TestMenuDispatchDiag`):
-  F9/F10/F11 set a key-specific command word `b1e4` (F9→`0x07`, F10→`0x08`,
-  F11→`0x05`) — but each is a **CLASS-0** word (class byte `= b1e4>>8 = 0`). The
-  record processor `fcn.12b10` routes class-0 words to the **data-entry path**
-  (`0x12dd6`), NOT to the class dispatcher `fcn.12288` or the menu-install
-  `fcn.5a918` — which never fires, so the menu (`0x956a`) doesn't change. The
-  event→menu-ACTION binding is the missing link — the **same class as the CONTS
-  softkey-action residual** (docs/MEASURE_MODE_HANDOFF.md: the softkey/menu event
-  produces a command word but not the class-bearing word that triggers the
-  action). This is the residual for full front-panel interactivity.
+- **BUT menu-switching does NOT complete** (fully decoded 2026-07-16, `TestMenuDispatchDiag`
+  + `TestShowMenuDiag`):
+  - F9 → the AT decoder emits the parser command **`KEYEXC 30003;`** (`fcn.56a6a`
+    @0x56a6a → KEY builder `fcn.34746`@0x34760, seed bytes `"KEYEXC"`; softkeys/chars
+    → `"SFPKEY"` via `fcn.3480a`). `KEYEXC`/`SFPKEY` are **direct-C** commands
+    (parser entries `01 80 01 ea` / `01 80 01 7a`; `0x80` = direct-C flag).
+  - The handler writes a key-specific command word to `b1e4` (F9→`0x07`, F10→`0x08`,
+    F11→`0x05`) — each a **CLASS-0** word (class byte `= b1e4>>8 = 0`). The record
+    processor `fcn.12b10`@0x12d7c-80 (`andi.w #0xff00,d6; beq 0x12dd6`) routes class-0
+    words to the **data-entry path** (`0x12dd6`→`0x1344c`), NOT to the class dispatcher
+    `fcn.12288`. **Neither branch calls the menu system.**
+  - The menu-install mechanism is **`fcn.5a918(idx)`**@0x5a918 (state base `0xFF9562`,
+    vtable `0xFF9566 = 0xFF9594+idx*0xE0`, index `0x956a`), reached only via
+    **SHOW_MENU `fcn.5ada4` = trampoline `0xc40`**, driven by the softkey/menu state
+    machine `fcn.51982` (0x5284e/0x528b2) — **orthogonal** to the b1e4 class word.
+    `TestShowMenuDiag` proves it WORKS in isolation (calling `0xc40` changes
+    `0x956a`/`0x9566`) — **but the softkey labels still don't repaint** (the label
+    redraw `fcn.e7a2` is gated on `b071` bit 0, which is clear).
+  - So the missing link is two gated hops with the **same direct-C root as CONTS**:
+    (a) the event→SHOW_MENU binding (`KEYEXC` yields a class-0 word, never `jsr 0xc40`),
+    and (b) the `b071.0` label-redraw gate. Faithfully closing it = fixing the
+    **direct-C command dispatch** (deep RE); forcing SHOW_MENU + the redraw would be a
+    half-mock (the `EnterContinuousSpectrum` lesson). Full trail:
+    [MEASURE_MODE_HANDOFF.md](MEASURE_MODE_HANDOFF.md) §"EVENT→ACTION DISPATCH".
 
 Unmapped E0 codes: 0x6a, 0x6d–0x6f, 0x73 (no HP function).

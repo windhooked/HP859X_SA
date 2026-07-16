@@ -31,6 +31,53 @@
 > **Lesson (again): re-baseline the NATURAL path before characterizing a
 > "residual" measured through a forced/synthetic entry.**
 
+> ## ★★★★★ EVENT→ACTION DISPATCH — the softkey/menu residual, fully decoded (2026-07-16)
+>
+> The convergent interactivity residual (why menu/softkey keys are RECEIVED but
+> their ACTION never completes) is now decoded end-to-end and PC-cited. It is the
+> **same root as the CONTS softkey** and is NOT a menu-system bug — the menu-install
+> mechanism works in isolation. Do **not** force it (that repeats the
+> `EnterContinuousSpectrum` half-mock mistake); the faithful fix is the **direct-C
+> command dispatch**.
+>
+> **The chain (F9 = MKR menu key, verified):**
+> 1. `fcn.57278` (AT decoder) → event `0x7533` → `fcn.56a6a` (@0x56a6a). F-keys
+>    take the `≥0x3a` arm → `jsr 0xcc4` = **KEY builder `fcn.34746`** (@0x34760,
+>    seed bytes spell `"KEYEXC"`) → emits the parser command **`KEYEXC 30003;`**
+>    (30003 = 0x7533). (Softkeys/chars go via `0xcac` = `fcn.3480a`, seed `"SFPKEY"`.)
+> 2. `KEYEXC`/`SFPKEY` are **direct-C commands** — parser-name entries
+>    `KEYEXC`@0x7e1d2 `01 80 01 ea`, `SFPKEY`@0x7ef04 `01 80 01 7a`; the `0x80`
+>    byte is the direct-C flag (same form as `MEASOFF`@0x7d650 `20 00 80 05 67`
+>    and `CONTS`@0x7def0 `00 00 74 10`). This is the dispatch class the trace-draw
+>    handoff already root-caused as broken.
+> 3. The handler writes a **class-0** command word `0x0007` to `b1e4` (writer
+>    `fcn.11750`@0x11798). The fork `fcn.12b10`@0x12d7c-80 splits on the HIGH byte:
+>    `andi.w #0xff00,d6; beq 0x12dd6`. **Class 0 → data-entry path** (`0x12dd6` →
+>    active-function table `0x1344c` index 6) — a dead end. Class ≠ 0 → class
+>    dispatcher `fcn.12288` (@0x12296; case 0x27 = CONTS). **Neither branch calls
+>    the menu system**, so the menu is never installed. (F10→0x08, F11→0x05, all
+>    class-0.) Locked by `TestMenuDispatchDiag`.
+>
+> **The menu-install mechanism (SEPARATE, and it WORKS):** a menu is installed by
+> `fcn.5a918(idx)`@0x5a918 — sets state base `0xFF9562 = *(0xFF957C+idx*4)`, active
+> vtable `0xFF9566 = 0xFF9594+idx*0xE0`, active index `0x956a`. Reached only via
+> **SHOW_MENU `fcn.5ada4` = trampoline `0xc40`** → `fcn.5aa1c` → `fcn.5a918`,
+> driven by the **softkey/menu state machine `fcn.51982`** (live callers
+> 0x5284e/0x528b2: `move.w <idx>,d0; jsr 0xc40; move.w d0,0x956a`). It is
+> **orthogonal to the b1e4 class word** — there is no "menu class" in `fcn.12288`.
+> Proven working in isolation by `TestShowMenuDiag`: calling `0xc40` directly
+> changes `0x956a` (and `0x9566` for idx≥4). **But the on-screen softkey labels
+> still don't repaint** — the label REDRAW (`fcn.e7a2`, gated on `b071` bit 0)
+> doesn't fire, so a direct SHOW_MENU switches the menu in RAM but not on the CRT.
+>
+> **The minimal missing link (two gated hops, same direct-C root):**
+> (a) the event→SHOW_MENU binding — `KEYEXC 30003` produces a bare class-0 word
+> instead of reaching `jsr 0xc40`; and (b) the `b071.0`-gated label redraw.
+> Both trace to the direct-C dispatch not driving the action. Faithfully closing it
+> = fixing the direct-C command path (deep RE), NOT forcing SHOW_MENU + the redraw.
+> Full agent decode + citations: this session's task output; KEYBOARD_MAP.md §"How
+> an event reaches a function" / verification status.
+
 Single entry point for the next session on the trace-draw blocker. The deep detail
 lives in the docs linked below; this is the bridge so a fresh session doesn't
 re-derive — or re-try the ruled-out angles.
