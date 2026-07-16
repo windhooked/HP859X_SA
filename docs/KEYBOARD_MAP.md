@@ -76,7 +76,20 @@ internal HP keycode; the human name (softkey-n / MKR / SPAN / AMPLITUDE) is assi
 downstream by the `KEY <n>` menu dispatch. The event-vs-key-ID choice is gated by
 `bc64` bit 13 / `fcn.56bd6` (raw-keycode / text-entry mode vs instrument-event mode).
 
-**Verified (2026-07-15):** key presses drive the firmware end-to-end — pressing
-F10/F11 changes the command word `b1e4` and triggers heavy redraws; typed commands
-(F8 → `CAL DISP;` → Enter) execute (locked separately). Unmapped E0 codes:
-0x6a, 0x6d–0x6f, 0x73 (no HP function).
+## Verification status (2026-07-15) — RECEIVED, but softkey/menu ACTION is partial
+
+Measured, not assumed:
+- **Reception works.** Every key press reaches the firmware: pressing F9/F10/F11
+  sets the command word `b1e4` and triggers heavy redraws (glyph count jumps).
+- **Typed remote commands fully execute** (F8 → type `CAL DISP;` → Enter — locked
+  separately). This is the reliable control path today.
+- **Some key ACTIONS complete:** F12 (title recall) visibly enters "Keyboard
+  Entry → Title" mode.
+- **BUT menu-switching does NOT complete:** F9/F10/F11 (MKR/SPAN/AMPLITUDE menu
+  keys) set `b1e4` yet the softkey menu on screen does **not** change to that
+  menu. So the event reaches the command word but the menu-change dispatch does
+  not finish — the **same softkey/menu-action completion gap** as the CONTS
+  softkey (docs/MEASURE_MODE_HANDOFF.md: the `KEY <n>` → menu-dispatch binding).
+  This is the residual for full front-panel interactivity.
+
+Unmapped E0 codes: 0x6a, 0x6d–0x6f, 0x73 (no HP function).
