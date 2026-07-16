@@ -85,11 +85,15 @@ Measured, not assumed:
   separately). This is the reliable control path today.
 - **Some key ACTIONS complete:** F12 (title recall) visibly enters "Keyboard
   Entry → Title" mode.
-- **BUT menu-switching does NOT complete:** F9/F10/F11 (MKR/SPAN/AMPLITUDE menu
-  keys) set `b1e4` yet the softkey menu on screen does **not** change to that
-  menu. So the event reaches the command word but the menu-change dispatch does
-  not finish — the **same softkey/menu-action completion gap** as the CONTS
-  softkey (docs/MEASURE_MODE_HANDOFF.md: the `KEY <n>` → menu-dispatch binding).
-  This is the residual for full front-panel interactivity.
+- **BUT menu-switching does NOT complete** (root-caused, `TestMenuDispatchDiag`):
+  F9/F10/F11 set a key-specific command word `b1e4` (F9→`0x07`, F10→`0x08`,
+  F11→`0x05`) — but each is a **CLASS-0** word (class byte `= b1e4>>8 = 0`). The
+  record processor `fcn.12b10` routes class-0 words to the **data-entry path**
+  (`0x12dd6`), NOT to the class dispatcher `fcn.12288` or the menu-install
+  `fcn.5a918` — which never fires, so the menu (`0x956a`) doesn't change. The
+  event→menu-ACTION binding is the missing link — the **same class as the CONTS
+  softkey-action residual** (docs/MEASURE_MODE_HANDOFF.md: the softkey/menu event
+  produces a command word but not the class-bearing word that triggers the
+  action). This is the residual for full front-panel interactivity.
 
 Unmapped E0 codes: 0x6a, 0x6d–0x6f, 0x73 (no HP function).
