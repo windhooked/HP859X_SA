@@ -77,6 +77,32 @@
 > = fixing the direct-C command path (deep RE), NOT forcing SHOW_MENU + the redraw.
 > Full agent decode + citations: this session's task output; KEYBOARD_MAP.md §"How
 > an event reaches a function" / verification status.
+>
+> ### DYNAMIC CONFIRMATION (2026-07-16) — direct-C handlers resolve but never fire
+>
+> The static claim above is now confirmed live, past the >1B-cycle exec trap, with
+> a working positive control. Delivering commands through the PROVEN typed path
+> (`TestSendCONTSDiag` / `TestKeyExcTypedDiag`: F8 → AT scancodes → Enter → drive
+> ~1.2-1.5B cyc), watching the full dispatch chain `parser 0x58c2e → resolve
+> 0x320fe → secTable 0x71D76 → dlpSched 0x349b6 → handler`:
+>
+> | command | type | parser | resolve | action fired? |
+> |---|---|---|---|---|
+> | `CAL DISP;` | DLP-source | ✔ 1220 | ✔ 10411 | **YES** (`calExec`=true) |
+> | `MEASOFF;` | direct-C (0x80) | ✔ 1111 | ✔ 4546 | no (handler 0x3ec9a 0×; PC unverified) |
+> | `KEYEXC 30003;` | direct-C (0x80) | ✔ 1647 | ✔ 4002 | **no** (SHOW_MENU/fcn.5a918 0×, menu 0x956a unchanged) |
+>
+> **Conclusion:** direct-C commands (0x80 flag) reach the parser AND resolve (the
+> command name IS recognized) but their handler action never fires; DLP-source
+> commands (CAL DISP) run end-to-end. This is the handoff's original claim
+> ("direct-C dispatch doesn't invoke the handler PC; DLP-source does") now proven
+> dynamically. Two independent notes: (1) `fcn.12288`/`fcn.12b10` are NOT on the
+> typed path — that fork is the FRONT-PANEL key path only; (2) MEASOFF's assumed
+> handler 0x3ec9a is unverified, so its 0× is not overclaimed — KEYEXC (menu-install
+> 0×, menu unchanged) is the clean negative. **Fix target: the command dispatcher's
+> handling of a resolved record with the 0x80 direct-C flag — where the handler PC
+> should be jsr'd, and why our emulator doesn't take it (emulation gap vs firmware
+> state gate, TBD).**
 
 Single entry point for the next session on the trace-draw blocker. The deep detail
 lives in the docs linked below; this is the bridge so a fresh session doesn't
