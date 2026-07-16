@@ -155,11 +155,19 @@ var atBindings = map[ebiten.Key]device.ATKey{
 	ebiten.KeyF7: device.ATKeyF7, ebiten.KeyF8: device.ATKeyF8,
 	ebiten.KeyF9: device.ATKeyF9, ebiten.KeyF10: device.ATKeyF10,
 	ebiten.KeyF11: device.ATKeyF11, ebiten.KeyF12: device.ATKeyF12,
-	// Navigation / data entry
+	// Navigation / data entry. The arrows ARE the front-panel RPG knob / step
+	// keys (firmware fcn.57278 → active-function adjust). See docs/KEYBOARD_MAP.md.
 	ebiten.KeyArrowUp:    device.ATKeyUp,
 	ebiten.KeyArrowDown:  device.ATKeyDown,
 	ebiten.KeyArrowLeft:  device.ATKeyLeft,
 	ebiten.KeyArrowRight: device.ATKeyRight,
+	// Editor/cursor navigation (title / DLP editor).
+	ebiten.KeyHome:     device.ATKeyHome,
+	ebiten.KeyEnd:      device.ATKeyEnd,
+	ebiten.KeyInsert:   device.ATKeyInsert,
+	ebiten.KeyDelete:   device.ATKeyDelete,
+	ebiten.KeyPageUp:   device.ATKeyPageUp,
+	ebiten.KeyPageDown: device.ATKeyPageDown,
 }
 
 // fpBindings maps Ebiten keys to named front-panel keys (matrix path, IRQ3).

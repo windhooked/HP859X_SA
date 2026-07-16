@@ -8,9 +8,10 @@ import "github.com/windhooked/HP859X_SA/pkg/emu/bus"
 // replaces the zeroed-RAM PIT stub for the two registers the firmware actually uses.
 //
 // Firmware receive contract (reverse-engineered from ROM 0x26DC):
-//   0xEF8002  status: bit 1 = data-ready; == 0xFF means "no data" (firmware also
-//             checks cmpi.b #-1 to catch 0xFF and treats it as empty).
-//   0xEF8000  data:   next scan-code byte (consumed on read).
+//
+//	0xEF8002  status: bit 1 = data-ready; == 0xFF means "no data" (firmware also
+//	          checks cmpi.b #-1 to catch 0xFF and treats it as empty).
+//	0xEF8000  data:   next scan-code byte (consumed on read).
 //
 // The protocol is "byte-inject": we bypass the AT bit-serial clock/data protocol
 // and write bytes directly into the FIFO. The firmware's transport code polls the
@@ -18,8 +19,9 @@ import "github.com/windhooked/HP859X_SA/pkg/emu/bus"
 // it into the HP-IB ring buffer (0xFFBC12 via fcn.42f8).
 //
 // AT scan-code set 2 uses:
-//   make sequence: <byte>  (one byte for most keys; E0 <byte> for extended)
-//   break sequence: F0 <byte>  (or E0 F0 <byte> for extended)
+//
+//	make sequence: <byte>  (one byte for most keys; E0 <byte> for extended)
+//	break sequence: F0 <byte>  (or E0 F0 <byte> for extended)
 //
 // Usage:
 //  1. Call Enqueue(bytes) to push one make or break sequence.
@@ -175,12 +177,22 @@ const (
 	ATKeyF10 // → SPAN menu
 	ATKeyF11 // → AMPLITUDE menu
 	ATKeyF12 // → Screen title recall
-	// Navigation
-	ATKeyUp
-	ATKeyDown
-	ATKeyLeft
-	ATKeyRight
+	// Navigation. The four arrows ARE the front-panel RPG knob / step keys:
+	// firmware fcn.57278 emits events 0x7586–0x7589 that adjust the active
+	// function (Shift/Ctrl/Alt select the step size). See docs/KEYBOARD_MAP.md.
+	ATKeyUp    // knob/step ▲  (E0 0x75 → event 0x7586, key-ID 0x9900)
+	ATKeyDown  // knob/step ▼  (E0 0x72 → event 0x7587, key-ID 0x9b00)
+	ATKeyLeft  // knob CCW     (E0 0x6b → event 0x7588, key-ID 0x9a00)
+	ATKeyRight // knob CW      (E0 0x74 → event 0x7589, key-ID 0x9c00)
 	ATKeyPrintScreen
+	// Editor/cursor navigation (firmware fcn.57278: key-ID only, no instrument
+	// event — used by the title/DLP text editor). E0-prefixed.
+	ATKeyHome     // E0 0x6c → key-ID 0x9200
+	ATKeyEnd      // E0 0x69 → key-ID 0x9600
+	ATKeyInsert   // E0 0x70 → key-ID 0x9100
+	ATKeyDelete   // E0 0x71 → key-ID 0x9500
+	ATKeyPageUp   // E0 0x7d → key-ID 0x9300
+	ATKeyPageDown // E0 0x7a → key-ID 0x9700
 	// Numpad (DATA keys map here)
 	ATKeyNum0
 	ATKeyNum1
@@ -229,9 +241,9 @@ var atSet2 = map[ATKey][]byte{
 	ATKeyGrave:        {0x0E},
 	ATKeyApostrophe:   {0x52},
 	// Function keys
-	ATKeyF1:  {0x05}, ATKeyF2: {0x06}, ATKeyF3: {0x04}, ATKeyF4: {0x0C},
-	ATKeyF5:  {0x03}, ATKeyF6: {0x0B}, ATKeyF7: {0x83}, ATKeyF8: {0x0A},
-	ATKeyF9:  {0x01}, ATKeyF10: {0x09}, ATKeyF11: {0x78}, ATKeyF12: {0x07},
+	ATKeyF1: {0x05}, ATKeyF2: {0x06}, ATKeyF3: {0x04}, ATKeyF4: {0x0C},
+	ATKeyF5: {0x03}, ATKeyF6: {0x0B}, ATKeyF7: {0x83}, ATKeyF8: {0x0A},
+	ATKeyF9: {0x01}, ATKeyF10: {0x09}, ATKeyF11: {0x78}, ATKeyF12: {0x07},
 	// Navigation (extended)
 	ATKeyUp:    {0xE0, 0x75},
 	ATKeyDown:  {0xE0, 0x72},
@@ -239,6 +251,10 @@ var atSet2 = map[ATKey][]byte{
 	ATKeyRight: {0xE0, 0x74},
 	// PrintScreen (extended)
 	ATKeyPrintScreen: {0xE0, 0x7C},
+	// Editor/cursor navigation (extended) — firmware-confirmed fcn.57278.
+	ATKeyHome: {0xE0, 0x6C}, ATKeyEnd: {0xE0, 0x69},
+	ATKeyInsert: {0xE0, 0x70}, ATKeyDelete: {0xE0, 0x71},
+	ATKeyPageUp: {0xE0, 0x7D}, ATKeyPageDown: {0xE0, 0x7A},
 	// Numpad
 	ATKeyNum0: {0x70}, ATKeyNum1: {0x69}, ATKeyNum2: {0x72}, ATKeyNum3: {0x7A},
 	ATKeyNum4: {0x6B}, ATKeyNum5: {0x73}, ATKeyNum6: {0x74}, ATKeyNum7: {0x6C},
