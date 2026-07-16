@@ -61,14 +61,16 @@
   - `TestPOSTSelfTestPasses` **PASS** — asserts `f610==0xFF && f612==0xFF && failCode==0x0000`
     → **POST is fully clean**. `[VERIFIED]` (corrects an audit-agent claim of a residual `0x0080`,
     which was inherited from a stale doc.)
-  - `TestMachineBootScreen`, `TestTraceSolid` → **SKIP** (golden/trace-paint deferred) — i.e. the
-    **trace line itself is not asserted to paint**. Consistent with Gate 1 (§5). `[VERIFIED]`
+  - `TestNaturalTracePaints` **PASS** — the firmware draws the amplitude-correct spectrum polyline
+    in the natural boot (supersedes the old "trace not asserted to paint"; see §5 Gate 1). `[VERIFIED]`
 
-**Headline truth:** the instrument **boots the real firmware to its operating UI, passes POST
-clean, renders the graticule, runs sweep cycles, and fills the trace buffer with a correct
-spectrum** — all reproduced this session. What is **not** working: the **trace line paint**, **front-panel
-input dispatch**, and **HP-IB query responses**. All three are control-flow / unknown-contract
-gates, not data gaps (§5).
+**Headline truth (updated 2026-07-15):** the instrument **boots the real firmware to its operating
+UI, passes POST clean, renders the graticule, runs sweep cycles, and DRAWS THE SPECTRUM TRACE**
+(the firmware's own polyline, amplitude-correct — `TestNaturalTracePaints`; the "trace paint" line
+above is superseded, see §5 Gate 1). What remains: **front-panel input** (mapped — the front panel
+speaks AT Set-2 on the EF8000 channel, keys drive the firmware; softkey ID→menu-action binding is
+the residual) and **HP-IB query responses**; plus calibration-fidelity gaps (DAC→Hz frequency axis
+~10 %). These are control-flow / calibration gaps, not data gaps.
 
 ---
 
@@ -85,7 +87,7 @@ gates, not data gaps (§5).
 | **Analog physics model** | (behavioral) | — | FAITHFUL | High | `[VERIFIED]` analog_test; YTO 3.0–6.8214 GHz, IF 3.9214 GHz, MU 0..8000, 300 MHz CAL | Behavioral, not circuit-level; RBW fixed 1 MHz |
 | **Indirect ADC bus** | U47 12-bit ADC + mux | `0xFFF75C/E` | FAITHFUL (ch0/1/3-7) / FUNCTIONAL-APPROX (ch2) | High/Med | `[VERIFIED]` analogbus_test; 0x9A conversion state machine | ch2 (+2VREF) returns a constant — true transfer function unknown |
 | **A7 analog I/O bus** | A16→A7 iface | `0xFFF700–73E` | FUNCTIONAL-APPROX (map KNOWN) | High | `[VERIFIED]` 2026-07-12 disasm RE + a7iobus_test; sweep window rides real YTO DACs | **map RESOLVED** (see refresh note): direct packed DAC ports + named sub-bus regs; residuals = DAC→Hz cal (~10 %), atten→dB, span-DAC |
-| **SweepEngine** | sweep+detector | `0xFFF200` | FAITHFUL | High | `[VERIFIED]` sweepengine_test; CAL peak lands at right point | feeds correct data; the *paint* is Gate 1 |
+| **SweepEngine** | sweep+detector | `0xFFF200` | FAITHFUL | High | `[VERIFIED]` sweepengine_test; feeds the firmware's own trace draw (paints — §5 Gate 1 resolved) | frequency-axis DAC→Hz ~10 % off (calibration residual) |
 | **Sweep-status `0xFFF300`** | sweep clock | `0xFFF300` | STUB-TUNED (bit12) / GAP (bit11) | High | `[VERIFIED]` sweepgate_test (region classifier) | bit12 always-ready; **bit11 sweep-complete not auto-asserted** → DRIVETICK root |
 | **Front-panel µC** | sep. µC (LRTC) | `0xEF4000` | UNKNOWN-CONTRACT | High | `[VERIFIED]` disasm (§5 Gate 2); frontpanel_test (RTC/IRQ3 only) | bus-master RAM write-set unknown; **key dispatch impossible from passive model** |
 | **AT keyboard** | AT Set-2 / MC68230 | `0xEF8000` | FAITHFUL | High | `[VERIFIED]` atkeyboard_test | byte-inject FIFO; parser-side ASCII translation is separate |
@@ -94,7 +96,7 @@ gates, not data gaps (§5).
 | **Option 041 board** | smart I/O µC | `0xFFF100` | FUNCTIONAL-APPROX | High | `[VERIFIED]` gpib_test; receive works | **query RESPONSE blocked** — addressing-commit gate never closes (§6) |
 | **POST self-test** | A16 diag | `0xFFF610/2` | FUNCTIONAL-APPROX | High | `[VERIFIED]` post_test PASS, clean `0x0000` | 3 of 4 groups strapped-to-pass; HD63484 VRAM-readback bit **genuinely modeled & closed** |
 | **System-ID / IDNUM** | board straps | `0xFFF73C…` | FUNCTIONAL-APPROX | Med | `[VERIFIED]` idnum_test; IDNUM=`0x2191` (8593) | option bits beyond model number not populated (§6) |
-| **DLP runtime/VM** | (firmware) | ROM | FUNCTIONAL-APPROX | Med | `[ASSERTED]` docs; interpreter runs at boot | measure-mode trace-draw source never scheduled (§5 Gate 1) |
+| **DLP runtime/VM** | (firmware) | ROM | FUNCTIONAL-APPROX | Med | `[ASSERTED]` docs; interpreter runs at boot | trace draw is the C path (not DLP `__GTTDRW`) and works (§5 Gate 1 resolved); DLP command coverage still partial |
 
 ---
 
@@ -197,7 +199,22 @@ atten line-code→dB decode, and the span-DAC port. **Path 5 is unblocked at the
 
 ## 5. The two control-flow gates (re-verified)
 
-### Gate 1 — Trace paint `[VERIFIED via disasm + DIAG tests]`
+### Gate 1 — Trace paint — **★ RESOLVED / REFUTED as a gate (2026-07-15)**
+
+> **The trace DRAWS in the natural boot — there is no Gate-1 blocker.** A
+> sweep-driven boot (`BootToOperatingWithSweep`) already paints a real,
+> amplitude-correct spectrum: `fcn.80a0` computes the amplitude scale during
+> boot (`b1c2=0x5cc0`, not the sentinel), `fcn.cfbe` fills the display trace
+> array `[0x9546]` (401/403) from the swept capture buffer, and `fcn.c7ac`/`c992`
+> draws the 401-point polyline, continuously redrawn. Locked by
+> `TestNaturalTracePaints`; rendered to `screens/trace_natural.png`. The
+> `__GTTDRW` DLP command is an FFT-stop tweak, NOT the vector draw — the polyline
+> is the C path. The whole "must enter measure-mode 0x31 / CONTS to arm" analysis
+> below (and the follow-on "amplitude residual") was an **artifact of the FORCED
+> `Machine.EnterContinuousSpectrum` path**, which resets the scale to the sentinel
+> and zeroes the display array. See docs/MEASURE_MODE_HANDOFF.md ★★★★★★. Original
+> (superseded) analysis:
+
 - Display-mode cell `0xFFB0EC` ends boot at **`0x01` (CONFIG)**, never `0x31` (spectrum). `[VERIFIED]`
 - Sweep-arm counter `0xFFA9A0` ends at **`0xFFFF` (-1, disabled)**, written from the abort path
   `0x92B2`; the arm path `0x90C8` is gated by **`btst #3, b0a1` (CONTS) at `0x8F5A`**. `[VERIFIED]`
