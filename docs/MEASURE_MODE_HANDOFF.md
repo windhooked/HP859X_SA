@@ -92,17 +92,48 @@
 > | `MEASOFF;` | direct-C (0x80) | ✔ 1111 | ✔ 4546 | no (handler 0x3ec9a 0×; PC unverified) |
 > | `KEYEXC 30003;` | direct-C (0x80) | ✔ 1647 | ✔ 4002 | **no** (SHOW_MENU/fcn.5a918 0×, menu 0x956a unchanged) |
 >
-> **Conclusion:** direct-C commands (0x80 flag) reach the parser AND resolve (the
-> command name IS recognized) but their handler action never fires; DLP-source
-> commands (CAL DISP) run end-to-end. This is the handoff's original claim
-> ("direct-C dispatch doesn't invoke the handler PC; DLP-source does") now proven
-> dynamically. Two independent notes: (1) `fcn.12288`/`fcn.12b10` are NOT on the
-> typed path — that fork is the FRONT-PANEL key path only; (2) MEASOFF's assumed
-> handler 0x3ec9a is unverified, so its 0× is not overclaimed — KEYEXC (menu-install
-> 0×, menu unchanged) is the clean negative. **Fix target: the command dispatcher's
-> handling of a resolved record with the 0x80 direct-C flag — where the handler PC
-> should be jsr'd, and why our emulator doesn't take it (emulation gap vs firmware
-> state gate, TBD).**
+> **Conclusion:** these commands reach the parser AND resolve (the name IS
+> recognized) but their handler action never fires; DLP-source commands (CAL DISP)
+> run end-to-end. `fcn.12288`/`fcn.12b10` are NOT on the typed path — that fork is
+> the FRONT-PANEL key path only.
+>
+> ### CORRECTION + VERIFIED MECHANISM (2026-07-17) — it is NOT a "0x80 flag"
+>
+> The "0x80 = direct-C flag" framing above (and in commit e3150f1) is **wrong** and
+> is retracted. Verified against the ROM (`base=0x71D76`, all longwords checked):
+> CAL (`01 80 00 5f`), KEYEXC (`01 80 01 ea`), SFPKEY (`01 80 01 7a`) **and** MEASOFF
+> (`00 80 05 67`) ALL carry the 0x80 byte; only CONTS (`00 00 74 10`) lacks it. So
+> 0x80 does not discriminate. **CAL DISP is CAL + the DISP keyword — there is no
+> single "CAL DISP" record.**
+>
+> The real dispatch (sole site, NO flag test): the DLP-interpreter step `jsr (a1)`
+> at **0x34C94**, `a1 = table[token]`, `table = 0x71D76`. Command records are
+> `<name><descriptor>`; the descriptor's token `descTok` routes in TWO regions:
+> - `descTok < 0x47D` → **direct** index `table[descTok]`. CAL `0x5f`→`0x2D448`
+>   (real C fn); KEYEXC `0x1ea`→`0x68D60`; SFPKEY `0x17a`→`0x623E0`. KEYEXC's
+>   `0x68D60` is a 16-byte trampoline (`link; move.w #0x73,-(a7); lea 0x68cec(pc),a0;
+>   jsr 0xd18` → scheduler slot 0xd18→**0x349B6**) that pushes a DLP source.
+> - `descTok in 0x47D..0x6E9` → **extended**, translated `table[descTok−0x45A]`
+>   (equivalently the 0x71E02 secondary window). MEASOFF `0x567`→`table[0x10D]`=
+>   **0x3EC9A** (verified real handler — 0x3ec9a is CONFIRMED, not "unverified").
+>
+> **The verified residual (refined):** the command's OWN action token is never
+> emitted into the interpreter stream that 0x34C94 services. Live token dispatches
+> at 0x34C94 are IDENTICAL background DLP work (0x7C,0x91,0x96,0x99,0x9A) across CAL
+> DISP / MEASOFF / KEYEXC; **KEYEXC's token 0x1ea NEVER dispatches**, and MEASOFF's
+> 0x10D never dispatches — yet CAL DISP's effect fires. So the break is UPSTREAM of
+> the dispatcher: the compile/emit step that turns a resolved command into a runnable
+> token+source (and applies the −0x45A translation for extended tokens) isn't
+> producing the direct/front-panel command's token onto a serviced ring.
+>
+> **Two precise open targets (agent-flagged, not yet closed):** (1) the exact
+> compile/emit branch — a bounds compare against the RAM command-table base
+> **0xFFBB54** + size **0xFFA478** (set at ROM 0x33AE/0x33BC), not a literal 0x47D;
+> (2) which ring the emitted source targets — operating loop services foreground
+> **0xFFA61C** and alt **0xFFBBA6** (slot 0x72a at 0x18A68/0x18A80). Proposed probe:
+> GDB break at 0x34C94 + read-watch 0x71E02–0x727CA (translate window) + address-error
+> handler 0x3B16, feed CAL DISP then MEASOFF, and see whether MEASOFF's translate is
+> attempted / a raw 0x567 reaches the dispatcher (odd addr → 0x3B16 recovery).
 
 Single entry point for the next session on the trace-draw blocker. The deep detail
 lives in the docs linked below; this is the bridge so a fresh session doesn't
