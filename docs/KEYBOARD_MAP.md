@@ -100,25 +100,45 @@ The complete key-dispatch chain, verified dynamically (probes) + statically:
    word 7 → case @`0x1305A`) = data-entry/value processing for the active
    function — NOT menu install.
 
-**Label visibility**: `b070/b071` bit 0 ("softkey labels shown") is written ONLY
-by `fcn.119f8(arg)` (`b070 = (b070&0xFE)|arg`; then `fcn.e7a2(7|9)` label walk) —
-i.e. only the 'X'/'Y' hardkeys (and preset paths) turn labels on. The
-menu-install `fcn.5a918` runs at boot (52×, via `fcn.5acb2→fcn.5aa1c`); the big
-softkey state machine `0x51860–0x53100` (SHOW_MENU callers 0x5284e/0x528b2)
-NEVER runs in any observed scenario (boot or keys) — it is NOT the live path.
+**★★ RESOLVED (2026-07-22): FRONT-PANEL MENU INTERACTIVITY WORKS END-TO-END.**
+Locked by `TestFrontPanelMenuKeys`; render: `screens/freq_menu.png` (the real
+8590 FREQUENCY menu: CENTER/START/STOP FREQ, CF STEP, CHANNEL FREQ, Band Lock;
+annotation switches to START/STOP when START FREQ activates). The completing
+facts (agent-decoded, dynamically verified):
 
-**Open (agent hunting)**: the key numbers / records carrying letters 'X'/'Y' —
-empirically NO FIFO raw code 0x01–0x9F (keys 8001–8159) produces `b1e4=9/0xA`,
-so the FREQUENCY/SPAN records are outside that range, unregistered on our boot,
-or letter-stored via another mechanism. Once found, the GUI gets faithful
-FREQUENCY/SPAN buttons and the menu system comes alive end-to-end.
-Probes: `TestKeyScanDiag` (FIFO raw-code scanner), `TestEmitBranchDiag`,
-`TestMenuCmdDiag` (`MENU n;`/typed-command menu-state probe; MENU is Option
-101/102/301-gated per the Programmer's Guide and inert here).
+- **Key records are DLP source snippets** in the ROM name table (backward-chained
+  heap `[0xA02]=0x727CA`, 1249 entries; format `body, number.w, 0.w,
+  header.w=type<<12|len`; type 2 = numeric key records, 6/7 = softkey label/
+  action records; served directly from ROM — the RAM table `[0xBB54]` gate
+  `[0xBFE6]` is cleared at boot). F9 = key 8045 @0x78724:
+  **`IF(MSBIT(8,0));FA;ELSE CF;ENDIF;MN25;`** — F9 IS the FREQUENCY key.
+  F10 = 8046 `SP;…MN5;` (SPAN), F11 = 8047 `RL;MN7;` (AMPLITUDE), F12 = 8048,
+  PRESET = 8007 `IP;`, MODE = 8008, CAL = 8042, MKR = 8026 `__PKMKMN;MN11;`.
+- **`b1ee` (0xFFB1EE) is the hardkey-menu register** (`MN n;` sets it; boot menu
+  = 30, the config menu — record 8000 `MN30;`). Softkey `idx` looks up record
+  `4000+(b1ee−1)*6+idx`. The `0x956A/0x9566` "active menu" belongs to the
+  SEPARATE DLP user-menu machinery (`MENU n;`, Option 101/102/301) — chasing it
+  was a red herring.
+- **Letters come from the classic 2-letter command descriptors** (97 mnemonics
+  @0x800E4, descriptors @0x80216: `[param][class][letter.w]`), loaded @0x354DE,
+  pushed via `fcn.31FCE` into the letter FIFO 0xBB82 → `fcn.18348` →
+  `fcn.1a6e2` (@0x1A6F4 stores to `B1B8`) → the case switch. **CF→'V' (b1e4=7),
+  SP→'W' (8), FA→'X' (9), FB→'Y' (0xA), RL→'Z' (5)** — so 'X'/'Y' are the
+  **START/STOP-FREQ active functions** (softkey records 4146/4147 `ACTVF FA/FB`,
+  menu 25), NOT hardkeys. The label-show `fcn.119f8(1)` runs on their cases.
+- **The verified working sequence** (all faithful, no forcing): `F9` →
+  menu 25 + CENTER FREQ (`b1e4=7`); `F2` (softkey 2 = START FREQ) → `b1e4=9` +
+  `b070.0=1` → **softkey labels paint**. GUI keys F1–F6/F9–F12 were already
+  correctly mapped — the system was alive all along; nothing showed because
+  softkey-label visibility (`b070.0`) only turns on via a label-showing action.
+
+Probes kept: `TestKeyScanDiag` (FIFO raw-code scanner), `TestEmitBranchDiag`,
+`TestMenuCmdDiag` (`MENU n;` probe — Option-gated, inert here).
 
 > Historic note: the earlier belief that `fcn.56a6a → KEY/SPKEY string → parser`
 > IS the action path is CORRECTED above — the strings are built, parsed and
-> resolved, but the key ACTION travels the FIFO/number/record pipeline. The
+> resolved, but the key ACTION travels the FIFO/number/record pipeline. The big
+> softkey state machine `0x51860–0x53100` never runs (not the live path). The
 > event-vs-key-ID choice in the decode is gated by `bc64` bit 13 / `fcn.56bd6`.
 
 ## Verification status (2026-07-15) — RECEIVED, but softkey/menu ACTION is partial
