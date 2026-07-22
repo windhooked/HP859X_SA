@@ -67,14 +67,59 @@ menu system.
 | Tab | 0D | 0x9d00 |
 | NumLock / ScrollLock | 77 / 7E | 0x9400 / 0x8e00 |
 
-## How an event reaches a function
+## How an event reaches a function — the FULL verified pipeline (2026-07-22)
 
-Instrument-event codes flow `fcn.57278 → fcn.56a6a → fcn.cc4(0x34746)/fcn.cac(0x3480a)`,
-which format a `"KEY <n>;"` / `"SPKEY <n>;"` parser command and submit it to the
-command interpreter `fcn.34644` — the SAME path as HP-IB. So the event const IS the
-internal HP keycode; the human name (softkey-n / MKR / SPAN / AMPLITUDE) is assigned
-downstream by the `KEY <n>` menu dispatch. The event-vs-key-ID choice is gated by
-`bc64` bit 13 / `fcn.56bd6` (raw-keycode / text-entry mode vs instrument-event mode).
+The complete key-dispatch chain, verified dynamically (probes) + statically:
+
+1. **Decode**: AT scan bytes → `fcn.57278` → event → the executor pushes a **raw
+   key code** into the key FIFO at **`0xFFBB58`** (generic FIFO descriptor:
+   `+0xE` cap, `+0x10` buf→`0xFFBB72`, `+0x14` rd, `+0x16` wr). Measured codes:
+   softkeys 1–6 = `0x21–0x26`, F9=`0x2D`, F10=`0x2E`, F11=`0x2F`, F12=`0x30`.
+   (The `"KEYEXC <n>;"`/`"SFPKEY <n>;"` ASCII builders run in parallel but are
+   NOT the action path — typing those texts manually does nothing.)
+2. **Pop + translate**: op-loop block `0x19036` → `fcn.17c46` pops → translator
+   `fcn.17a64`: softkey codes `0x21–0x26` are processed inline against the
+   active-menu state `[0xFF9562]+(b1ee−1)*6+idx` (`b1ee` = current menu #);
+   every other code is dispatched as **key number `0x1F40+code`** (= 8000+code,
+   F9→**8045**) via slot `0x6f4`→`fcn.3CDB6`, and the translator returns 0xFFFF.
+3. **Number lookup**: `fcn.3CDB6(key#)` → slot `0x57a`→`fcn.32bda` looks the
+   NUMBER up in the RAM command table `[0xFFBB54]` (built at boot, ROM 0x33AE);
+   fallback `0xFA0+key#` in the DLP table `[0xA02]`. Found record → executed via
+   slot `0xa96`.
+4. **Record → letter → case switch**: the key record's execution stores the
+   key's **LETTER** into **`0xFFB1B8`** (verified: natural F9 press enters the
+   switch dispatch at `0x1B20C` with `B1B8=0x56='V'`) → `subi #0x41` →
+   `fcn.6862` computed-goto @`0x1B952` (30 cases, offsets @`0x1B94E−2*idx`):
+   - `'V'`@0x1B70E → `b1e4=7` (MKR active-fn; label REDRAW only if `b071.0` set)
+   - `'W'`@0x1B726 → 8; `'Z'`@0x1B76E → 5 (F11, no menu op)
+   - **`'X'`@0x1B73E → `b1e4=9` + `fcn.119f8(1)` — SETS `b070/b071` bit 0 and
+     SHOWS the softkey labels**; **`'Y'`@0x1B756 → `b1e4=0xA` + same** — these
+     are the front-panel FREQUENCY/SPAN hardkeys, with NO AT F-key mapping.
+5. **Active-function processing**: `b1e4` class-0 words are consumed by
+   `fcn.12b10` → `fcn.6862` switch @`0x1344c` (case table words @`0x13448−2*idx`;
+   word 7 → case @`0x1305A`) = data-entry/value processing for the active
+   function — NOT menu install.
+
+**Label visibility**: `b070/b071` bit 0 ("softkey labels shown") is written ONLY
+by `fcn.119f8(arg)` (`b070 = (b070&0xFE)|arg`; then `fcn.e7a2(7|9)` label walk) —
+i.e. only the 'X'/'Y' hardkeys (and preset paths) turn labels on. The
+menu-install `fcn.5a918` runs at boot (52×, via `fcn.5acb2→fcn.5aa1c`); the big
+softkey state machine `0x51860–0x53100` (SHOW_MENU callers 0x5284e/0x528b2)
+NEVER runs in any observed scenario (boot or keys) — it is NOT the live path.
+
+**Open (agent hunting)**: the key numbers / records carrying letters 'X'/'Y' —
+empirically NO FIFO raw code 0x01–0x9F (keys 8001–8159) produces `b1e4=9/0xA`,
+so the FREQUENCY/SPAN records are outside that range, unregistered on our boot,
+or letter-stored via another mechanism. Once found, the GUI gets faithful
+FREQUENCY/SPAN buttons and the menu system comes alive end-to-end.
+Probes: `TestKeyScanDiag` (FIFO raw-code scanner), `TestEmitBranchDiag`,
+`TestMenuCmdDiag` (`MENU n;`/typed-command menu-state probe; MENU is Option
+101/102/301-gated per the Programmer's Guide and inert here).
+
+> Historic note: the earlier belief that `fcn.56a6a → KEY/SPKEY string → parser`
+> IS the action path is CORRECTED above — the strings are built, parsed and
+> resolved, but the key ACTION travels the FIFO/number/record pipeline. The
+> event-vs-key-ID choice in the decode is gated by `bc64` bit 13 / `fcn.56bd6`.
 
 ## Verification status (2026-07-15) — RECEIVED, but softkey/menu ACTION is partial
 
