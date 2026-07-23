@@ -21,6 +21,14 @@ const (
 	cmdRPTN    = 0x1C00 // RPTN   — read pattern RAM (1 arg, returns count words)
 	cmdSCAN    = 0x1400 // SCAN   — scan boundary (rare; 1 arg)
 
+	// Data-transfer commands (RWP-addressed word access into display memory;
+	// MAME hd63484.cpp COMMAND_RD / COMMAND_WT). The RWP is programmed via
+	// WPR 0x0C (layer select + address high bits) / 0x0D (address low bits) —
+	// see registers.go. First seen live from the softkey-5 (config-menu)
+	// redraw once front-panel menus became reachable (2026-07-22 key work).
+	cmdRD = 0x4400 // RD — read the word at RWP into the data-port read queue (0 args); RWP++
+	cmdWT = 0x4800 // WT — write the operand word at RWP (1 arg); RWP++
+
 	// Pen-motion commands (top nibble 0x8). Low bit selects line draw vs move.
 	cmdAMOVE = 0x8000 // AMOVE  — absolute move (2 args: X, Y)
 	cmdRMOVE = 0x8400 // RMOVE  — relative move (2 args: dX, dY)
@@ -125,6 +133,8 @@ const (
 	idPAINT
 	idDOT
 	idPTN
+	idRD
+	idWT
 	idBLKFILL
 	idSCLRarea
 	idCLRlegacy
@@ -164,6 +174,10 @@ func cmdSpecOf(w uint16) (id cmdID, kind operandKind, n int, ok bool) {
 		return idRPTN, opFixed, 1, true
 	case w == cmdSCAN:
 		return idSCAN, opFixed, 1, true
+	case w == cmdRD:
+		return idRD, opNone, 0, true
+	case w == cmdWT:
+		return idWT, opFixed, 1, true
 	case w == cmdBLKFILL: // 0x5800 — manual CLR
 		return idBLKFILL, opFixed, 3, true
 	case w&0xFFFC == 0x5C00: // SCLR (logical-op in low 2 bits)
@@ -356,6 +370,20 @@ func (dec *decoder) execCmd(c *Chip) {
 	case idRPR:
 		// Read parameter register (read-FIFO not modelled).
 		c.gate("cmd:rpr", "command RPR %#04x (read parameter register; read-FIFO not modelled)", dec.cmdWord)
+
+	case idRD:
+		// RD (MAME COMMAND_RD): read display memory at RWP into the data-port
+		// read queue (served by ReadData) and auto-increment RWP.
+		c.readQ = append(c.readQ, c.core.readword(c.core.rwp[c.rwpDn]))
+		c.advanceRWP(1)
+
+	case idWT:
+		// WT (MAME COMMAND_WT): write the operand word into display memory at
+		// RWP and auto-increment. Reaches the visible display through the core
+		// buffer the register-derived scanout reads — no separate plumbing.
+		c.core.curCmd = tagOther
+		c.core.writeword(c.core.rwp[c.rwpDn], a[0])
+		c.advanceRWP(1)
 
 	case idAMOVE:
 		c.penX, c.penY = int(int16(a[0])), int(int16(a[1]))

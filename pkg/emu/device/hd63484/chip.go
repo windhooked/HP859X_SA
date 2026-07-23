@@ -294,6 +294,11 @@ type Chip struct {
 	rwpDn   int
 	maskReg uint16
 
+	// readQ is the data-port read queue fed by the RD command (0x4400): each RD
+	// reads the core word at RWP and queues it here; ReadData serves the queue
+	// ahead of the legacy dmem block-verify path. See parser.go idRD.
+	readQ []uint16
+
 	// Glyph-blit colour state (captured between the WPTN header and the
 	// bitmap rows). FG is applied to bits set in the row; BG is applied to
 	// bits clear in the row (per HD63484 fill semantics). 0 means "do not
@@ -766,12 +771,26 @@ func (c *Chip) blockFill(pattern uint16, count int) {
 // (0x4000/0x0000) — see handleWPRSideEffect. Before any block fill (fillLen==0)
 // this returns 0, matching the prior stub for every other (non-readback) path.
 func (c *Chip) ReadData() uint16 {
+	// RD-command queue first (core words read at RWP — parser.go idRD).
+	if len(c.readQ) > 0 {
+		w := c.readQ[0]
+		c.readQ = c.readQ[1:]
+		return w
+	}
 	if c.fillLen == 0 {
 		return 0
 	}
 	w := c.dmem[c.readPtr%c.fillLen]
 	c.readPtr++
 	return w
+}
+
+// advanceRWP advances the active Read/Write Pointer by n words (20-bit wrap,
+// per MAME m_rwp handling), keeping the chip-level mirror and the faithful
+// core in sync. Used by the RD/WT data-transfer commands.
+func (c *Chip) advanceRWP(n uint32) {
+	c.rwp[c.rwpDn] = (c.rwp[c.rwpDn] + n) & 0xfffff
+	c.core.rwp[c.rwpDn] = c.rwp[c.rwpDn]
 }
 
 // Counters / accessors used by tests + cmd/* probes.

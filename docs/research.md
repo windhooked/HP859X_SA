@@ -194,6 +194,20 @@ The HP 8590 Series Calibration Guide (8590A/B/D/L/8591A/C/E/8591EM/8594E) is at:
 
 ### 7. SCI Display Protocol — decoded empirically (emulator, 2026-05-27)
 
+> **★ SUPERSEDED (2026-05-28 onward): the "NOT an HD63484" conclusion below is
+> WRONG.** The protocol decoded at 0xFFF5FC/0xFFF5FE **IS the HD63484 ACRTC
+> command set** (0xFFF5FC = AR selector, 0xFFF5FE = command/data FIFO — the
+> "SCI" naming was a misnomer from this initial RE). Confirmed from the CLIP
+> 5963-2591 parts list: **U301 = 1820-6351 IC63484-8S ACRTC** with U305/U306 =
+> 64 KB VRAM on the A16. The full faithful chip model lives in
+> [pkg/emu/device/hd63484/](../pkg/emu/device/hd63484/) (MAME-ported flat core,
+> register-derived scanout, strictness gate); the command decode below remains
+> historically accurate as raw observations (0x8000=AMOVE, 0x8801=ALINE,
+> 0x1800=WPTN etc. are the real ACRTC opcodes). The MC6845 named in the 8590A
+> guide belongs to the early 8590A / the display module's own drive board — it
+> is NOT on the 8593A A16 signal path and needs no model. See CLAUDE.md
+> ("Display is the HD63484 ACRTC") + docs/DISPLAY_FINDINGS.md.
+
 Resolves gap #4 above. By instrumenting the running firmware (`cmd/displayprobe`,
 which logs every MMIO write once the firmware reaches the operating loop) the
 display path is **confirmed to be the SCI command interface at 0xFFF5FC/0xFFF5FE**,
@@ -241,6 +255,16 @@ selects are not yet individually decoded — see `cmd/displayprobe`/`cmd/scianal
 ---
 
 ### 8. Front-panel (keyboard / RPG) protocol — decoded empirically (emulator, 2026-05-27)
+
+> **★ REFUTED (2026-07-12/14): the 0xEF4000 "key matrix" below is WRONG — that
+> window is EXCLUSIVELY the battery-backed RTC** (OKI MSM6242-class clock chip;
+> IRQ3 is the RTC tick driving the TIMEDATE redraw, not key input). The real
+> front-panel input path is the **EF8000/EF8002 keyboard serial channel (IRQ4)**
+> — the same line as the external AT keyboard — decoded by `fcn.57278`, with
+> keys dispatched by number (8000+code) through ROM DLP key records. Full
+> verified pipeline: [KEYBOARD_MAP.md](KEYBOARD_MAP.md); menu interactivity
+> works end-to-end (`TestFrontPanelMenuKeys`). The "bitmap/handshake" reads
+> below were the firmware's RTC accesses misread as a key matrix.
 
 The front panel is a separate microcontroller on a byte-wide port at
 **0xEF4000–0xEF401F** (8-bit registers at odd addresses), interrupt-driven via

@@ -18,12 +18,13 @@ import (
 // (positive) vs "KEYEXC 30003;" (negative) over EQUAL fixed windows and diff.
 //
 // Stage PC-presence tracked (all fetches sampled via bus OnRead):
-//   LOOKUP  fcn.32bda  name lookup (reads cmd-table base 0xFFBB54)
-//   REG     fcn.34644  synthetic-source registrar (descriptor 0xA62A/0xA964/0xA972)
-//   KEYBLD  fcn.34746  "KEYEXC n;" builder (calls REG at 0x347ee)
-//   SCHED   0x3497E-0x349E0 DLP scheduler incl. ring-push prologue
-//   SRCRD   fcn.316fa  source-byte reader (pops the fg ring)
-//   INTERP  0x34B44-0x34CB0 interpreter step incl. dispatcher 0x34C94
+//
+//	LOOKUP  fcn.32bda  name lookup (reads cmd-table base 0xFFBB54)
+//	REG     fcn.34644  synthetic-source registrar (descriptor 0xA62A/0xA964/0xA972)
+//	KEYBLD  fcn.34746  "KEYEXC n;" builder (calls REG at 0x347ee)
+//	SCHED   0x3497E-0x349E0 DLP scheduler incl. ring-push prologue
+//	SRCRD   fcn.316fa  source-byte reader (pops the fg ring)
+//	INTERP  0x34B44-0x34CB0 interpreter step incl. dispatcher 0x34C94
 //
 // Plus: ordered dispatch stream at 0x34C94, SEPARATE fg-ring (0xFFA60C-0xFFA65C)
 // and alt-ring (0xFFBB96-0xFFBBE6) write histograms, and the fg-ring/synthetic
