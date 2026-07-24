@@ -52,4 +52,7 @@ func TestArmCheckDiag(t *testing.T) {
 	}
 	t.Logf("max A5 = %#x (idx %d); wraps=%d; bf30=%#x (idx %d)",
 		maxA5, (maxA5-0x2FD508)/2, wraps, m.Bus.Read(0xFFBF30, bus.Long), (m.Bus.Read(0xFFBF30, bus.Long)-0x2FD508)/2)
+	t.Logf("BF3C (samples/slot) = %d  BF3E (countdown) = %d  A9A2 = %d  A9A4 = %d",
+		m.Bus.Read(0xFFBF3C, bus.Word), m.Bus.Read(0xFFBF3E, bus.Word),
+		m.Bus.Read(0xFFA9A2, bus.Word), m.Bus.Read(0xFFA9A4, bus.Word))
 }

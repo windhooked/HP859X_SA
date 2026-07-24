@@ -158,12 +158,18 @@ Update this as facts change. If a theory is in "DISPROVEN", do not raise it agai
   correlation; TestArmCheckDiag). Its x math is full-range (x = idx+40 px,
   RWP-L = 2·x); the b07a.7 skip-gate stays 0. The 0x410A capture handler is a
   max-peak-detect with a BF3C/BF3E decimation countdown (1:1 at BF3C=1).
-- OPEN: why the live pass halts at the graph centre — candidates: (a) pos/neg
-  detector pair consumption (two buffer samples per displayed point in this
-  mode → our 1-sample-per-point injection starves the second half), (b) a
-  200-point bound cell in the RAM-resident sweep routine, (c) the caller's
-  per-sweep budget. Next probe: trace the RAM-0xCA routine + the 6C3C caller's
-  loop bound; or feed 2 IRQ6 samples per IRQ1 step and observe the bar extent.
+- ADDENDUM (same day): **BF3C = 3** — the 0x410A handler max-peak-detects
+  THREE ADC samples per buffer slot (1203 IRQ6s / 401-slot sweep; our injector
+  satisfies this implicitly by filling until bf30, so A5 coverage is complete).
+  The processing pass tracks capture 1:1 (lag ~10 slots) while running and
+  halts at slot ~200 REGARDLESS — a fixed bound, not throughput. (A9A2=1,
+  A9A4=0 at runtime.)
+- OPEN: find the ~200 bound in the live-pass caller — candidates: a bound cell
+  in the RAM-0xCA resident sweep routine / the 6C3C caller loop; pos/neg slot
+  pairing at the PAINTER level (paint x=k from slot pair {2k,2k+1} — would
+  show bar-x = A5/2, which the 1:1 correlation currently contradicts); or a
+  marker/centre-relative processing window. Next probe: shadow-stack trace of
+  the 6C3C invocation (cmd/rendertrace style) to read the caller loop bound.
 
 ## DISPROVEN / RULED OUT (do NOT propose these again)
 - ❌ **CRT persistence** is NOT the cause of the trace "forest". (User: #1 doesn't hold.)
