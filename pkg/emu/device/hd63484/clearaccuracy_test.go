@@ -95,14 +95,12 @@ func collectLit(c *Chip, x0, y0, x1, y1 int) [][2]int {
 	return lit
 }
 
-// isLitBg checks the dim background plane (bgVram) at firmware (x,y).
-func isLitBg(c *Chip, x, y int) bool { return c.isBgPixelLit(x, y) }
-
 // assertCleared verifies the SCLR CLEANLY cleared the content: every previously-
-// lit pixel is gone from the foreground (vram) AND nothing was left in the
-// background plane (bgVram) — i.e. no dither dots. This is the same expectation
-// for both the 0x5555 checkerboard and the 0x0000 erase, because we don't
-// reproduce the 1-bit dither — both are read as "clear this region".
+// lit pixel is gone from the frame buffer — i.e. no dither dots. This is the
+// same expectation for both the 0x5555 checkerboard and the 0x0000 erase,
+// because we don't reproduce the 1-bit dither — both are read as "clear this
+// region". (The former separate background-plane check is gone with the plane:
+// the core is the single frame buffer, so the foreground check covers it.)
 func assertCleared(t *testing.T, c *Chip, lit [][2]int) {
 	t.Helper()
 	if len(lit) == 0 {
@@ -112,9 +110,6 @@ func assertCleared(t *testing.T, c *Chip, lit [][2]int) {
 		fx, fy := p[0], p[1]
 		if isLit(c, fx, fy) {
 			t.Errorf("foreground (%d,%d) should be cleanly cleared", fx, fy)
-		}
-		if isLitBg(c, fx, fy) {
-			t.Errorf("background (%d,%d) should be empty — we don't dither", fx, fy)
 		}
 	}
 }

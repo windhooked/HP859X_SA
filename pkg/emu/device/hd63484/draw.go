@@ -64,20 +64,11 @@ func (c *Chip) drawLine(x0, y0, x1, y1 int, set bool) {
 	}
 }
 
-// drawLineRouted draws a line, routing it to the trace plane in Colorized mode
-// when it is SOLID (linePattern 0xFFFF) — the 8593 firmware forces the spectrum
-// trace solid while drawing the graticule grid with a stipple, so a solid
-// ALINE/RLINE is the trace (green plane), a stippled one is the grid (vram/grey).
-// Outside Colorized mode it is a plain solid line into vram, unchanged.
+// drawLineRouted draws a solid line into the core frame buffer and triggers
+// the frame snapshot. (The former Colorized-mode trace-plane routing is gone —
+// the core is the single frame buffer.)
 func (c *Chip) drawLineRouted(x0, y0, x1, y1 int) {
-	if c.Colorized && c.linePattern == 0xFFFF {
-		prev := c.activePlane
-		c.activePlane = &c.tracePlane
-		c.drawLine(x0, y0, x1, y1, true)
-		c.activePlane = prev
-	} else {
-		c.drawLine(x0, y0, x1, y1, true)
-	}
+	c.drawLine(x0, y0, x1, y1, true)
 	c.maybeFrameSnapshot(x0, y0, x1, y1)
 }
 
@@ -162,19 +153,11 @@ func (c *Chip) drawCircle(cx, cy, radius int, set bool) {
 	}
 }
 
-// fillVRAM replicates a 16-bit fill word across the entire VRAM. Used by
-// SCLR (screen clear) when the firmware passes a non-zero fill word, and
-// internally to reset the chip framebuffer on construction.
+// fillVRAM replicates a 16-bit fill word across the entire frame buffer
+// (the faithful core). Used by SCLR (screen clear) when the firmware passes a
+// non-zero fill word, and internally to reset the chip on construction.
 func (c *Chip) fillVRAM(word uint16) {
-	lo := byte(word)
-	hi := byte(word >> 8)
-	for i := 0; i+1 < len(c.vram); i += 2 {
-		c.vram[i] = lo
-		c.vram[i+1] = hi
-	}
-	// Mirror into the faithful core (full-screen fill/clear).
 	for i := range c.core.ram {
 		c.core.ram[i] = word
 	}
-	c.resetBounds()
 }

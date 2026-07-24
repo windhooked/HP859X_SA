@@ -59,24 +59,14 @@ const (
 // fgColor and bgPaintColor define the two intensities the chip renders at.
 // The real ACRTC drives the CRT beam with continuous brightness control via
 // a colour-attribute register, but the 8593 uses a 1-bit monochrome amber
-// CRT, so we collapse to a single "lit" colour. The legacy bgPaintColor
-// (dim amber) is preserved for backwards compatibility with any caller that
-// referenced it before the VRAM unification, but the unified model uses
-// fgColor for all lit bits.
+// CRT, so we collapse to a single "lit" colour (fgColor).
 var (
-	fgColor      = color.RGBA{R: 0xFF, G: 0xB0, B: 0x00, A: 0xFF}
-	bgPaintColor = color.RGBA{R: 0x40, G: 0x2C, B: 0x00, A: 0xFF}
+	fgColor = color.RGBA{R: 0xFF, G: 0xB0, B: 0x00, A: 0xFF}
 
-	// Colorized-mode per-plane colours (debug visualization only; the real CRT is
-	// monochrome amber). Used by RenderFrame when Colorized is set.
-	textColor      = color.RGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0xFF} // glyphs → white
-	traceColor     = color.RGBA{R: 0x20, G: 0xFF, B: 0x40, A: 0xFF} // spectrum trace → green
-	graticuleColor = color.RGBA{R: 0x55, G: 0x55, B: 0x55, A: 0xFF} // grid/box → dim grey
-	// gridDimColor is the faint recessive amber for the dotted graticule grid
-	// (the 0x4400 page superimposed under the bright foreground) — dim enough to
-	// read as the real CRT's faint dotted grid, not hard bright stripes.
+	// gridDimColor is the faint recessive amber RenderCore uses for its dotted
+	// rendering of the +0x4000 grid page — dim enough to read as the real CRT's
+	// faint dotted grid, not hard bright stripes.
 	gridDimColor = color.RGBA{R: 0x3A, G: 0x28, B: 0x00, A: 0xFF}
-	ditherColor  = color.RGBA{R: 0x0E, G: 0x0E, B: 0x0E, A: 0xFF} // bg dither → near-black
 )
 
 // Status-byte bit layout (read from address+1 / offset 0x5FD in the 8593 MMIO).
@@ -211,41 +201,9 @@ type Chip struct {
 	// a flat array depending on WPTN parameter setup.
 	pattern [PatternRAMWords]uint16
 
-	// External video RAM, 64 KB, treated as a packed 1bpp framebuffer of
-	// PaintRowPixels × PaintHeight. See setVRAMPixel / clearVRAMPixel for
-	// the bit-addressing convention. This is the FOREGROUND plane: vector
-	// draws (graticule, trace), glyph blits, and dots all land here.
-	vram [VRAMSize]byte
-
-	// bgVram is the BACKGROUND plane: the firmware paints a faint full-screen
-	// dot texture via bulk raster bursts (the 0x4400 fill). Routing it to a
-	// separate plane lets RenderFrame draw it at a dim intensity (bgPaintColor)
-	// UNDER the bright foreground, instead of letting the uniform 0x4400 word
-	// swamp the screen with full-brightness vertical stripes. Same bit-packing
-	// and geometry as vram.
-	bgVram [VRAMSize]byte
-
-	// Colorized is a debug-visualization toggle (default false → byte-identical
-	// monochrome amber render, so all goldens/tests are unaffected). When true,
-	// RenderFrame composites the per-content planes below with distinct colours
-	// (white text / green trace / dim-grey graticule / near-black dither).
-	Colorized bool
-
-	// textPlane / tracePlane are content-type planes used only in Colorized mode.
-	// Glyphs route to textPlane (never dithered, so text stays crisp); solid
-	// trace lines route to tracePlane (cleared each sweep so the trace doesn't
-	// pile up). graticulePlane IS vram (the default activePlane target), so the
-	// bulk of vector draws and VRAM() are unchanged.
-	textPlane  [VRAMSize]byte
-	tracePlane [VRAMSize]byte
-
-	// activePlane is the destination for the next pixel write (setVRAMPixel /
-	// clearVRAMPixel). The decoder points it at the right plane per command;
-	// defaults to &vram. nil is treated as &vram for zero-value safety.
-	activePlane *[VRAMSize]byte
-
 	// Memory-access pointer for raster bursts (advances after each data-
-	// port write in raster mode). BYTE offset into vram.
+	// port write in raster mode). BYTE offset into the frame buffer address
+	// space (the faithful core; see wptn.go raster path).
 	memPos int
 
 	// dmem is the chip's display memory as seen by the block READ/VERIFY
@@ -321,7 +279,6 @@ type Chip struct {
 	img *image.RGBA
 
 	// Drawn-content bounds (for cropped rendering / test inspection).
-	minX, minY, maxX, maxY int
 
 	// Optional glyph logger. If non-nil, blitGlyph hands each captured
 	// glyph row-tuple here for printable-character extraction; see
@@ -510,22 +467,15 @@ func New() *Chip {
 		orgRow:         defaultOrgRow,
 		maskReg:        0xFFFF, // all bits affected until WPR 0x04 narrows the mask
 	}
-	c.activePlane = &c.vram // default draw target == graticule plane
-	c.CleanClear = true     // option B (default): SCLR dither-clear = clean erase
+	c.CleanClear = true // option B (default): SCLR dither-clear = clean erase
 	// Faithful core defaults so the unified buffer addresses correctly before the
 	// firmware programs ORG/MWR at runtime (drives unit tests that draw directly).
 	// Matches the 8593's display-init: ORG 0x4003,0xa450 → dn=1, dpa=0x3a45; MWR1=64.
 	c.core.setORG(0x4003, 0xa450)
 	c.core.mwr[1] = 64
-	c.resetBounds()
 	c.glyphLog = newGlyphLoggerFromEnv()
 	c.initRegWatch()
 	return c
-}
-
-func (c *Chip) resetBounds() {
-	c.minX, c.minY = VisibleWidth, VisibleHeight
-	c.maxX, c.maxY = 0, 0
 }
 
 // defaultOrgCol / defaultOrgRow are the chip's hard-coded ORG values before any
@@ -566,16 +516,6 @@ const (
 	displayScanStart = 23  // first VRAM row the display scans (VWR-A geometry)
 )
 
-// vramByteAddr returns the byte offset within vram that holds pixel (x, y),
-// or -1 if the pixel is outside the paint area. The bit within that byte
-// (with bit 0 = leftmost) is (x & 7).
-func (c *Chip) vramByteAddr(x, y int) int {
-	if x < 0 || y < 0 || x >= PaintRowPixels || y >= PaintHeight {
-		return -1
-	}
-	return y*PaintRowBytes + (x >> 3)
-}
-
 // setVRAMPixel lights the pixel at (x, y) and updates the drawn-content
 // bounding box. Out-of-range coordinates are silently ignored — matches
 // the chip's hardware clipping behaviour.
@@ -590,66 +530,25 @@ func (c *Chip) setVRAMPixel(x, y int) {
 			return
 		}
 	}
-	// Faithful core (Phase 2 dual-write): the pen draws in firmware logical coords,
-	// which is exactly what calcOffset/setDot consume — so mirror the pixel into the
-	// unified address space alongside the legacy path. Glyphs/trace route to their
-	// own legacy planes (activePlane != &vram); only the base vram content is
-	// mirrored for now so the core matches what Phase 4 will scan out.
-	if c.activePlane == nil || c.activePlane == &c.vram {
-		if c.GraticuleToUpper && regionOf(x, y) == regionCenter {
-			c.core.drawOffset = 0x4000
-		}
-		c.core.setDot(int16(x), int16(y), 1)
-		c.core.drawOffset = 0
-		c.RegionWrites[regionOf(x, y)]++
+	// The pen draws in firmware logical coords, which is exactly what
+	// calcOffset/setDot consume — the pixel goes straight into the unified core
+	// frame buffer (the single source of truth the scanout reads).
+	if c.GraticuleToUpper && regionOf(x, y) == regionCenter {
+		c.core.drawOffset = 0x4000
 	}
-	x = c.orgCol + x // firmware X → VRAM column via ORG
-	y = c.orgRow - y // firmware Y-up → VRAM Y-down via ORG
-	addr := c.vramByteAddr(x, y)
-	if addr < 0 {
-		return
-	}
-	p := c.activePlane
-	if p == nil {
-		p = &c.vram
-	}
-	p[addr] |= 1 << uint(x&7)
-	c.expandBounds(x, y)
+	c.core.setDot(int16(x), int16(y), 1)
+	c.core.drawOffset = 0
+	c.RegionWrites[regionOf(x, y)]++
 }
 
 // clearVRAMPixel turns off the pixel at (x, y) — used by glyph BG fills,
 // CLR, and SCLR.
 func (c *Chip) clearVRAMPixel(x, y int) {
-	if c.activePlane == nil || c.activePlane == &c.vram {
-		if c.GraticuleToUpper && regionOf(x, y) == regionCenter {
-			c.core.drawOffset = 0x4000
-		}
-		c.core.setDot(int16(x), int16(y), 0) // faithful core dual-write (Phase 3)
-		c.core.drawOffset = 0
+	if c.GraticuleToUpper && regionOf(x, y) == regionCenter {
+		c.core.drawOffset = 0x4000
 	}
-	x = c.orgCol + x // firmware X → VRAM column via ORG
-	y = c.orgRow - y // firmware Y-up → VRAM Y-down via ORG
-	addr := c.vramByteAddr(x, y)
-	if addr < 0 {
-		return
-	}
-	p := c.activePlane
-	if p == nil {
-		p = &c.vram
-	}
-	p[addr] &^= 1 << uint(x&7)
-}
-
-// ClearTracePlane zeroes the trace plane — called by the sweep driver at the
-// start of each sweep so only the latest trace shows (no pile-up). No-op when
-// not colorized (the trace lives in vram then).
-func (c *Chip) ClearTracePlane() {
-	if !c.Colorized {
-		return
-	}
-	for i := range c.tracePlane {
-		c.tracePlane[i] = 0
-	}
+	c.core.setDot(int16(x), int16(y), 0)
+	c.core.drawOffset = 0
 }
 
 // isVRAMPixelLit reports whether the pixel at (x, y) is currently set.
@@ -657,53 +556,6 @@ func (c *Chip) ClearTracePlane() {
 func (c *Chip) isVRAMPixelLit(x, y int) bool {
 	// Core-direct: read the unified buffer at the firmware logical coordinate.
 	return c.core.getDot(int16(x), int16(y)) != 0
-}
-
-// isBgPixelLit reports whether the DIM background plane (bgVram) pixel at firmware
-// (x, y) is set. The SCLR reads vram and writes bgVram at the SAME byte address
-// (its wordByteAddr already folds in displayScanStart), so bgVram uses the same
-// ORG mapping as vram.
-func (c *Chip) isBgPixelLit(x, y int) bool {
-	x = c.orgCol + x
-	y = c.orgRow - y
-	addr := c.vramByteAddr(x, y)
-	if addr < 0 {
-		return false
-	}
-	return c.bgVram[addr]&(1<<uint(x&7)) != 0
-}
-
-// isTextPixelLit reports whether the TEXT plane (glyphs) pixel at firmware (x, y)
-// is set. Glyphs are drawn through the same ORG transform as the pen.
-func (c *Chip) isTextPixelLit(x, y int) bool {
-	x = c.orgCol + x
-	y = c.orgRow - y
-	addr := c.vramByteAddr(x, y)
-	if addr < 0 {
-		return false
-	}
-	return c.textPlane[addr]&(1<<uint(x&7)) != 0
-}
-
-// expandBounds widens the drawn-content bbox to include (x, y). Visible-
-// region clamp so the bbox stays useful for RenderCropped — bounds are in
-// VRAM/drawing space (the 512×256 visible window).
-func (c *Chip) expandBounds(x, y int) {
-	if x < 0 || y < 0 || x >= VisibleWidth || y >= VisibleHeight {
-		return
-	}
-	if x < c.minX {
-		c.minX = x
-	}
-	if y < c.minY {
-		c.minY = y
-	}
-	if x > c.maxX {
-		c.maxX = x
-	}
-	if y > c.maxY {
-		c.maxY = y
-	}
 }
 
 // WriteCmd handles a write to the chip's address register (offset 0 in its

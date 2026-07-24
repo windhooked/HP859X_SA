@@ -171,19 +171,15 @@ func TestRasterModeTrigger(t *testing.T) {
 	if c.Paints != 1 {
 		t.Errorf("Paints=%d, want 1", c.Paints)
 	}
-	// The burst targets the MAR word-address: MAR=0x4000 words → byte offset
-	// 0x8000 (row 256), the OFF-SCREEN back-buffer below the 256-line display.
-	// The 0x4400 fill must land there (bgVram[0x8000..]), NOT in the visible
-	// rows 0..255 — otherwise it stripes the graticule. So bgVram[0x8000..0x8001]
-	// = 0x4400 little-endian, and the visible bgVram[0] stays clear.
-	if c.bgVram[0x8000] != 0x00 || c.bgVram[0x8001] != 0x44 {
-		t.Errorf("bgVram[0x8000..1] = %02X %02X, want 00 44 (off-screen back-buffer)", c.bgVram[0x8000], c.bgVram[0x8001])
+	// The burst targets the RWP word-address: 0x4000 words = the GRID PAGE of
+	// the core frame buffer (words 0x4000..0x7FFF, superimposed by the scanout
+	// as the faint graticule grid). The 0x4400 fill must land there, NOT in the
+	// content page (words < 0x4000) — otherwise it stripes the visible screen.
+	if got := c.core.readword(0x4000); got != 0x4400 {
+		t.Errorf("core grid page word[0x4000] = %#04X, want 0x4400", got)
 	}
-	if c.bgVram[0] != 0x00 || c.bgVram[1] != 0x00 {
-		t.Errorf("bgVram[0..1] = %02X %02X, want 00 00 (visible area must stay clear)", c.bgVram[0], c.bgVram[1])
-	}
-	if c.vram[0] != 0x00 || c.vram[1] != 0x00 {
-		t.Errorf("vram[0..1] = %02X %02X, want 00 00 (raster must not touch foreground)", c.vram[0], c.vram[1])
+	if got := c.core.readword(0); got != 0x0000 {
+		t.Errorf("core content page word[0] = %#04X, want 0 (raster must not touch content)", got)
 	}
 }
 
@@ -205,11 +201,11 @@ func TestSCLR(t *testing.T) {
 	if c.ScreenClears != 1 {
 		t.Errorf("ScreenClears=%d, want 1", c.ScreenClears)
 	}
-	// SCLR with all-ones should light every VRAM byte.
+	// SCLR with all-ones should light every frame-buffer word.
 	feedWords(c, cmdSCLR, 0xFFFF)
-	for i, b := range c.vram[:16] {
-		if b != 0xFF {
-			t.Errorf("vram[%d] = %02X after SCLR 0xFFFF, want FF", i, b)
+	for i := uint32(0); i < 8; i++ {
+		if got := c.core.readword(i); got != 0xFFFF {
+			t.Errorf("core word[%d] = %#04X after SCLR 0xFFFF, want 0xFFFF", i, got)
 		}
 	}
 }

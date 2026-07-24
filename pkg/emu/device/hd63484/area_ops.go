@@ -34,44 +34,6 @@ func (c *Chip) areaMWR() int {
 	return PaintRowBytes / 2 // 64 words/row
 }
 
-// wordByteAddr maps a bitmap WORD offset to the byte address of its low byte in
-// our VRAM, or -1 if it falls outside the frame buffer. A word covers 16
-// horizontal pixels; the low byte holds the left 8 (bit 0 = leftmost), matching
-// setVRAMPixel and the 0x4400 raster path.
-func (c *Chip) wordByteAddr(off, mwr int) int {
-	if off < 0 || mwr <= 0 {
-		return -1
-	}
-	// The firmware's RWP addresses the EFFECTIVE display position; the pen stores
-	// content at ORG_row (displayScanStart rows lower in vram). Shift the SCLR's
-	// target down by displayScanStart so it lands on the stored content rather
-	// than 23 rows above it (the "partially clears / misaligned" bug).
-	row := off/mwr + displayScanStart
-	col := off % mwr
-	if row < 0 || row >= PaintHeight || col < 0 || col >= PaintRowBytes/2 {
-		return -1
-	}
-	return row*PaintRowBytes + col*2
-}
-
-// readPlaneWord returns the 16-bit word at bitmap word offset off in plane
-// (0 if off-frame).
-func readPlaneWord(plane []byte, a int) uint16 {
-	if a < 0 || a+1 >= len(plane) {
-		return 0
-	}
-	return uint16(plane[a]) | uint16(plane[a+1])<<8
-}
-
-// writePlaneWord stores a 16-bit word at byte address a in plane (no-op off-frame).
-func writePlaneWord(plane []byte, a int, val uint16) {
-	if a < 0 || a+1 >= len(plane) {
-		return
-	}
-	plane[a] = byte(val)
-	plane[a+1] = byte(val >> 8)
-}
-
 // execClear is MAME's command_clr_exec: fill the (|ax|+1)×(|ay|+1) word region
 // anchored at the RWP — d0 steps along the raster (+1 word), d1 steps up one
 // raster line (−MWR words) — writing the pattern word d through the logical op.
@@ -164,13 +126,11 @@ func (c *Chip) execClear(cr, pattern uint16, ax, ay int16) {
 			if c.GraticuleToUpper && clip {
 				coreOff = (coreOff + 0x4000) & acrtcRAMMask // experiment hook
 			}
-			a := c.wordByteAddr(off, mwr) // legacy vram (dead path, kept for compat)
 			switch {
 			case !logical:
 				// CLR REPLACE — a genuine fill: write the pattern straight to the
 				// frame buffer at its real address.
 				c.core.writeword(coreOff, pattern)
-				writePlaneWord(c.vram[:], a, pattern)
 			case clip && c.CleanClear && (mm == 2 || mm == 3):
 				// OPTION B — CLEAN CLEAR. The firmware's AND/EOR dither over the graph
 				// (cr&3 == 2/3) is, by intent, an ERASE: it clears the previous sweep's
@@ -201,7 +161,6 @@ func (c *Chip) execClear(cr, pattern uint16, ax, ay int16) {
 				}
 				if res := data &^ m; res != data {
 					c.core.writeword(coreOff, res)
-					writePlaneWord(c.vram[:], a, res)
 				}
 			case clip:
 				// FAITHFUL SCLR. Execute the chip's real logical op (cr&3: 0 REPLACE /
@@ -225,7 +184,6 @@ func (c *Chip) execClear(cr, pattern uint16, ax, ay int16) {
 				}
 				if res != data {
 					c.core.writeword(coreOff, res)
-					writePlaneWord(c.vram[:], a, res)
 				}
 			default:
 				// Logical SCLR with NO area-def (boot full-screen pass) — left

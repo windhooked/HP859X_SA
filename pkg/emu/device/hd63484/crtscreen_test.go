@@ -80,14 +80,11 @@ func TestCRTSclrClearsGlyph(t *testing.T) {
 	setRWP(c, off)
 	feedWords(c, 0x5C02, 0x5555, 0x0001, 0x0008) // SCLR AND 0x5555, ax=1, ay=8
 
-	// The glyph is cleanly cleared from the foreground; nothing lingers in the
-	// background plane (no dither dots).
+	// The glyph is cleanly cleared from the frame buffer (no dither dots —
+	// the core is the single buffer, so this covers the former bg-plane check).
 	for dx := 0; dx < 2; dx++ {
 		if isLit(c, gx+dx, gy) {
 			t.Errorf("foreground (%d,%d) should be cleanly cleared", gx+dx, gy)
-		}
-		if isLitBg(c, gx+dx, gy) {
-			t.Errorf("background (%d,%d) should be empty — we don't dither", gx+dx, gy)
 		}
 	}
 }

@@ -237,14 +237,20 @@ func main() {
 		rdw(0xFF94DA), rdw(0xFF94DC), rdw(0xFF94DD), rdw(0xFF94E4), rdw(0xFF94E6), rdw(0xFF94E8))
 	fmt.Printf("  draw counts: moves=%d glyphs=%d lines=%d rects=%d dots=%d paints=%d paintWords=%d\n",
 		d.Moves, d.Glyphs, d.Lines, d.Rects, d.Dots, d.Paints, d.PaintWords)
-	// VRAM pattern check: dump 24 bytes of two adjacent rows. If identical →
-	// uniform background fill renders as vertical stripes; if they differ → a
-	// row-varying (dot) pattern.
-	vram := d.Chip.VRAM()
-	const rb = 128
+	// Frame-buffer pattern check: dump 12 words of three adjacent rows. If
+	// identical → uniform background fill renders as vertical stripes; if they
+	// differ → a row-varying (dot) pattern. Reads the core via the register-
+	// derived scanout geometry (MWR1 words/row).
+	mwr := int(d.Chip.CoreMWR1())
+	if mwr <= 0 {
+		mwr = 64
+	}
 	for _, y := range []int{120, 121, 122} {
-		base := y * rb
-		fmt.Printf("  vram row %d: % 02x\n", y, vram[base:base+24])
+		ws := make([]uint16, 12)
+		for i := range ws {
+			ws[i] = d.Chip.CoreWord(uint32(y*mwr + i))
+		}
+		fmt.Printf("  core row %d: %04x\n", y, ws)
 	}
 
 	if err := os.MkdirAll("screens", 0o755); err != nil {

@@ -5,18 +5,23 @@ import (
 	"image/color"
 )
 
-// scanout.go is the Phase-4 faithful display readout: it builds the output frame
-// by scanning the unified core buffer (acrtc.go) — a port of the essential
-// behaviour of MAME hd63484_device::draw_graphics_line, plus the 8593's
-// SUPERIMPOSED access mode (OMR bit 3). The firmware draws the graph content
-// (box/trace/text) at the ORG page and fills the vertical grid pattern into a
-// second page exactly +0x4000 words away (MAR 0x4000); with OMR bit 3 set the
-// display OVERLAYS the two pages. So display pixel = content | grid(+0x4000) —
-// the real hardware mechanism, replacing the legacy +209 render offset.
+// scanout.go — display readouts over the unified core buffer (acrtc.go), the
+// SINGLE frame buffer every drawing command writes (the legacy vram/bgVram/
+// textPlane split is deleted).
 //
-// This renders directly from c.core with NO orgRow=256 / displayScanStart / +209
-// coordinate hacks. It is validated against the legacy render before RenderFrame
-// is switched onto it (then bgVram + the hacks get deleted).
+// Two views exist:
+//
+//   - RenderScanout / RenderScanoutByCmd — the CANONICAL, register-derived
+//     scanout (SP1 lines × MWR1 words from SAR1; a port of MAME
+//     draw_graphics_line). No coordinate constants. The GUI, goldens and
+//     machine tests use these.
+//
+//   - RenderCore (behind RenderFrame) — a legacy PRESENTATION view for the
+//     older cmd/ diagnostic tools and RenderDebug: CRT vertical stretch,
+//     fixed graph-window framing (graphCoreRow*/coreXOrigin below) and a
+//     synthesized faint dotted rendering of the +0x4000 grid page. Its
+//     constants shape only this view, never the buffer content. New code
+//     should use RenderScanout.
 
 const (
 	// gridPageWords is the fixed offset between the content page and the grid page

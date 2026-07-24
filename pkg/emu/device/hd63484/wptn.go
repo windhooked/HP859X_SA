@@ -24,11 +24,6 @@ func (c *Chip) blitGlyph(rows [glyphRows]uint16, fg, bg uint16, yoff int) {
 	// dithered). In mono they stay in vram: the SCLR's per-cycle graph dither
 	// clears them to the dim background and they redraw solid, so they read as
 	// crisp (not prominently dithered) without the text-plane machinery.
-	if c.Colorized {
-		prev := c.activePlane
-		c.activePlane = &c.textPlane
-		defer func() { c.activePlane = prev }()
-	}
 	// Suppress the residual early-boot glyph the firmware blits at the exact
 	// drawing origin (0,0). With ORG_row=256 and displayScanStart=23 the ORG
 	// origin maps to VRAM row 256 — just below the visible window (rows 23..278),
@@ -55,11 +50,10 @@ func (c *Chip) blitGlyph(rows [glyphRows]uint16, fg, bg uint16, yoff int) {
 			case row&(1<<uint(b)) != 0 || bgLit:
 				c.setVRAMPixel(x, y)
 			default:
-				// OPAQUE glyph: clear the non-lit pixels of the cell in the
-				// foreground plane so a re-blitted glyph (e.g. a blinking
-				// annunciator redrawn at the same cell) overwrites the previous
-				// one instead of accumulating. The dim background dots (bgVram)
-				// still show through the cleared pixels at render time.
+				// OPAQUE glyph: clear the non-lit pixels of the cell so a
+				// re-blitted glyph (e.g. a blinking annunciator redrawn at the
+				// same cell) overwrites the previous one instead of
+				// accumulating.
 				c.clearVRAMPixel(x, y)
 			}
 		}
@@ -130,14 +124,8 @@ func (dec *decoder) feedRaster(c *Chip, w uint16) {
 		return
 	}
 	// VRAM raster-write path. Little-endian within the word — bit 0 = leftmost
-	// pixel of the 16-pixel run. Bulk raster bursts are the firmware's faint
-	// background dot texture (the 0x4400 fill), so they land in the BACKGROUND
-	// plane (bgVram), rendered dim under the bright foreground (see render.go).
-	if c.memPos+1 < len(c.bgVram) {
-		c.bgVram[c.memPos] = byte(w & 0xFF)
-		c.bgVram[c.memPos+1] = byte(w >> 8)
-	}
-	// The 0x4400 raster burst is the graticule GRID pattern. Mirror it into the
+	// pixel of the 16-pixel run.
+	// The 0x4400 raster burst is the graticule GRID pattern. Write it into the
 	// core's GRID PAGE (words 0x4000..0x7fff) so the scanout can superimpose it as a
 	// faint recessive grid. CLAMP to the grid page: the firmware writes two bursts
 	// (double-buffer); without the clamp the second burst's address ran past
@@ -158,10 +146,10 @@ func (dec *decoder) feedRaster(c *Chip, w uint16) {
 	const burstWords = 16384
 	if c.PaintWords%burstWords == 0 {
 		dec.st = stCmd
-		// Wrap memPos when vram fills (firmware paints 2 bursts per
-		// frame and the chip's auto-increment carries position across
-		// them — we extend by chunking modulo vram).
-		if c.memPos >= len(c.vram) {
+		// Wrap memPos when the frame buffer fills (firmware paints 2 bursts
+		// per frame and the chip's auto-increment carries position across
+		// them — we extend by chunking modulo the buffer size).
+		if c.memPos >= VRAMSize {
 			c.memPos = 0
 		}
 	}
@@ -188,15 +176,12 @@ func (dec *decoder) handleWPRSideEffect(c *Chip, reg, value uint16) {
 	case PRMARHigh:
 		c.marHigh = value
 		if c.marLow == 0x4000 && c.marHigh == 0x0000 {
-			// The raster burst targets the MAR word-address: MAR =
-			// (marHigh<<16)|marLow = 0x4000 words → byte offset 0x8000 = row
-			// 256. That is the OFF-SCREEN back-buffer (the display shows only
-			// the 256 lines at rows 0..255 — VisibleHeight). The firmware's
-			// uniform 0x4400 fill is a back-buffer prepare, NOT visible
-			// content; writing it at its true MAR offset keeps it off-screen
-			// instead of striping the visible graticule. (memPos is a byte
-			// offset into bgVram; the fill of 16384 words = 32768 bytes lands
-			// in bgVram[0x8000..0xFFFF] = rows 256..511.)
+			// The raster burst targets the RWP word-address: (marHigh<<16)|
+			// marLow = 0x4000 words = the core GRID PAGE (words 0x4000..0x7FFF,
+			// outside the displayed content page), where the firmware's uniform
+			// 0x4400 fill prepares the graticule grid pattern instead of
+			// striping the visible screen. memPos is a BYTE offset into that
+			// address space (the raster path halves it back to words).
 			c.memPos = (int(c.marHigh)<<16 | int(c.marLow)) << 1
 			c.Paints++
 			dec.st = stRasterData
