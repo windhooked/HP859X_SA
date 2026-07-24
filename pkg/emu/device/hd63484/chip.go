@@ -298,6 +298,8 @@ type Chip struct {
 	PaintWords     int            // total pixel-data words written into vram
 	ScreenClears   int            // SCLR commands executed
 	AreaClears     int            // CLR commands executed
+	SCLRNoAreaDef  int            // logical SCLRs skipped for lack of an area-def (no-op branch)
+	SCLRNoAreaLast [4]int         // last skipped SCLR: rwp, ax, ay, pattern
 	UnknownCmds    int            // commands the parser saw but doesn't model
 	UnknownCmdHist map[uint16]int // histogram of unknown opcodes for RE
 

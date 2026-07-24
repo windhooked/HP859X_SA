@@ -187,7 +187,11 @@ func (c *Chip) execClear(cr, pattern uint16, ax, ay int16) {
 				}
 			default:
 				// Logical SCLR with NO area-def (boot full-screen pass) — left
-				// untouched for now (the boot doesn't rely on it; revisit if needed).
+				// untouched for now (the boot doesn't rely on it; revisit if
+				// needed). Tallied so redraw probes can spot content that
+				// SHOULD have been cleared (e.g. softkey-label overlap).
+				c.SCLRNoAreaDef++
+				c.SCLRNoAreaLast = [4]int{int(c.rwp[c.rwpDn]), int(ax), int(ay), int(pattern)}
 			}
 		}
 	}

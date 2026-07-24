@@ -27,6 +27,19 @@ Update this as facts change. If a theory is in "DISPROVEN", do not raise it agai
   `RenderMemoryAreasCollage`, write histogram; experiment flags `APLLUpper`,
   `GraticuleToUpper` (default off).
 
+## Glyph overlap on the FIRST menu switch (2026-07-24) — transient, self-healing
+- Symptom: freq_menu.png (first F9 after boot) shows merged label text
+  ("CoFREQ"): boot-DLP-drawn softkey labels sit at cell offsets the operating-
+  loop label walker (fcn.e7a2) does not exactly cover, so its opaque glyphs
+  leave partial residue. Steady state is CLEAN (menu_nav.png — subsequent
+  redraws align cell-for-cell and the opaque blits fully overwrite).
+- NOT a missing clear: instrumented the F9+F2 redraw — the logical-SCLR
+  no-area-def no-op branch fired 0x (counter Chip.SCLRNoAreaDef); 4754 CLR
+  area ops executed. TestGlyphOverlapDiag (DIAG probe).
+- Verdict: minor first-switch transient; revisit only if a real-HW capture
+  shows the first switch is clean there (would imply a missed label-column
+  clear in the boot->operating handoff).
+
 ## DISPROVEN / RULED OUT (do NOT propose these again)
 - ❌ **CRT persistence** is NOT the cause of the trace "forest". (User: #1 doesn't hold.)
 - ❌ **Moving the trace / graticule region to a separate (upper) buffer does NOT fix
