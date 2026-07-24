@@ -186,3 +186,46 @@ func (c *Chip) RenderScanoutByCmd() *image.RGBA {
 	drawCmdLegend(img, lines)
 	return img
 }
+
+// ScanoutUnion ORs the LIVE register-derived scanout into dst (one byte per
+// pixel, 1 = lit), reusing dst when it is already the right size; returns
+// (dst, width, lines). It always reads the live core — never the stable
+// snapshot — because its purpose is CRT BEAM INTEGRATION: callers sample it
+// several times per displayed frame and union the results, which is what the
+// real CRT's continuously-scanning beam does. A single point-sample of the
+// live buffer misses content that is mid-erase/redraw (the graticule grid
+// spends much of the sweep cycle cleared); the union across the frame's
+// samples restores it, faithfully.
+func (c *Chip) ScanoutUnion(dst []uint8) ([]uint8, int, int) {
+	lines := int(c.sp[1])
+	if lines == 0 {
+		lines = VisibleHeight
+	}
+	mwr := int(c.core.mwr[1])
+	if mwr == 0 {
+		mwr = 64
+	}
+	sar := c.core.sar[1]
+	w := mwr * 16
+	n := w * lines
+	if len(dst) != n {
+		dst = make([]uint8, n)
+	}
+	for dl := 0; dl < lines; dl++ {
+		base := (sar + uint32(dl*mwr)) & acrtcRAMMask
+		row := dl * w
+		for word := 0; word < mwr; word++ {
+			v := c.core.ram[(base+uint32(word))&acrtcRAMMask]
+			if v == 0 {
+				continue
+			}
+			px := row + word*16
+			for b := 0; b < 16; b++ {
+				if v&(1<<uint(b)) != 0 {
+					dst[px+b] = 1
+				}
+			}
+		}
+	}
+	return dst, w, lines
+}

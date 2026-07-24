@@ -32,6 +32,7 @@ import (
 	"image/color"
 	"image/png"
 	"log"
+	"math"
 	"os"
 	"time"
 
@@ -107,11 +108,18 @@ const (
 	irqServiceCost = 400
 	irq4Cost       = 600 // IRQ4 handler is slightly heavier (transport + ring-buf)
 
-	// phosphorDecay is the per-frame retention of the host-side long-persistence
-	// phosphor model (presentation-layer only — the frame buffer is untouched).
-	// 0.90 at 60 fps ≈ 130 ms half-life, in the range of the long-persistence
-	// phosphors these analyzer CRTs used; bright new content overwrites decay.
-	phosphorDecay = 0.90
+	// phosphorDecayPer2M is the phosphor retention per 2M EMULATED CYCLES (one
+	// fast-mode frame). The decay is tied to emulated time, not wall frames,
+	// because the firmware's erase/repaint cadence (the graticule grid repaints
+	// every ~4 fast-frames of cycles) lives in emulated time — a frame-based
+	// decay would let the grid fade out at Speed: Real (7.5x fewer cycles per
+	// frame). Presentation-layer only; the frame buffer is untouched.
+	phosphorDecayPer2M = 0.90
+
+	// beamSamples is how many times per frame the live buffer is sampled and
+	// unioned (the beam-integration granularity). 16 keeps the cost trivial while
+	// bounding the longest unseen erase window to ~1/16 of a frame.
+	beamSamples = 16
 
 	toolbarH = 22 // toolbar strip height in layout pixels
 )
@@ -200,11 +208,19 @@ type game struct {
 	// realtime paces the emulation at the real instrument's 16 MHz (sweep and
 	// refresh dynamics match the physical unit); off = fast (default).
 	realtime bool
+	// decay is the per-frame phosphor retention, derived from the cycles the
+	// frame executed (see phosphorDecayPer2M).
+	decay float32
 
-	// phos is the phosphor intensity accumulator (one float per pixel of the
-	// current render size); disp is the composited output buffer.
-	phos []float32
-	disp *image.RGBA
+	// Beam-integration state: union is the per-frame OR of several live-buffer
+	// samples (the CRT beam integrating over the frame — a single point-sample
+	// misses content that is mid-erase/redraw, e.g. the graticule grid). phos is
+	// the phosphor intensity accumulator; disp the composited output. unionW/H
+	// track the sampled geometry.
+	union          []uint8
+	unionW, unionH int
+	phos           []float32
+	disp           *image.RGBA
 	// lastImg is the most recent image handed to Draw (for Save).
 	lastImg *image.RGBA
 }
@@ -268,36 +284,51 @@ func (g *game) resetPhosphor() {
 	}
 }
 
-// renderDisplay returns the current display image: the register-derived LIVE
-// scanout — the CRT view — either realistic amber (with the phosphor decay
-// composited) or the by-command coloured diagnostic (raw, with legend).
-func (g *game) renderDisplay() *image.RGBA {
-	if g.byCmd {
-		return g.m.MMIO.Display.Chip.RenderScanoutByCmd()
-	}
-	img := g.m.MMIO.Display.Chip.RenderScanout()
-	if !g.phosphor {
-		return img
-	}
-	return g.compositePhosphor(img)
+// sampleBeam unions one live-buffer sample into the frame accumulator.
+func (g *game) sampleBeam() {
+	g.union, g.unionW, g.unionH = g.m.MMIO.Display.Chip.ScanoutUnion(g.union)
 }
 
-// compositePhosphor applies the long-persistence phosphor model: per pixel,
-// intensity = max(lit-now, previous*phosphorDecay). The output is the amber
-// pen colour scaled by intensity — bright fresh strokes over a fading tail,
-// which is exactly how the real CRT hides mid-redraw states and slow sweeps.
-func (g *game) compositePhosphor(img *image.RGBA) *image.RGBA {
-	b := img.Bounds()
-	n := b.Dx() * b.Dy()
+// renderDisplay returns the current display image: the beam-integrated amber
+// CRT view (with optional phosphor persistence), or the by-command coloured
+// diagnostic (stable snapshot, with legend).
+func (g *game) renderDisplay() *image.RGBA {
+	if g.byCmd {
+		// Diagnostic view: read the stable frame snapshot for a complete,
+		// flicker-free attribution image.
+		chip := g.m.MMIO.Display.Chip
+		chip.SetRenderLive(false)
+		img := chip.RenderScanoutByCmd()
+		chip.SetRenderLive(true)
+		return img
+	}
+	return g.compositeCRT()
+}
+
+// compositeCRT builds the amber CRT frame from the beam-integrated union and
+// the long-persistence phosphor model: per pixel, intensity = max(lit-this-
+// frame, previous*phosphorDecay). Bright fresh strokes over a fading tail —
+// exactly how the real CRT hides mid-redraw states and slow sweeps. With
+// phosphor off the union alone still integrates within the frame.
+func (g *game) compositeCRT() *image.RGBA {
+	n := g.unionW * g.unionH
+	if n == 0 {
+		if g.disp == nil {
+			g.disp = image.NewRGBA(image.Rect(0, 0, device.DisplayWidth, device.DisplayHeight))
+		}
+		return g.disp
+	}
 	if len(g.phos) != n {
 		g.phos = make([]float32, n)
-		g.disp = image.NewRGBA(b)
+		g.disp = image.NewRGBA(image.Rect(0, 0, g.unionW, g.unionH))
 	}
-	src := img.Pix
 	dst := g.disp.Pix
 	for i := 0; i < n; i++ {
-		v := g.phos[i] * phosphorDecay
-		if src[i*4] > 0 { // lit now (R channel of the amber pen)
+		var v float32
+		if g.phosphor {
+			v = g.phos[i] * g.decay
+		}
+		if g.union[i] != 0 {
 			v = 1
 		}
 		g.phos[i] = v
@@ -314,6 +345,15 @@ func (g *game) Update() error {
 	if g.realtime {
 		perFrame = realCyclesPerFrame
 	}
+	// CRT beam integration: union several live-buffer samples across the frame's
+	// execution so content that is erased+redrawn within the frame (graticule
+	// grid, trace) stays lit — as on the real, continuously-scanning CRT.
+	for i := range g.union {
+		g.union[i] = 0
+	}
+	g.decay = float32(math.Pow(phosphorDecayPer2M, float64(perFrame)/2e6))
+	sampleStride := perFrame / beamSamples
+	nextSample := sampleStride
 	for done := 0; done < perFrame; done += chunkCycles {
 		g.m.CPU.Run(chunkCycles)
 		g.lb.Check(g.m.CPU.Reg(cpu.PC), g.m.CPU.SetReg)
@@ -326,7 +366,12 @@ func (g *game) Update() error {
 			g.cycles += irqServiceCost
 		}
 		g.m.DriveOneSweepChunk()
+		if done >= nextSample {
+			g.sampleBeam()
+			nextSample += sampleStride
+		}
 	}
+	g.sampleBeam() // end-of-frame sample
 
 	// ── Toolbar clicks ──────────────────────────────────────────────────────
 	if inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
