@@ -78,6 +78,17 @@ Update this as facts change. If a theory is in "DISPROVEN", do not raise it agai
 - **OPEN (small): stopped-content ghosts** — content that ceases being redrawn
   (old readouts/markers) leaves a 50%-dither residue until a region clear;
   span/menu changes wipe it (verified). Check real-HW footage for the same.
+  2026-07-24 follow-up: the BOOT emits a TWO-PHASE full-screen erase (477x
+  text-row blocks AND-0xAAAA + 210x columns AND-0x5555, rwp 0x202..0x3a44) that
+  our area-def gate silently SKIPPED — now executed faithfully (no-area-def
+  logical SCLRs run per MAME, full-word mask; also fixed core.mask never being
+  initialised to 0xFFFF). The mid-graph ghost bands PERSIST regardless: they
+  are drawn at operating-entry (after the boot erases) and only the odd-phase
+  column erase covers their rows. ❌ DISPROVEN: gating GLYPH fg pixels by CL1
+  (like the pen) — dithers ALL text to fragments AND does not remove the bands;
+  the glyph blit colour source is NOT CL1 (fg/bg packet words are 0000/0000 —
+  the real source is undecoded; candidates: pattern-RAM colour pair, PR5, or an
+  explicit readout-region clear we have not identified). Do not re-propose.
 - GUI note: the beam integration + phosphor bridges the mid-cycle text
   thinning (text repaints each annunciator cycle); only STATIC probe renders
   show it eaten.

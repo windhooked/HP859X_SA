@@ -48,6 +48,11 @@ func (c *Chip) blitGlyph(rows [glyphRows]uint16, fg, bg uint16, yoff int) {
 			x := c.penX + b
 			switch {
 			case row&(1<<uint(b)) != 0 || bgLit:
+				// NOT phase-gated: glyphs render solid. (Tested 2026-07-24:
+				// gating glyph fg by CL1 like the pen dithers ALL text to
+				// fragments AND does not remove the mid-graph ghost bands —
+				// the glyph blit's colour source is NOT CL1. The real source
+				// is undecoded; see DISPLAY_FINDINGS "stopped-content ghosts".)
 				c.setVRAMPixel(x, y)
 			default:
 				// OPAQUE glyph: clear the non-lit pixels of the cell so a

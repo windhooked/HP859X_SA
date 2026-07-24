@@ -45,29 +45,16 @@ func (c *Chip) execClear(cr, pattern uint16, ax, ay int16) {
 	mm := cr & 0x03
 	logical := cr&0x0400 != 0 // BIT(cr,10)
 
-	// === NO DITHERING ===
-	// On the real instrument the display is 1-BIT: every pixel is on or off, one
-	// colour. The firmware DITHERS — ANDs the graph with a 0x5555/0xAAAA
-	// checkerboard (SCLR, bit10=1) — purely to work around that 1-bit tube: a 50%
-	// checkerboard time-averages on the phosphor into "half bright" (the recessive
-	// graticule) and the complementary 0x5555/0xAAAA pair fades old content away
-	// (its "erase to grey", since a 1-bit tube has no erase-to-dim primitive).
-	//
-	// We render into a true-colour RGBA framebuffer and have NONE of those
-	// constraints, so we do NOT reproduce the dither. Replicating it pixel-for-
-	// pixel froze one checkerboard phase at full brightness — that was the "trace
-	// never clears" ghost. Instead we read the firmware's INTENT through the
-	// command and render it cleanly:
-	//   • SCLR (logical AND-checkerboard) over the graph  → the intent is CLEAR
-	//     → clean foreground erase (no dots).
-	//   • CLR (REPLACE, bit10=0)                          → a genuine pattern fill
-	//     → write the pattern (real content / explicit erase).
-	// The bgVram "dim background" plane the dither used to feed is therefore no
-	// longer written here (it survives only for the off-screen 0x4400 raster
-	// prepare in wptn.go). The logical-op math (OR/EOR/masked-REPLACE) is kept as
-	// labelled, intentionally-empty handlers below: this firmware only ever uses
-	// the AND-checkerboard on the graph, but the cases are documented so the
-	// handler is present if a future path needs one.
+	// === PHASE-MULTIPLEX MODEL (2026-07-24) ===
+	// The display is phase-multiplexed by pixel parity (see draw.go
+	// penPhaseLit): content is drawn at a CL1-selected phase and the SCLR
+	// AND-0x5555/0xAAAA ops erase EXACTLY the matching phase. The faithful
+	// logical op below IS the erase mechanism — it must run for every logical
+	// SCLR (per MAME command_clr_exec there is NO area-def dependency; the
+	// former "clip required" gate silently skipped the boot's 696 two-phase
+	// full-screen erases and left the boot text as even-phase ghosts). The
+	// area-def, when valid, still trims the op at the graph edges (verified:
+	// clearing boundary words whole wiped softkey-label leading chars).
 
 	// AREA-DEFINITION clip rect (WPR 0x08-0x0b). The cal/operating display sets it
 	// to the graph (0,0)-(400,209) before its SCLR, so the clear is confined to the
@@ -189,12 +176,31 @@ func (c *Chip) execClear(cr, pattern uint16, ax, ay int16) {
 					c.core.writeword(coreOff, res)
 				}
 			default:
-				// Logical SCLR with NO area-def (boot full-screen pass) — left
-				// untouched for now (the boot doesn't rely on it; revisit if
-				// needed). Tallied so redraw probes can spot content that
-				// SHOULD have been cleared (e.g. softkey-label overlap).
+				// FAITHFUL logical SCLR with NO valid area-def (the boot's
+				// two-phase full-screen erase passes): same chip op, full-word
+				// mask. Formerly a silent no-op — that skip left the boot text
+				// as ghost bands (SCLRNoAreaDef counts these for diagnostics).
 				c.SCLRNoAreaDef++
 				c.SCLRNoAreaLast = [4]int{int(c.rwp[c.rwpDn]), int(ax), int(ay), int(pattern)}
+				if c.ClearColLogOn && len(c.SCLRSkipLog) < 2048 {
+					c.SCLRSkipLog = append(c.SCLRSkipLog, [4]int{int(c.rwp[c.rwpDn]), int(ax), int(ay), int(pattern)})
+				}
+				data := c.core.readword(coreOff)
+				m := c.core.mask
+				var res uint16
+				switch mm {
+				case 0:
+					res = (data &^ m) | (pattern & m)
+				case 1:
+					res = (data &^ m) | ((data | pattern) & m)
+				case 2:
+					res = (data &^ m) | ((data & pattern) & m)
+				case 3:
+					res = (data &^ m) | ((data ^ pattern) & m)
+				}
+				if res != data {
+					c.core.writeword(coreOff, res)
+				}
 			}
 		}
 	}

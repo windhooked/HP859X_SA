@@ -287,19 +287,20 @@ type Chip struct {
 	glyphLog *GlyphLogger
 
 	// Diagnostics (exported so tests + cmd/* probes can introspect).
-	DataWords      int    // total words fed to WriteData
-	Moves          int    // MOVE markers seen
-	Lines          int    // LINE commands drawn (absolute + relative)
-	Rects          int    // ARCT/RRCT outlines drawn
-	FilledRects    int    // AFRCT/RFRCT filled rects drawn
-	Dots           int    // DOT commands drawn
-	Glyphs         int    // glyph (WPTN+count-of-10) packets blitted
-	Paints         int    // raster-write bursts entered
-	PaintWords     int    // total pixel-data words written into vram
-	ScreenClears   int    // SCLR commands executed
-	AreaClears     int    // CLR commands executed
-	SCLRNoAreaDef  int    // logical SCLRs skipped for lack of an area-def (no-op branch)
-	SCLRNoAreaLast [4]int // last skipped SCLR: rwp, ax, ay, pattern
+	DataWords      int      // total words fed to WriteData
+	Moves          int      // MOVE markers seen
+	Lines          int      // LINE commands drawn (absolute + relative)
+	Rects          int      // ARCT/RRCT outlines drawn
+	FilledRects    int      // AFRCT/RFRCT filled rects drawn
+	Dots           int      // DOT commands drawn
+	Glyphs         int      // glyph (WPTN+count-of-10) packets blitted
+	Paints         int      // raster-write bursts entered
+	PaintWords     int      // total pixel-data words written into vram
+	ScreenClears   int      // SCLR commands executed
+	AreaClears     int      // CLR commands executed
+	SCLRNoAreaDef  int      // logical SCLRs skipped for lack of an area-def (no-op branch)
+	SCLRNoAreaLast [4]int   // last skipped SCLR: rwp, ax, ay, pattern
+	SCLRSkipLog    [][4]int // all skipped no-area-def SCLRs when ClearColLogOn
 	// ClearColLog (diagnostic, enabled by ClearColLogOn): per faithful-SCLR
 	// column op, records [rwp word, mask, pattern] to establish erase coverage.
 	ClearColLogOn bool
@@ -489,6 +490,7 @@ func New() *Chip {
 	// Matches the 8593's display-init: ORG 0x4003,0xa450 → dn=1, dpa=0x3a45; MWR1=64.
 	c.core.setORG(0x4003, 0xa450)
 	c.core.mwr[1] = 64
+	c.core.mask = 0xFFFF // match maskReg: all bits affected until WPR 0x04 narrows it
 	c.glyphLog = newGlyphLoggerFromEnv()
 	c.initRegWatch()
 	return c
