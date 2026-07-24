@@ -163,6 +163,9 @@ func (c *Chip) execClear(cr, pattern uint16, ax, ay int16) {
 					c.core.writeword(coreOff, res)
 				}
 			case clip:
+				if c.ClearColLogOn && d0 == 0 && d1 == 0 && len(c.ClearColLog) < 4096 {
+					c.ClearColLog = append(c.ClearColLog, [3]uint32{c.rwp[c.rwpDn], uint32(c.core.mask), uint32(pattern)})
+				}
 				// FAITHFUL SCLR. Execute the chip's real logical op (cr&3: 0 REPLACE /
 				// 1 OR / 2 AND / 3 EOR) under the mask register — NOT a "clean clear".
 				// So the firmware's 0x5555/0xAAAA AND-dither leaves the graticule's dot

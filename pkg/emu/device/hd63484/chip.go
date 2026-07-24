@@ -300,6 +300,10 @@ type Chip struct {
 	AreaClears     int            // CLR commands executed
 	SCLRNoAreaDef  int            // logical SCLRs skipped for lack of an area-def (no-op branch)
 	SCLRNoAreaLast [4]int         // last skipped SCLR: rwp, ax, ay, pattern
+	// ClearColLog (diagnostic, enabled by ClearColLogOn): per faithful-SCLR
+	// column op, records [rwp word, mask, pattern] to establish erase coverage.
+	ClearColLogOn bool
+	ClearColLog   [][3]uint32
 	UnknownCmds    int            // commands the parser saw but doesn't model
 	UnknownCmdHist map[uint16]int // histogram of unknown opcodes for RE
 
@@ -469,7 +473,14 @@ func New() *Chip {
 		orgRow:         defaultOrgRow,
 		maskReg:        0xFFFF, // all bits affected until WPR 0x04 narrows the mask
 	}
-	c.CleanClear = true // option B (default): SCLR dither-clear = clean erase
+	// Faithful SCLR by default: the chip's real AND-dither under the mask. This
+	// is what keeps the stippled graticule grid visible between redraws (the
+	// reference look: screens/trace_longrun.png); CleanClear=true (the former
+	// default) erased the grid every sweep along with the ghosts. The dither's
+	// side effects (50%-thinned text inside the clear region, old-content
+	// residue) are what the real CRT bridges via continuous redraw + phosphor —
+	// modelled by the GUI's beam integration.
+	c.CleanClear = false
 	// Faithful core defaults so the unified buffer addresses correctly before the
 	// firmware programs ORG/MWR at runtime (drives unit tests that draw directly).
 	// Matches the 8593's display-init: ORG 0x4003,0xa450 → dn=1, dpa=0x3a45; MWR1=64.

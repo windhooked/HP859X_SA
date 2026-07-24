@@ -124,6 +124,10 @@ const (
 // `box` with `pattern`, and applies `check`.
 func runClearCase(t *testing.T, draw func(c *Chip), x0, y0, x1, y1 int, pattern uint16, check func(*testing.T, *Chip, [][2]int)) {
 	c := New()
+	// These cases pin the CLEAN-CLEAR option's semantics (dither = clean erase).
+	// The chip default is now the FAITHFUL SCLR (AND-dither, which preserves the
+	// stippled graticule — see New()); opt into the mode under test explicitly.
+	c.CleanClear = true
 	draw(c)
 	lit := collectLit(c, x0, y0, x1, y1)
 	if len(lit) == 0 {

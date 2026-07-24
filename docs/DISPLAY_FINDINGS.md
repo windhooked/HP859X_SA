@@ -40,6 +40,34 @@ Update this as facts change. If a theory is in "DISPROVEN", do not raise it agai
   shows the first switch is clean there (would imply a missed label-column
   clear in the boot->operating handoff).
 
+## Graticule grid mechanism + the CleanClear trade-off (2026-07-24)
+- **The dotted reticule = stippled vector lines + the faithful SCLR dither.**
+  With `CleanClear=true` (former default) the grid was ERASED every sweep and
+  missing from natural renders (trace_natural.png had no grid at all); with the
+  faithful SCLR (AND under mask — now the DEFAULT) the grid renders exactly as
+  the reference screens/trace_longrun.png. Locked by the longrun comparison
+  (screens/longrun_faithful.png vs longrun_clean.png, TestLongrunGridDiag).
+- **The graph erase is a per-column flying erase bar,** decoded from the live
+  op stream (screens/cmdtrace_op.txt): per column `WPR1(CL1)=AAAA; WPR4(mask)=
+  FFFF; RWP=column; SCLR AND D=5555 (ax=0, ay=0xD1)` — 326 column ops sweeping
+  all 25 words (400 px) of the graph; plus 42 small AAAA rect ops (annunciator
+  regions). ClearColLog (chip diagnostic) + TestColEraseDiag measured full
+  coverage, mask always FFFF, D always 5555.
+- **The AND is IDEMPOTENT (manual-verified, um.txt SCLR §13 = MAME
+  command_clr_exec):** old lit pixels at bit positions where D has 1 survive
+  forever. A trace spike at even x survives the 5555 phase FULLY — that is the
+  trace-forest residue seen in faithful natural renders, plus 50%-thinned text
+  inside the column range and stale-readout ghosts.
+- **OPEN — how the real instrument avoids the residue:** phases do NOT
+  alternate in the observed stream (all 944 column ops D=5555). Candidates:
+  (a) the firmware repaints all live content every cycle and the residue is
+  only content that STOPPED being drawn (markers/readouts) — small in practice;
+  (b) an undecoded second erase mechanism; (c) our sweep injection redraws at
+  positions the real loop would not. Revisit against real-HW footage.
+- GUI note: the beam integration + phosphor bridges the mid-cycle text
+  thinning (text repaints each annunciator cycle); only STATIC probe renders
+  show it eaten.
+
 ## DISPROVEN / RULED OUT (do NOT propose these again)
 - ❌ **CRT persistence** is NOT the cause of the trace "forest". (User: #1 doesn't hold.)
 - ❌ **Moving the trace / graticule region to a separate (upper) buffer does NOT fix

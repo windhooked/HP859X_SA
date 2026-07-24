@@ -62,6 +62,7 @@ func setAreaDef(c *Chip, xmin, ymin, xmax, ymax uint16) {
 // touched and this fails.
 func TestCRTSclrClearsGlyph(t *testing.T) {
 	c := New()
+	c.CleanClear = true // pins the clean-clear option (see clearaccuracy_test.go)
 	const gx, gy = 64, 100 // firmware pen position, inside a typical graph
 	drawSolidGlyph(c, gx, gy)
 
