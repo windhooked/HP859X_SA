@@ -301,6 +301,9 @@ type Chip struct {
 	SCLRNoAreaDef  int      // logical SCLRs skipped for lack of an area-def (no-op branch)
 	SCLRNoAreaLast [4]int   // last skipped SCLR: rwp, ax, ay, pattern
 	SCLRSkipLog    [][4]int // all skipped no-area-def SCLRs when ClearColLogOn
+	// AAAARectLog, when set, records every executed clip-branch SCLR with
+	// pattern 0xAAAA as (rwp, ax, ay) — the text-cell erase coverage probe.
+	AAAARectLog *[][3]int
 	// ClearColLog (diagnostic, enabled by ClearColLogOn): per faithful-SCLR
 	// column op, records [rwp word, mask, pattern] to establish erase coverage.
 	ClearColLogOn bool
@@ -439,6 +442,19 @@ func (c *Chip) CoreORG() (layer int, dpa uint32, mwr1 uint16) {
 	return c.core.orgDN, c.core.orgDPA, c.core.mwr[1]
 }
 
+// WatchCoreWord arms the write-history diagnostic on one core word offset;
+// every write to it is appended to log as (old, new, cmd-tag).
+func (c *Chip) WatchCoreWord(off uint32, log *[][3]uint16) {
+	c.core.watchWord = off
+	c.core.watchLog = log
+}
+
+// CoreTagBit returns the command tag of pixel bit (0..15) in core word off —
+// for diagnostics that classify lit content (tagGlyph=7 etc.).
+func (c *Chip) CoreTagBit(off uint32, bit int) uint8 {
+	return c.core.cmdTag[(off&acrtcRAMMask)<<4|uint32(bit&15)]
+}
+
 // CoreWord returns the faithful core buffer word at the given word offset.
 func (c *Chip) CoreWord(off uint32) uint16 { return c.core.readword(off) }
 
@@ -554,7 +570,39 @@ func (c *Chip) setVRAMPixel(x, y int) {
 	if c.GraticuleToUpper && regionOf(x, y) == regionCenter {
 		c.core.drawOffset = 0x4000
 	}
-	c.core.setDot(int16(x), int16(y), 1)
+	c.core.setDot(int16(x), int16(y), uint16(1<<uint(c.core.getBpp()))-1)
+	c.core.drawOffset = 0
+	c.RegionWrites[regionOf(x, y)]++
+}
+
+// drawPenPixel draws one pixel with the pen colour (CL1's colour field at the
+// pixel position), OR-ed into the existing pixel — the firmware's vector
+// commands run OPM=OR (APLL 0x9841 / DOT 0xCC41), so e.g. the trace (colour
+// 10) never destroys text/graticule bits (colour 01) sharing the word.
+// Applies the AREA clip like setVRAMPixel.
+func (c *Chip) drawPenPixel(x, y int) {
+	if c.areaClip && !c.DisableAreaClip {
+		xmin, ymin := int(int16(c.regs[0x08])), int(int16(c.regs[0x09]))
+		xmax, ymax := int(int16(c.regs[0x0a])), int(int16(c.regs[0x0b]))
+		if xmax > xmin && ymax > ymin && (x < xmin || x > xmax || y < ymin || y > ymax) {
+			return
+		}
+	}
+	col := c.penColor(x, y)
+	if col == 0 {
+		return
+	}
+	if c.GraticuleToUpper && regionOf(x, y) == regionCenter {
+		c.core.drawOffset = 0x4000
+	}
+	if cur := c.core.getDot(int16(x), int16(y)); cur|col != cur {
+		c.core.setDot(int16(x), int16(y), cur|col)
+	} else if cur|col == cur && cur == 0 {
+		// nothing to write
+	} else {
+		// value unchanged — still count the write for region stats? no-op.
+		_ = cur
+	}
 	c.core.drawOffset = 0
 	c.RegionWrites[regionOf(x, y)]++
 }

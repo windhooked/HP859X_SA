@@ -33,13 +33,14 @@ func TestGraticuleGridVisible(t *testing.T) {
 	// inspection image uses the by-command view.
 	img := m.MMIO.Display.Chip.RenderScanout()
 	w := img.Bounds().Dx()
-	// Graph interior (scanout coords): right of the left label column, left of the
-	// softkey column, above the trace noise band at the bottom.
-	x0, x1 := 100, 495
+	// Graph interior (scanout coords): right of the left label column, left of
+	// the softkey column, above the trace noise band at the bottom. The 2bpp
+	// scanout is 512 px wide (8 px/word × MWR1=64); the graph spans ≈ x 40..448.
+	x0, x1 := 50, 440
 	if x1 > w {
 		x1 = w
 	}
-	y0, y1 := 25, 195
+	y0, y1 := 25, 185
 
 	// Count HORIZONTAL grid lines: the firmware's amplitude divisions span the full
 	// graph width, so a grid row lights a large fraction of x0..x1; empty graph rows
@@ -55,7 +56,9 @@ func TestGraticuleGridVisible(t *testing.T) {
 				lit++
 			}
 		}
-		if lit >= span/4 {
+		// The divisions are DOTTED (dots every ~4 px at 2bpp) — a grid row
+		// lights ≥ ~20% of the span; empty rows light ~nothing.
+		if lit >= span/5 {
 			gridRows++
 		}
 	}

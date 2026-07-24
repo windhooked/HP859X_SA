@@ -46,15 +46,17 @@ const (
 	coreXOrigin = 32
 )
 
-// coreBit reads a single 1bpp pixel from the core at (coreRow, px) — row-major,
-// MWR1 words per line.
+// coreBit reads a single PIXEL (any plane lit) from the core at (coreRow, px)
+// — row-major, MWR1 words per line, bpp-aware (2bpp: 8 px/word).
 func (c *Chip) coreBit(coreRow, px int) bool {
 	mwr := int(c.core.mwr[1])
 	if mwr <= 0 {
 		mwr = 64
 	}
-	w := c.core.readword(uint32(coreRow*mwr + px/16))
-	return w&(1<<uint(px&15)) != 0
+	bpp := c.core.getBpp()
+	ppw := 16 / bpp
+	w := c.core.readword(uint32(coreRow*mwr + px/ppw))
+	return (w>>(uint(px%ppw)*uint(bpp)))&(uint16(1<<uint(bpp))-1) != 0
 }
 
 // RenderCore produces the output frame from the unified core buffer via the
@@ -120,19 +122,22 @@ func (c *Chip) RenderScanout() *image.RGBA {
 	if mwr == 0 {
 		mwr = 64
 	}
+	bpp := c.core.getBpp()
+	ppw := 16 / bpp
+	pmask := uint16(1<<uint(bpp)) - 1
 	sar := c.core.sar[1]
-	w := mwr * 16
+	w := mwr * ppw
 	img := image.NewRGBA(image.Rect(0, 0, w, lines))
 	for dl := 0; dl < lines; dl++ {
 		base := (sar + uint32(dl*mwr)) & acrtcRAMMask
 		for word := 0; word < mwr; word++ {
 			v := c.core.scanWord(base + uint32(word))
-			for b := 0; b < 16; b++ {
+			for b := 0; b < ppw; b++ {
 				col := color.RGBA{0, 0, 0, 0xFF}
-				if v&(1<<uint(b)) != 0 {
+				if (v>>(uint(b)*uint(bpp)))&pmask != 0 {
 					col = fgColor
 				}
-				img.SetRGBA(word*16+b, dl, col)
+				img.SetRGBA(word*ppw+b, dl, col)
 			}
 		}
 	}
@@ -161,8 +166,11 @@ func (c *Chip) RenderScanoutByCmd() *image.RGBA {
 	if mwr == 0 {
 		mwr = 64
 	}
+	bpp := c.core.getBpp()
+	ppw := 16 / bpp
+	pmask := uint16(1<<uint(bpp)) - 1
 	sar := c.core.sar[1]
-	w := mwr * 16
+	w := mwr * ppw
 	const legendH = 20
 	img := image.NewRGBA(image.Rect(0, 0, w, lines+legendH))
 	for dl := 0; dl < lines; dl++ {
@@ -170,16 +178,21 @@ func (c *Chip) RenderScanoutByCmd() *image.RGBA {
 		for word := 0; word < mwr; word++ {
 			off := base + uint32(word)
 			v := c.core.scanWord(off)
-			for b := 0; b < 16; b++ {
+			for b := 0; b < ppw; b++ {
 				col := color.RGBA{0, 0, 0, 0xFF}
-				if v&(1<<uint(b)) != 0 {
-					cc := cmdTagColors[c.core.scanTagBit(off, b)]
+				if (v>>(uint(b)*uint(bpp)))&pmask != 0 {
+					// tag of whichever plane bit is lit (prefer the low bit)
+					bit := b * bpp
+					if v&(1<<uint(bit)) == 0 {
+						bit++
+					}
+					cc := cmdTagColors[c.core.scanTagBit(off, bit)]
 					if cc.A == 0 {
 						cc = fgColor // lit but untagged ⇒ default foreground
 					}
 					col = cc
 				}
-				img.SetRGBA(word*16+b, dl, col)
+				img.SetRGBA(word*ppw+b, dl, col)
 			}
 		}
 	}
@@ -205,8 +218,11 @@ func (c *Chip) ScanoutUnion(dst []uint8) ([]uint8, int, int) {
 	if mwr == 0 {
 		mwr = 64
 	}
+	bpp := c.core.getBpp()
+	ppw := 16 / bpp
+	pmask := uint16(1<<uint(bpp)) - 1
 	sar := c.core.sar[1]
-	w := mwr * 16
+	w := mwr * ppw
 	n := w * lines
 	if len(dst) != n {
 		dst = make([]uint8, n)
@@ -219,9 +235,9 @@ func (c *Chip) ScanoutUnion(dst []uint8) ([]uint8, int, int) {
 			if v == 0 {
 				continue
 			}
-			px := row + word*16
-			for b := 0; b < 16; b++ {
-				if v&(1<<uint(b)) != 0 {
+			px := row + word*ppw
+			for b := 0; b < ppw; b++ {
+				if (v>>(uint(b)*uint(bpp)))&pmask != 0 {
 					dst[px+b] = 1
 				}
 			}

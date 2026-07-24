@@ -42,6 +42,10 @@ type acrtc struct {
 
 	rwpDN int // RWP layer select for area ops
 
+	// word-watch diagnostic (see watchHit)
+	watchWord uint32
+	watchLog  *[][3]uint16
+
 	ccr  uint16 // control reg; GBM (graphic bit mode) in bits 8-10 selects bpp
 	mask uint16 // WPR 0x04 write-mask: which bits a logical op may change
 
@@ -172,8 +176,19 @@ func (a *acrtc) calcOffset(x, y int16) (offset uint32, bitPos uint8) {
 }
 
 func (a *acrtc) readword(off uint32) uint16 { return a.ram[off&acrtcRAMMask] }
+
+// WatchWord/WatchLog: diagnostic write-history for one word offset — every
+// writeword to WatchWord appends (old, new, curCmd tag). Enabled when
+// WatchLog != nil. Used to trace ghost-pixel lifecycles.
+func (a *acrtc) watchHit(o uint32, old, new uint16) {
+	if a.watchLog != nil && o == a.watchWord {
+		*a.watchLog = append(*a.watchLog, [3]uint16{old, new, uint16(a.curCmd)})
+	}
+}
+
 func (a *acrtc) writeword(off uint32, v uint16) {
 	o := off & acrtcRAMMask
+	a.watchHit(o, a.ram[o], v)
 	// Tag only the pixels this write NEWLY LIGHTS (0→1): a box-edge write that sets
 	// one bit of a word must not re-tag the glyph/trace pixels already lit in that
 	// word. Bits that stay lit keep their tag; cleared bits' tags are irrelevant

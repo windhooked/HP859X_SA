@@ -107,7 +107,13 @@ func (c *Chip) writeControlReg(ar, value uint16) {
 	// Memory-Width and Start-Address registers are banked: bank = (ar & 0x18) >> 3
 	// (0xC2→0, 0xCA→1, 0xD2→2, 0xDA→3 for MWR; 0xC4/0xC6→0 … 0xDC/0xDE→3 for SAR).
 	switch ar {
-	case 0x02: // Control register / IRQ (CCR) — stored only
+	case 0x02: // Control register / IRQ (CCR): GBM (bits 10-8) sets bits/pixel.
+		// The 8593 boot display-init programs CCR=0x0180 → GBM=1 → 2 BITS PER
+		// PIXEL, 8 px/word (the manual's colour-register replication rule then
+		// makes CL 0x5555 = solid colour 01 [text/graticule plane], 0xAAAA =
+		// colour 10 [trace plane], 0xFFFF = colour 11). Feeding it to the core
+		// switches all pixel addressing (calcOffset/setDot) to 2bpp.
+		c.core.ccr = value
 	case 0x04: // Operation Mode Register
 		c.omr = value
 	case 0x06: // Display Control Register

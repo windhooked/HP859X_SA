@@ -110,6 +110,40 @@ Update this as facts change. If a theory is in "DISPROVEN", do not raise it agai
   structurally impossible. Verified: enginePos tracks A5 in lockstep, wraps
   cleanly per sweep; longrun render = thin single floor + stable CAL peak.
 
+## ★★★ THE DISPLAY IS 2 BITS PER PIXEL (2026-07-24) — the definitive model
+- Boot display-init (ROM 0xA95E table) programs **CCR=0x0180 → GBM=1 → 2bpp,
+  8 px/word**; MWR1=64 words × 8 px = the 512-px visible width exactly. The
+  "phase multiplex by pixel parity" was the 1bpp mis-mapping of this: the two
+  parities are really the TWO BIT-PLANES of a 2bpp pixel. Colour-register
+  replication (manual): CL 0x5555 = solid colour 01 (text/graticule plane),
+  0xAAAA = colour 10 (trace plane), 0xFFFF = colour 11 (both). NOTHING is
+  dithered on the real chip.
+- All ops close: `SCLR AND 5555` clears the trace plane, `AND AAAA` the text
+  plane, `AND 0` both; trace APLL/DOT are OPM=OR (never destroy text bits);
+  glyph PTN (COL=00 REPLACE, cell 8×10 from `SZ=0x0907`) writes CL1/CL0 colour
+  fields per pixel — one AND-AAAA rect fully retires text (the eraser is
+  fcn.C084, template @0xBFF4, callers = the annunciator/readout module
+  fcn.E54E/E5C4 etc.).
+- PR-map corrections: **Pr05-07 = Pattern-RAM Control (PRC)**, not colour
+  (Pr05=pattern pointer+zoom counter — the post-glyph `WPR5=0` is the pointer
+  reset; Pr06=scan start; Pr07=scan end: 0x9070=8×10 glyph window, 0x00F0=16×1
+  stipple window). WPTN `$180X`: X = pattern-RAM start address; the glyph
+  packet's 10 words are 10 PATTERN ROWS (2 descender rows + 8 body), NOT
+  2 colours + 8 rows.
+- The "ghost text bands" were the REAL power-on text (HP-IB ADRS / COPYRIGHT /
+  rev) — legitimate content the real instrument also shows until a key clears
+  it — rendered half-dithered by the 1bpp mis-mapping. At 2bpp it renders
+  fully legible and erases correctly.
+- Implemented: core CCR feed (strict.go ar:0x02), penColor/colorField OR-draw
+  (draw.go), glyph REPLACE with CL1/CL0 fields (wptn.go), bpp-aware scanout
+  family (512-wide output). Unit tests keep 1bpp defaults (CCR unset).
+- OPEN (2bpp polish): (a) right-half solid trace block in long runs (erase/
+  draw extent mismatch to re-measure under 2bpp); (b) left-edge column of
+  wrapped negative-x content; (c) right softkey-label clipping at 512 —
+  ORG/window fine-tuning; (d) glyph 10-row blit (descender rows 0-1 currently
+  dropped); (e) 2bpp intensity mapping (colour 01 vs 10 brightness — needs
+  real-HW footage).
+
 ## DISPROVEN / RULED OUT (do NOT propose these again)
 - ❌ **CRT persistence** is NOT the cause of the trace "forest". (User: #1 doesn't hold.)
 - ❌ **Moving the trace / graticule region to a separate (upper) buffer does NOT fix

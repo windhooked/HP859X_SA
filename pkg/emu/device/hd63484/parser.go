@@ -430,9 +430,7 @@ func (dec *decoder) execCmd(c *Chip) {
 		c.drawCircle(c.penX, c.penY, int(int16(a[0])), true)
 
 	case idDOT:
-		if c.penPhaseLit(c.penX, c.penY) {
-			c.setVRAMPixel(c.penX, c.penY)
-		}
+		c.drawPenPixel(c.penX, c.penY)
 		c.Dots++
 		if c.DotLog != nil {
 			c.DotLog = append(c.DotLog, DotRec{c.penX, c.penY})

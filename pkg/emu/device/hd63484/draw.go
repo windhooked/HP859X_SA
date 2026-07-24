@@ -4,15 +4,47 @@ package hd63484
 // erroneous off-screen endpoint from spinning the renderer.
 const lineIterCap = 4096
 
-// setPixel writes one pixel into VRAM. The `set` argument controls whether
-// the bit is turned on (true = lit) or off (false = cleared). Used by the
-// drawing primitives below and by glyph blits.
+// setPixel writes one pixel. set=true draws with the pen colour (the CL1
+// colour field at the pixel position, OR-ed in per the firmware's OPM=OR
+// vector commands — so the trace plane never destroys text-plane bits);
+// set=false clears the pixel (both planes). Used by the drawing primitives
+// below and by glyph blits.
 func (c *Chip) setPixel(x, y int, set bool) {
 	if set {
-		c.setVRAMPixel(x, y)
+		c.drawPenPixel(x, y)
 	} else {
 		c.clearVRAMPixel(x, y)
 	}
+}
+
+// penColor returns the pen colour value for the pixel at firmware (x, y): the
+// bpp-bit field of CL1 (WPR 0x01) at the pixel's own position within its
+// frame-buffer word — the HD63484 colour-register rule. At the 8593's 2bpp:
+// CL1=0x5555 → colour 01 (text/graticule plane), 0xAAAA → colour 10 (trace
+// plane), 0xFFFF → colour 11 (both). CL1==0 (raw unit-test draws that never
+// program registers) falls back to all-planes-lit.
+func (c *Chip) penColor(x, y int) uint16 {
+	bpp := c.core.getBpp()
+	full := uint16(1<<uint(bpp)) - 1
+	cl := c.regs[0x01]
+	if cl == 0 {
+		return full
+	}
+	return c.colorField(cl, x, y)
+}
+
+// penColorGlyph is the glyph-fg colour: CL1's field at the pixel, with the
+// same all-planes fallback as penColor (raw unit-test draws).
+func (c *Chip) penColorGlyph(x, y int) uint16 { return c.penColor(x, y) }
+
+// colorField extracts the bpp-bit field of colour register value cl at the
+// pixel (x, y)'s own position within its frame-buffer word — the HD63484
+// colour replication rule (manual: "D is normally specified to contain
+// multiple copies of the colour information").
+func (c *Chip) colorField(cl uint16, x, y int) uint16 {
+	bpp := c.core.getBpp()
+	_, bitPos := c.core.calcOffset(int16(x), int16(y))
+	return (cl >> bitPos) & (uint16(1<<uint(bpp)) - 1)
 }
 
 // drawLine rasterises a line from (x0,y0) to (x1,y1) using Bresenham, applying
@@ -46,7 +78,7 @@ func (c *Chip) drawLine(x0, y0, x1, y1 int, set bool) {
 	}
 	err := dx - dy
 	for i := 0; i < lineIterCap; i++ {
-		if pat&(1<<uint(i&15)) != 0 && c.penPhaseLit(x0, y0) {
+		if pat&(1<<uint(i&15)) != 0 {
 			c.setPixel(x0, y0, set)
 		}
 		if x0 == x1 && y0 == y1 {
@@ -62,26 +94,6 @@ func (c *Chip) drawLine(x0, y0, x1, y1 int, set bool) {
 			y0 += sy
 		}
 	}
-}
-
-// penPhaseLit reports whether the pen colour register CL1 (WPR 0x01) lights
-// the pixel at firmware (x, y). THE PHASE-MULTIPLEX DECODE (2026-07-24): the
-// HD63484 draws a pixel with the colour register's bit at the pixel's bit
-// position within its frame-buffer word. The 8593 firmware NEVER draws solid —
-// CL1 is always 0x5555 or 0xAAAA — so the 1bpp screen is phase-multiplexed by
-// pixel parity into two logical planes: the trace is drawn at one phase
-// (CL1=0xAAAA -> odd positions) and the per-column flying-erase-bar
-// `SCLR AND 0x5555` clears EXACTLY that phase. Draw and erase are
-// phase-locked; a solid draw (our former model) put trace pixels in BOTH
-// phases and the even half could never be erased -> the trace pile-up.
-// CL1==0 (never programmed — raw unit-test draws) falls back to solid.
-func (c *Chip) penPhaseLit(x, y int) bool {
-	cl := c.regs[0x01]
-	if cl == 0 {
-		return true
-	}
-	_, bp := c.core.calcOffset(int16(x), int16(y))
-	return cl>>(uint(bp)&15)&1 != 0
 }
 
 // drawLineRouted draws a phase-gated line into the core frame buffer and
