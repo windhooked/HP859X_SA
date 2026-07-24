@@ -144,6 +144,27 @@ Update this as facts change. If a theory is in "DISPROVEN", do not raise it agai
   dropped); (e) 2bpp intensity mapping (colour 01 vs 10 brightness — needs
   real-HW footage).
 
+## Right-half trace pile-up (2026-07-24, characterized — NEXT open item)
+- Symptom (2bpp model): left ~half of the graph traces correctly (live
+  erase-bar + plot in lockstep with A5, ~10-sample lag); the RIGHT half
+  accumulates OR-drawn trace forever (only a keypress region-clear wipes it).
+  Structural: independent of GUI speed AND of sweep pacing
+  (SweepCyclesPerPoint 2300/4600 → identical coverage; 9200 → live path
+  stops entirely).
+- MEASURED: the firmware arms bf30 = idx 401 and A5 fills all 401 points, but
+  the live paint/erase pass (fcn.6C3C, erase column + plot per point, reached
+  via the IRQ1 → RAM-0xCA resident routine) only runs for idx 0..~200 —
+  EXACTLY HALF — then goes silent until the next sweep (TestColEraseDiag
+  correlation; TestArmCheckDiag). Its x math is full-range (x = idx+40 px,
+  RWP-L = 2·x); the b07a.7 skip-gate stays 0. The 0x410A capture handler is a
+  max-peak-detect with a BF3C/BF3E decimation countdown (1:1 at BF3C=1).
+- OPEN: why the live pass halts at the graph centre — candidates: (a) pos/neg
+  detector pair consumption (two buffer samples per displayed point in this
+  mode → our 1-sample-per-point injection starves the second half), (b) a
+  200-point bound cell in the RAM-resident sweep routine, (c) the caller's
+  per-sweep budget. Next probe: trace the RAM-0xCA routine + the 6C3C caller's
+  loop bound; or feed 2 IRQ6 samples per IRQ1 step and observe the bar extent.
+
 ## DISPROVEN / RULED OUT (do NOT propose these again)
 - ❌ **CRT persistence** is NOT the cause of the trace "forest". (User: #1 doesn't hold.)
 - ❌ **Moving the trace / graticule region to a separate (upper) buffer does NOT fix

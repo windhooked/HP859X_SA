@@ -301,6 +301,10 @@ type Chip struct {
 	SCLRNoAreaDef  int      // logical SCLRs skipped for lack of an area-def (no-op branch)
 	SCLRNoAreaLast [4]int   // last skipped SCLR: rwp, ax, ay, pattern
 	SCLRSkipLog    [][4]int // all skipped no-area-def SCLRs when ClearColLogOn
+	// ClearColExt, when set, supplies an external correlation value recorded in
+	// ClearColLog's second slot (e.g. the CPU A5 capture pointer) instead of the
+	// mask — for erase-bar-vs-sweep-position sync probes.
+	ClearColExt func() uint32
 	// AAAARectLog, when set, records every executed clip-branch SCLR with
 	// pattern 0xAAAA as (rwp, ax, ay) — the text-cell erase coverage probe.
 	AAAARectLog *[][3]int

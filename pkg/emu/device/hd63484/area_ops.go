@@ -151,7 +151,11 @@ func (c *Chip) execClear(cr, pattern uint16, ax, ay int16) {
 				}
 			case clip:
 				if c.ClearColLogOn && d0 == 0 && d1 == 0 && len(c.ClearColLog) < 4096 {
-					c.ClearColLog = append(c.ClearColLog, [3]uint32{c.rwp[c.rwpDn], uint32(c.core.mask), uint32(pattern)})
+					ext := uint32(0)
+					if c.ClearColExt != nil {
+						ext = c.ClearColExt()
+					}
+					c.ClearColLog = append(c.ClearColLog, [3]uint32{c.rwp[c.rwpDn], ext, uint32(pattern)})
 				}
 				if c.AAAARectLog != nil && pattern == 0xAAAA && d0 == 0 && d1 == 0 && len(*c.AAAARectLog) < 4096 {
 					*c.AAAARectLog = append(*c.AAAARectLog, [3]int{int(c.rwp[c.rwpDn]), int(ax), int(ay)})
