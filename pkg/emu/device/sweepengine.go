@@ -51,7 +51,9 @@ type SweepEngine struct {
 	// coil-DAC snapshot gives the centre; the analog ramp generates the span),
 	// so only the CENTRE is DAC-derived today. See docs/A7_ANALOG_IO_BUS.md
 	// "Still open" and freqAt.
-	Tune       analog.FrequencyModel
+	Tune analog.FrequencyModel
+	// PosFunc supplies the firmware-authoritative sweep index (see DetectADC).
+	PosFunc    PosProvider
 	TuneActive bool
 	SpanHz     float64
 
@@ -182,15 +184,37 @@ func (s *SweepEngine) levelToADC(dBm float64) uint16 {
 	return uint16(v)
 }
 
-// DetectADC returns the video-ADC reading for the current sweep position and
-// advances. The position wraps at Points so a continuously-driven sweep repeats.
+// PosFunc, when set, provides the AUTHORITATIVE sweep position for DetectADC —
+// the firmware's own trace-buffer store index (derived from the capture pointer
+// A5 by the machine layer). This is the sweep-sync anchor: the former
+// free-running s.pos counter advanced on EVERY 0xFFF200 read, but the IRQ1
+// handler and background polls also read that register, so the counter walked
+// ~3x faster than the store pointer and the whole spectrum slid horizontally
+// at a rate proportional to the cycle rate (the "trace drifts" symptom).
+// With PosFunc the served sample always matches the buffer slot the IRQ6
+// handler is about to store to — drift is structurally impossible.
+type PosProvider func() (index int, ok bool)
+
+// DetectADC returns the video-ADC reading for the current sweep position.
+// Position source: PosFunc (the firmware's own store index) when available and
+// in-range; otherwise the legacy free-running counter (unit tests / headless
+// probes without a machine).
 func (s *SweepEngine) DetectADC() uint16 {
 	pts := s.Points
 	if pts <= 0 {
 		pts = 401
 	}
-	p := s.pos % pts
-	s.pos++
+	p := -1
+	if s.PosFunc != nil {
+		if idx, ok := s.PosFunc(); ok {
+			p = idx % pts
+			s.pos = idx // keep the legacy counter trailing the true position
+		}
+	}
+	if p < 0 {
+		p = s.pos % pts
+		s.pos++
+	}
 	sig := s.bucketPeakDBm(p) // spectrum: signals + the model's true thermal floor
 	// Add the displayed grass: a random level around NoiseFloorDBm, power-summed
 	// with the spectrum so a real tone rises cleanly above the noise.
@@ -209,6 +233,10 @@ func powerSumDBm(a, b float64) float64 {
 
 // Reset rewinds the sweep position (retrace).
 func (s *SweepEngine) Reset() { s.pos = 0 }
+
+// Pos returns the engine's current sequential sweep position (DetectADC
+// consumer index) — for sweep-sync diagnostics.
+func (s *SweepEngine) Pos() int { return s.pos }
 
 // ADCAt returns the video-ADC count at sweep point p WITHOUT advancing the
 // sweep position — for the CPU-polled sweep path (the firmware's 0x5f88x

@@ -82,6 +82,23 @@ Update this as facts change. If a theory is in "DISPROVEN", do not raise it agai
   thinning (text repaints each annunciator cycle); only STATIC probe renders
   show it eaten.
 
+## Sweep-sync anchor: the horizontal trace drift (2026-07-24, SOLVED)
+- Symptom (GUI): the whole spectrum slid horizontally, continuously, rate
+  proportional to emulated-cycle rate. NOT the frequency window: the YTO coil
+  DACs are STATIC during natural runs (TestDACDriftDiag — no ramp, no walk).
+- Root: BOTH sample paths used free-running counters. DetectADC advanced its
+  index on EVERY 0xFFF200 read, but the IRQ1 handler + background polls also
+  read f200 — measured ~3.2x faster than the store pointer A5 advanced
+  (TestPollSyncDiag) → the served spectrum position walked relative to the
+  buffer slot being stored → horizontal slide. The polled-video hook had the
+  same shape (polledReads/spp modulo counter).
+- Fix: SweepEngine.PosFunc — the machine serves f200 reads by the FIRMWARE'S
+  OWN store index, (A5 − 0x2FD508)/2, whenever A5 points inside the trace
+  buffer (Machine.traceBufIndex; same anchor tried first in the polled hook).
+  The sample always matches the slot about to be written; drift is
+  structurally impossible. Verified: enginePos tracks A5 in lockstep, wraps
+  cleanly per sweep; longrun render = thin single floor + stable CAL peak.
+
 ## DISPROVEN / RULED OUT (do NOT propose these again)
 - ❌ **CRT persistence** is NOT the cause of the trace "forest". (User: #1 doesn't hold.)
 - ❌ **Moving the trace / graticule region to a separate (upper) buffer does NOT fix

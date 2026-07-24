@@ -250,13 +250,44 @@ func New8593A(romImage []byte) (*Machine, error) {
 		if pts <= 0 {
 			pts = 401
 		}
+		// Prefer the firmware's own store pointer (A5 walks the trace buffer
+		// in the polled loop too) — the drift-free anchor; fall back to the
+		// polled-read counter when A5 is outside the buffer.
+		if idx, ok := m.traceBufIndex(); ok {
+			m.polledReads++
+			return mmio.Sweep.ADCAt(idx % pts), true
+		}
 		p := (m.polledReads / spp) % pts
 		m.polledReads++
 		return mmio.Sweep.ADCAt(p), true
 	})
 
+	// Sweep-sync anchor: serve 0xFFF200 detector reads by the firmware's OWN
+	// trace-buffer store index (capture pointer A5), not a free-running
+	// counter — extra f200 reads (IRQ1 handler, background polls) otherwise
+	// walk the counter ~3x faster than the store pointer and the spectrum
+	// slides horizontally. See SweepEngine.PosFunc.
+	mmio.Sweep.PosFunc = func() (int, bool) { return m.traceBufIndex() }
+
 	return m, nil
 }
+
+// traceBufIndex derives the current sweep-point index from the capture pointer
+// A5 when it points inside the trace buffer (0x2FD508 .. bf30], else ok=false.
+// A5 is the IRQ6 capture handler's store pointer (and the polled loop's), so
+// during any store the index is exactly the slot about to be written.
+func (m *Machine) traceBufIndex() (int, bool) {
+	const bufStart = 0x2FD508 // trace buffer base (docs/TRACE_DISPLAY_PATH.md)
+	a5 := m.CPU.Reg(cpu.A5)
+	if a5 < bufStart || a5 >= bufStart+0x400 {
+		return 0, false
+	}
+	return int(a5-bufStart) / 2, true
+}
+
+// PolledReads returns the count of CPU-polled video samples served through the
+// indirect-ADC hook — for sweep-sync diagnostics.
+func (m *Machine) PolledReads() int { return m.polledReads }
 
 // DefaultHPIBAddress is the HP factory-default instrument HP-IB primary address
 // (18), seeded into the battery-backed config (CalRAM 0x2FC000) at construction.
