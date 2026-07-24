@@ -1,40 +1,44 @@
 // Command gui is a live Ebiten window for the virtual HP 8593A: it boots the
-// real Rev L firmware from reset, renders the HD63484 framebuffer in real time,
-// and provides two keyboard paths that mirror the real instrument:
+// real Rev L firmware from reset, renders the HD63484 frame buffer like the
+// instrument's CRT, and mirrors the real keyboard path:
 //
-//  1. AT keyboard path (external keyboard, rear-panel EXT KEYBOARD connector):
+//   - AT keyboard (external keyboard, rear-panel EXT KEYBOARD connector):
 //     alphanumeric and function keys are translated to AT Set-2 scan codes and
 //     injected into the MC68230 PIT receiver (0xEF8002/0xEF8000), triggering
 //     IRQ4. The firmware decodes them and dispatches:
-//     - Letters/digits/punctuation: typed text (screen titles, HP-IB commands,
+//   - Letters/digits/punctuation: typed text (screen titles, HP-IB commands,
 //     DLP programs).
-//     - F1–F6: softkeys 1–6 of the current menu.
-//     - F7: prefix mode; F8: remote-commands mode.
-//     - F9: MKR menu; F10: SPAN menu; F11: AMPLITUDE menu; F12: title recall.
-//     - Escape: title mode; PrintScreen: copy screen.
-//     (See HP 8590 E/L-Series Programmer's Guide Table 5-8.)
+//   - F1–F6: softkeys 1–6 of the current menu.
+//   - F7: prefix mode; F8: remote-commands mode.
+//   - F9: FREQUENCY (MKR fn); F10: SPAN; F11: AMPLITUDE; F12: title recall.
+//   - Escape: title mode; arrows: RPG knob / step keys.
+//     (See HP 8590 E/L-Series Programmer's Guide Table 5-8 + docs/KEYBOARD_MAP.md.)
 //
-//  2. Front-panel matrix path (direct key injection, IRQ3):
-//     Host function-key shortcuts for named front-panel keys whose matrix
-//     (byte,bit) positions have been probed. Tab cycles through probe bits
-//     (legacy matrix-sweep mode) when the named map has no binding. As bit
-//     positions are discovered with cmd/keymatrix they are filled into
-//     device.FrontPanelKeys and the shortcut works automatically.
-//     Current shortcuts: see fpBindings below.
+// CRT model: the display renders the LIVE frame buffer every frame — exactly
+// like the real CRT scanning VRAM — with a host-side LONG-PERSISTENCE PHOSPHOR
+// decay (the instrument CRTs use long-persistence phosphor so slow sweeps and
+// mid-redraw states don't flicker). There is no snapshot/live switching.
 //
-//     DYLD_FALLBACK_LIBRARY_PATH=/usr/local/lib go run ./cmd/gui/
+// Toolbar (clickable) + shortcuts: view Amber/ByCmd (Ctrl+V), Phosphor on/off,
+// Speed Fast/Real (real = 16 MHz / 60 fps), Save PNG (Ctrl+S), capture arm
+// (Ctrl+R).
+//
+//	DYLD_FALLBACK_LIBRARY_PATH=/usr/local/lib go run ./cmd/gui/
 package main
 
 import (
 	"fmt"
 	"image"
+	"image/color"
 	"image/png"
 	"log"
 	"os"
 	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
+	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
+	"github.com/hajimehoshi/ebiten/v2/vector"
 
 	"github.com/windhooked/HP859X_SA/internal/emutest"
 	"github.com/windhooked/HP859X_SA/pkg/emu/cpu"
@@ -43,10 +47,9 @@ import (
 	"github.com/windhooked/HP859X_SA/pkg/emu/romloader"
 )
 
-// saveScreen writes the current HD63484 framebuffer to screens/gui_<timestamp>.png
-// and returns the path, or an error message.
-func saveScreen(m *machine.Machine) string {
-	img := m.MMIO.Display.Chip.RenderScanoutByCmd()
+// saveScreen writes the given (currently displayed) frame to
+// screens/gui_<timestamp>.png and returns the path, or an error message.
+func saveScreen(m *machine.Machine, img *image.RGBA) string {
 	ts := time.Now().Format("20060102_150405")
 	path := fmt.Sprintf("screens/gui_%s.png", ts)
 	f, err := os.Create(path)
@@ -92,16 +95,25 @@ func saveScreen(m *machine.Machine) string {
 }
 
 const (
-	cyclesPerFrame = 2_000_000
+	// fastCyclesPerFrame runs the emulation well above real time (fast boot,
+	// snappy interaction). realCyclesPerFrame is the REAL instrument's pace:
+	// a 16 MHz 68000 across a 60 fps frame — sweep/refresh dynamics then match
+	// the physical unit (a 58 ms sweep spans ~3.5 frames, as on the CRT).
+	fastCyclesPerFrame = 2_000_000
+	realCyclesPerFrame = 16_000_000 / 60
+
 	chunkCycles    = 2000
 	irqEvery       = 5
-	// liveHoldFrames is how many frames after a key press the display keeps
-	// rendering the LIVE buffer (so typed-command echo / menu updates show at once
-	// — the real instrument echoes as you type). ~0.7s at 60fps comfortably bridges
-	// the gap between keystrokes while typing a command.
-	liveHoldFrames = 40
 	irqServiceCost = 400
 	irq4Cost       = 600 // IRQ4 handler is slightly heavier (transport + ring-buf)
+
+	// phosphorDecay is the per-frame retention of the host-side long-persistence
+	// phosphor model (presentation-layer only — the frame buffer is untouched).
+	// 0.90 at 60 fps ≈ 130 ms half-life, in the range of the long-persistence
+	// phosphors these analyzer CRTs used; bright new content overwrites decay.
+	phosphorDecay = 0.90
+
+	toolbarH = 22 // toolbar strip height in layout pixels
 )
 
 // atBindings maps Ebiten keys to ATKey codes for the AT keyboard path.
@@ -148,7 +160,7 @@ var atBindings = map[ebiten.Key]device.ATKey{
 	ebiten.KeyApostrophe:   device.ATKeyApostrophe,
 	// Function keys → firmware Table 5-8 (Programmer's Guide):
 	//   F1–F6 = softkeys 1–6; F7 = prefix; F8 = remote cmds;
-	//   F9 = MKR; F10 = SPAN; F11 = AMPLITUDE; F12 = title recall
+	//   F9 = FREQUENCY/MKR fn; F10 = SPAN; F11 = AMPLITUDE; F12 = title recall
 	ebiten.KeyF1: device.ATKeyF1, ebiten.KeyF2: device.ATKeyF2,
 	ebiten.KeyF3: device.ATKeyF3, ebiten.KeyF4: device.ATKeyF4,
 	ebiten.KeyF5: device.ATKeyF5, ebiten.KeyF6: device.ATKeyF6,
@@ -170,49 +182,139 @@ var atBindings = map[ebiten.Key]device.ATKey{
 	ebiten.KeyPageDown: device.ATKeyPageDown,
 }
 
-// fpBindings maps Ebiten keys to named front-panel keys (matrix path, IRQ3).
-// The mapped key is injected as a matrix bit when Known(); stubs are no-ops
-// until the (byte,bit) is probed with cmd/keymatrix.
-// Keys here take priority over atBindings when both would fire.
-var fpBindings = map[ebiten.Key]device.FPKey{
-	// Instrument state — top row
-	// (assign host keys that don't clash with AT text-entry path)
-	// These will be effective once the matrix bits are probed.
-}
-
 type game struct {
-	m        *machine.Machine
-	lb       *emutest.LoopBreaker
-	fb       *ebiten.Image
-	chunks   int
-	cycles   uint64
-	lastKey  string
-	lastMsg  string // status message shown in title bar (e.g. save result)
-	keyReads int
-	// probe mode: cycle through all 48 matrix bits to find key positions
-	probeMode bool
-	probeBit  int
-	// byCmd selects the by-command coloured display view (default) vs realistic
-	// amber; toggled with Ctrl+V.
+	m       *machine.Machine
+	lb      *emutest.LoopBreaker
+	fb      *ebiten.Image
+	chunks  int
+	cycles  uint64
+	lastKey string
+	lastMsg string // status message shown in title bar (e.g. save result)
+
+	// byCmd selects the by-command coloured diagnostic view (legend strip) vs
+	// the realistic monochrome amber CRT view (default). Toolbar / Ctrl+V.
 	byCmd bool
-	// liveHold counts down frames during which the display renders the LIVE buffer
-	// regardless of sweep state, so typed-command echo / menu changes appear
-	// immediately (as on the real instrument) instead of waiting for the firmware
-	// to leave sweep mode. Refreshed by every key press; see Update.
-	liveHold int
+	// phosphor enables the host-side long-persistence phosphor decay on the
+	// amber view (the byCmd diagnostic view is always raw). Toolbar toggle.
+	phosphor bool
+	// realtime paces the emulation at the real instrument's 16 MHz (sweep and
+	// refresh dynamics match the physical unit); off = fast (default).
+	realtime bool
+
+	// phos is the phosphor intensity accumulator (one float per pixel of the
+	// current render size); disp is the composited output buffer.
+	phos []float32
+	disp *image.RGBA
+	// lastImg is the most recent image handed to Draw (for Save).
+	lastImg *image.RGBA
 }
 
-// renderDisplay returns the current display image: the register-derived scanout,
-// either coloured by drawing command (with a legend) or plain amber.
+// toolbar buttons: fixed-geometry clickable rects at the top of the window.
+type button struct {
+	label func(g *game) string
+	click func(g *game)
+}
+
+var buttons = []button{
+	{
+		label: func(g *game) string {
+			if g.byCmd {
+				return "View: ByCmd"
+			}
+			return "View: Amber"
+		},
+		click: func(g *game) { g.byCmd = !g.byCmd },
+	},
+	{
+		label: func(g *game) string {
+			if g.phosphor {
+				return "Phosphor: On"
+			}
+			return "Phosphor: Off"
+		},
+		click: func(g *game) { g.phosphor = !g.phosphor; g.resetPhosphor() },
+	},
+	{
+		label: func(g *game) string {
+			if g.realtime {
+				return "Speed: Real"
+			}
+			return "Speed: Fast"
+		},
+		click: func(g *game) { g.realtime = !g.realtime },
+	},
+	{
+		label: func(g *game) string { return "Save PNG" },
+		click: func(g *game) {
+			if g.lastImg != nil {
+				g.lastMsg = saveScreen(g.m, g.lastImg)
+			}
+		},
+	},
+}
+
+const (
+	btnW, btnH, btnGap, btnX0, btnY0 = 112, 18, 8, 4, 2
+)
+
+func buttonRect(i int) image.Rectangle {
+	x := btnX0 + i*(btnW+btnGap)
+	return image.Rect(x, btnY0, x+btnW, btnY0+btnH)
+}
+
+func (g *game) resetPhosphor() {
+	for i := range g.phos {
+		g.phos[i] = 0
+	}
+}
+
+// renderDisplay returns the current display image: the register-derived LIVE
+// scanout — the CRT view — either realistic amber (with the phosphor decay
+// composited) or the by-command coloured diagnostic (raw, with legend).
 func (g *game) renderDisplay() *image.RGBA {
 	if g.byCmd {
 		return g.m.MMIO.Display.Chip.RenderScanoutByCmd()
 	}
-	return g.m.MMIO.Display.Chip.RenderScanout()
+	img := g.m.MMIO.Display.Chip.RenderScanout()
+	if !g.phosphor {
+		return img
+	}
+	return g.compositePhosphor(img)
+}
+
+// compositePhosphor applies the long-persistence phosphor model: per pixel,
+// intensity = max(lit-now, previous*phosphorDecay). The output is the amber
+// pen colour scaled by intensity — bright fresh strokes over a fading tail,
+// which is exactly how the real CRT hides mid-redraw states and slow sweeps.
+func (g *game) compositePhosphor(img *image.RGBA) *image.RGBA {
+	b := img.Bounds()
+	n := b.Dx() * b.Dy()
+	if len(g.phos) != n {
+		g.phos = make([]float32, n)
+		g.disp = image.NewRGBA(b)
+	}
+	src := img.Pix
+	dst := g.disp.Pix
+	for i := 0; i < n; i++ {
+		v := g.phos[i] * phosphorDecay
+		if src[i*4] > 0 { // lit now (R channel of the amber pen)
+			v = 1
+		}
+		g.phos[i] = v
+		dst[i*4+0] = uint8(255 * v)
+		dst[i*4+1] = uint8(176 * v)
+		dst[i*4+2] = 0
+		dst[i*4+3] = 0xFF
+	}
+	return g.disp
 }
 
 func (g *game) Update() error {
-	for done := 0; done < cyclesPerFrame; done += chunkCycles {
+	perFrame := fastCyclesPerFrame
+	if g.realtime {
+		perFrame = realCyclesPerFrame
+	}
+	for done := 0; done < perFrame; done += chunkCycles {
 		g.m.CPU.Run(chunkCycles)
 		g.lb.Check(g.m.CPU.Reg(cpu.PC), g.m.CPU.SetReg)
 		g.chunks++
@@ -225,21 +327,24 @@ func (g *game) Update() error {
 		}
 		g.m.DriveOneSweepChunk()
 	}
-	// NOTE (2026-07-15): the post-boot EnterContinuousSpectrum() one-shot was
-	// REMOVED here — it forced CONTS + measure-mode 0x31, which RESETS the
-	// amplitude scale (b1c2/b1c5) to the degenerate sentinel and ZEROES the
-	// display trace array → a flat trace. The natural sweep-driven boot already
-	// draws a real amplitude-correct spectrum (fcn.80a0 computes the scale
-	// naturally; DriveOneSweepChunk feeds the polled-video ADC path). See
-	// docs/MEASURE_MODE_HANDOFF.md — the forced entry was an artifact.
 
-	// ── Host-side screen save (Ctrl+S) ──────────────────────────────────────
-	// Saves the current framebuffer to screens/gui_<timestamp>.png.
-	// Distinct from the firmware's PrintScreen (which sends a scan code to the
-	// plotter); this is a host-side convenience that doesn't touch the firmware.
+	// ── Toolbar clicks ──────────────────────────────────────────────────────
+	if inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
+		mx, my := ebiten.CursorPosition()
+		for i := range buttons {
+			if image.Pt(mx, my).In(buttonRect(i)) {
+				buttons[i].click(g)
+				break
+			}
+		}
+	}
+
+	// ── Host shortcuts (Ctrl held) ──────────────────────────────────────────
 	if ebiten.IsKeyPressed(ebiten.KeyControlLeft) || ebiten.IsKeyPressed(ebiten.KeyControlRight) {
 		if inpututil.IsKeyJustPressed(ebiten.KeyS) {
-			g.lastMsg = saveScreen(g.m)
+			if g.lastImg != nil {
+				g.lastMsg = saveScreen(g.m, g.lastImg)
+			}
 		}
 		// Ctrl+R: arm a one-shot linear capture of the HD63484 command stream —
 		// press it just before an event (e.g. the Enter that renders CAL DISP;) so
@@ -248,48 +353,13 @@ func (g *game) Update() error {
 			g.m.MMIO.Display.Chip.StartCmdCapture(262144)
 			g.lastMsg = "cmd capture armed — do the action, then Ctrl+S"
 		}
-		// Ctrl+V: toggle the display view between the realistic amber scanout and
-		// the by-command coloured view (each pixel tinted by the command that drew
-		// it, with a legend strip).
+		// Ctrl+V: toggle the display view (same as the toolbar button).
 		if inpututil.IsKeyJustPressed(ebiten.KeyV) {
 			g.byCmd = !g.byCmd
-			if g.byCmd {
-				g.lastMsg = "view: by-command (amber: Ctrl+V)"
-			} else {
-				g.lastMsg = "view: amber (by-command: Ctrl+V)"
-			}
 		}
 	}
 
-	// ── Front-panel matrix path (IRQ3) ────────────────────────────────────────
-	// Named front-panel keys: fire when a binding has a known matrix position.
-	for k, fp := range fpBindings {
-		if inpututil.IsKeyJustPressed(k) && fp.Known() {
-			g.m.FrontPanel.SetBit(fp.Byte, fp.Bit)
-			g.lastKey = fp.Name
-			g.liveHold = liveHoldFrames
-		}
-	}
-	// Probe mode: Tab steps through all 48 matrix bits to locate unknown keys.
-	if inpututil.IsKeyJustPressed(ebiten.KeyTab) {
-		if g.probeMode {
-			g.probeBit = (g.probeBit + 1) % 48
-		}
-		g.probeMode = true
-		g.m.FrontPanel.SetBit(g.probeBit/8, g.probeBit%8)
-		g.lastKey = fmt.Sprintf("probe byte%d bit%d", g.probeBit/8, g.probeBit%8)
-	}
-	// Deliver IRQ3 while a front-panel event is pending.
-	if g.m.FrontPanel.Pending() {
-		g.m.CPU.SetIRQ(3)
-		g.m.CPU.Run(irqServiceCost)
-		g.m.CPU.SetIRQ(0)
-	}
-	if g.m.FrontPanel.Consumed() {
-		g.keyReads++
-	}
-
-	// ── AT keyboard path (IRQ4) ───────────────────────────────────────────────
+	// ── AT keyboard path (IRQ4) ─────────────────────────────────────────────
 	// Inject AT scan codes for make (key-down) events.
 	// Skip when Ctrl is held — those are host shortcuts (Ctrl+S = save screen).
 	ctrlHeld := ebiten.IsKeyPressed(ebiten.KeyControlLeft) || ebiten.IsKeyPressed(ebiten.KeyControlRight)
@@ -301,7 +371,6 @@ func (g *game) Update() error {
 			if make := device.ATMake(atk); make != nil {
 				g.m.ATKeyboard.Enqueue(make...)
 				g.lastKey = fmt.Sprintf("AT%v", k)
-				g.liveHold = liveHoldFrames
 			}
 		}
 		// Break (key-up): inject the F0 release code.
@@ -318,46 +387,51 @@ func (g *game) Update() error {
 		g.m.CPU.SetIRQ(0)
 	}
 
-	// Render source: the LIVE buffer while typing (so command echo / menu changes
-	// appear immediately, as on the real instrument) or whenever the firmware isn't
-	// sweeping (CAL DISP / menus); otherwise the stable snapshot, which keeps the
-	// periodically-repainted graticule grid on screen flicker-free. See
-	// Machine.SweepIdle + liveHold.
-	g.m.MMIO.Display.Chip.SetRenderLive(g.m.SweepIdle() || g.liveHold > 0)
-	if g.liveHold > 0 {
-		g.liveHold--
-	}
-
 	return nil
 }
 
 func (g *game) Draw(screen *ebiten.Image) {
 	img := g.renderDisplay()
+	g.lastImg = img
 	b := img.Bounds()
-	// The scanout dimensions (and the legend strip) differ from the legacy
-	// RenderFrame size, so size the framebuffer to whatever the render produces;
-	// WritePixels requires an exact match.
+	// The scanout dimensions (and the legend strip) differ per view, so size
+	// the framebuffer to whatever the render produces; WritePixels requires an
+	// exact match.
 	if g.fb == nil || g.fb.Bounds().Dx() != b.Dx() || g.fb.Bounds().Dy() != b.Dy() {
 		g.fb = ebiten.NewImage(b.Dx(), b.Dy())
 	}
 	g.fb.WritePixels(img.Pix)
-	screen.DrawImage(g.fb, nil)
+
+	// Toolbar strip.
+	w := screen.Bounds().Dx()
+	vector.DrawFilledRect(screen, 0, 0, float32(w), toolbarH, color.RGBA{0x28, 0x28, 0x28, 0xFF}, false)
+	for i := range buttons {
+		r := buttonRect(i)
+		vector.DrawFilledRect(screen, float32(r.Min.X), float32(r.Min.Y),
+			float32(r.Dx()), float32(r.Dy()), color.RGBA{0x48, 0x48, 0x48, 0xFF}, false)
+		ebitenutil.DebugPrintAt(screen, buttons[i].label(g), r.Min.X+5, r.Min.Y+1)
+	}
+
+	// Display below the toolbar.
+	op := &ebiten.DrawImageOptions{}
+	op.GeoM.Translate(0, toolbarH)
+	screen.DrawImage(g.fb, op)
+
 	msg := ""
 	if g.lastMsg != "" {
 		msg = "  |  " + g.lastMsg
 	}
 	ebiten.SetWindowTitle(fmt.Sprintf(
-		"HP 8593A  |  %.0fM cyc  PC=%#06x  bc67=%#02x  key=%s  reads=%d%s",
-		float64(g.cycles)/1e6, g.m.CPU.Reg(cpu.PC),
-		byte(g.m.Bus.Read(0xFFBC67, 1)), g.lastKey, g.keyReads, msg))
+		"HP 8593A  |  %.0fM cyc  PC=%#06x  key=%s%s",
+		float64(g.cycles)/1e6, g.m.CPU.Reg(cpu.PC), g.lastKey, msg))
 }
 
 func (g *game) Layout(int, int) (int, int) {
 	if g.fb != nil {
 		b := g.fb.Bounds()
-		return b.Dx(), b.Dy()
+		return b.Dx(), b.Dy() + toolbarH
 	}
-	return device.DisplayWidth, device.DisplayHeight
+	return device.DisplayWidth, device.DisplayHeight + toolbarH
 }
 
 func main() {
@@ -378,24 +452,21 @@ func main() {
 	// offline decoding of which clear/draw commands the firmware issues.
 	m.MMIO.Display.Chip.EnableCmdTrace(16384)
 
-	// Render source is chosen per-frame in Update() from the firmware's display
-	// mode (m.SweepIdle): the STABLE snapshot while sweeping (so the periodically-
-	// repainted graticule grid stays on screen flicker-free) and the LIVE buffer
-	// while idle (CAL DISP / menus, which the snapshot can't refresh). Initialise
-	// to the snapshot.
-	m.MMIO.Display.Chip.SetRenderLive(false)
+	// The CRT scans the LIVE frame buffer, always — mid-redraw states are
+	// smoothed by the phosphor model, exactly as on the real instrument. (The
+	// former snapshot/live switching is gone.)
+	m.MMIO.Display.Chip.SetRenderLive(true)
 
 	g := &game{
-		m:     m,
-		lb:    emutest.NewLoopBreaker(50),
-		fb:    ebiten.NewImage(device.DisplayWidth, device.DisplayHeight),
-		byCmd: true, // default to the by-command coloured view (Ctrl+V toggles)
+		m:        m,
+		lb:       emutest.NewLoopBreaker(50),
+		fb:       ebiten.NewImage(device.DisplayWidth, device.DisplayHeight),
+		phosphor: true, // realistic CRT look by default
 	}
 
-	// The scanout is 1024 px wide × 256 lines (+ a 20-px legend strip). Show it at
-	// 1× width with a 1.5× vertical stretch (≈ the 4:3 CRT geometry); the window is
-	// resizable and Layout adapts to the actual render size.
-	ebiten.SetWindowSize(1024, 414)
+	// The scanout is 1024 px wide × 256 lines (+ toolbar). Show it at 1× width;
+	// the window is resizable and Layout adapts to the actual render size.
+	ebiten.SetWindowSize(1024, 256+toolbarH+138)
 	ebiten.SetWindowTitle("HP 8593A — booting…")
 	ebiten.SetWindowResizingMode(ebiten.WindowResizingModeEnabled)
 	if err := ebiten.RunGame(g); err != nil {
