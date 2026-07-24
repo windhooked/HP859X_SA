@@ -421,13 +421,18 @@ func (dec *decoder) execCmd(c *Chip) {
 		c.FilledRects++
 
 	case idAPLL, idRPLL, idAPLG, idRPLG:
+		if c.APLLColorHist != nil {
+			c.APLLColorHist[c.regs[0x01]]++
+		}
 		dec.drawPolyline(c)
 
 	case idCRCL:
 		c.drawCircle(c.penX, c.penY, int(int16(a[0])), true)
 
 	case idDOT:
-		c.setVRAMPixel(c.penX, c.penY)
+		if c.penPhaseLit(c.penX, c.penY) {
+			c.setVRAMPixel(c.penX, c.penY)
+		}
 		c.Dots++
 		if c.DotLog != nil {
 			c.DotLog = append(c.DotLog, DotRec{c.penX, c.penY})

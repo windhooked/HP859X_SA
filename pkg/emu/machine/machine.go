@@ -126,6 +126,9 @@ type Machine struct {
 	// driveSweepCycle and docs/TRACE_DISPLAY_PATH.md "TWO-IRQ SWEEP MODEL".
 	SweepDrive bool
 	sweepAccum int // cycle accumulator that paces sweep points (see driveSweepCycle)
+	// SweepCyclesPerPoint overrides the sweep-point pacing (default
+	// sweepCyclesPerPoint); tunable for erase-cadence sync experiments.
+	SweepCyclesPerPoint int
 	// polledReads counts CPU-polled sweep samples served through the indirect-ADC
 	// video hook (ROM 0x5f88x loops — see New8593A's SetVideoSample closure);
 	// lastPolledReads is driveSweepCycle's previous observation: when the counter
@@ -452,8 +455,12 @@ func (m *Machine) driveSweepCycle() {
 	// 401-point sweep spans ~58 ms rather than completing in a single burst.
 	m.sweepAccum += bootChunkCycles
 	bf30 := m.Bus.Read(0xFFBF30, bus.Long)
-	for m.sweepAccum >= sweepCyclesPerPoint && m.CPU.Reg(cpu.A5) < bf30 {
-		m.sweepAccum -= sweepCyclesPerPoint
+	pace := m.SweepCyclesPerPoint
+	if pace <= 0 {
+		pace = sweepCyclesPerPoint
+	}
+	for m.sweepAccum >= pace && m.CPU.Reg(cpu.A5) < bf30 {
+		m.sweepAccum -= pace
 		m.CPU.SetIRQ(1) // sweep step: advance the ramp, reprogram the sweep DACs
 		m.CPU.Run(sweepStepCost)
 		m.CPU.SetIRQ(0)

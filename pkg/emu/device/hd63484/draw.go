@@ -46,7 +46,7 @@ func (c *Chip) drawLine(x0, y0, x1, y1 int, set bool) {
 	}
 	err := dx - dy
 	for i := 0; i < lineIterCap; i++ {
-		if pat&(1<<uint(i&15)) != 0 {
+		if pat&(1<<uint(i&15)) != 0 && c.penPhaseLit(x0, y0) {
 			c.setPixel(x0, y0, set)
 		}
 		if x0 == x1 && y0 == y1 {
@@ -64,9 +64,28 @@ func (c *Chip) drawLine(x0, y0, x1, y1 int, set bool) {
 	}
 }
 
-// drawLineRouted draws a solid line into the core frame buffer and triggers
-// the frame snapshot. (The former Colorized-mode trace-plane routing is gone —
-// the core is the single frame buffer.)
+// penPhaseLit reports whether the pen colour register CL1 (WPR 0x01) lights
+// the pixel at firmware (x, y). THE PHASE-MULTIPLEX DECODE (2026-07-24): the
+// HD63484 draws a pixel with the colour register's bit at the pixel's bit
+// position within its frame-buffer word. The 8593 firmware NEVER draws solid —
+// CL1 is always 0x5555 or 0xAAAA — so the 1bpp screen is phase-multiplexed by
+// pixel parity into two logical planes: the trace is drawn at one phase
+// (CL1=0xAAAA -> odd positions) and the per-column flying-erase-bar
+// `SCLR AND 0x5555` clears EXACTLY that phase. Draw and erase are
+// phase-locked; a solid draw (our former model) put trace pixels in BOTH
+// phases and the even half could never be erased -> the trace pile-up.
+// CL1==0 (never programmed — raw unit-test draws) falls back to solid.
+func (c *Chip) penPhaseLit(x, y int) bool {
+	cl := c.regs[0x01]
+	if cl == 0 {
+		return true
+	}
+	_, bp := c.core.calcOffset(int16(x), int16(y))
+	return cl>>(uint(bp)&15)&1 != 0
+}
+
+// drawLineRouted draws a phase-gated line into the core frame buffer and
+// triggers the frame snapshot.
 func (c *Chip) drawLineRouted(x0, y0, x1, y1 int) {
 	c.drawLine(x0, y0, x1, y1, true)
 	c.maybeFrameSnapshot(x0, y0, x1, y1)

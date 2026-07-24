@@ -24,9 +24,11 @@ func TestColEraseDiag(t *testing.T) {
 	m.BootToOperatingWithSweep(250_000_000)
 	chip := m.MMIO.Display.Chip
 	chip.ClearColLogOn = true
+	chip.APLLColorHist = map[uint16]int{}
 	for i := 0; i < 60; i++ {
 		m.bootLoop(2_000_000, nil)
 	}
+	t.Logf("APLL draws by CL1: %v", chip.APLLColorHist)
 	log := chip.ClearColLog
 	t.Logf("%d column ops logged", len(log))
 	// Column coverage: distinct RWP words + mask histogram.

@@ -287,23 +287,26 @@ type Chip struct {
 	glyphLog *GlyphLogger
 
 	// Diagnostics (exported so tests + cmd/* probes can introspect).
-	DataWords      int            // total words fed to WriteData
-	Moves          int            // MOVE markers seen
-	Lines          int            // LINE commands drawn (absolute + relative)
-	Rects          int            // ARCT/RRCT outlines drawn
-	FilledRects    int            // AFRCT/RFRCT filled rects drawn
-	Dots           int            // DOT commands drawn
-	Glyphs         int            // glyph (WPTN+count-of-10) packets blitted
-	Paints         int            // raster-write bursts entered
-	PaintWords     int            // total pixel-data words written into vram
-	ScreenClears   int            // SCLR commands executed
-	AreaClears     int            // CLR commands executed
-	SCLRNoAreaDef  int            // logical SCLRs skipped for lack of an area-def (no-op branch)
-	SCLRNoAreaLast [4]int         // last skipped SCLR: rwp, ax, ay, pattern
+	DataWords      int    // total words fed to WriteData
+	Moves          int    // MOVE markers seen
+	Lines          int    // LINE commands drawn (absolute + relative)
+	Rects          int    // ARCT/RRCT outlines drawn
+	FilledRects    int    // AFRCT/RFRCT filled rects drawn
+	Dots           int    // DOT commands drawn
+	Glyphs         int    // glyph (WPTN+count-of-10) packets blitted
+	Paints         int    // raster-write bursts entered
+	PaintWords     int    // total pixel-data words written into vram
+	ScreenClears   int    // SCLR commands executed
+	AreaClears     int    // CLR commands executed
+	SCLRNoAreaDef  int    // logical SCLRs skipped for lack of an area-def (no-op branch)
+	SCLRNoAreaLast [4]int // last skipped SCLR: rwp, ax, ay, pattern
 	// ClearColLog (diagnostic, enabled by ClearColLogOn): per faithful-SCLR
 	// column op, records [rwp word, mask, pattern] to establish erase coverage.
 	ClearColLogOn bool
 	ClearColLog   [][3]uint32
+	// APLLColorHist counts polyline draws per current CL1 (WPR 0x01) value —
+	// the draw-phase side of the phase-multiplex choreography.
+	APLLColorHist  map[uint16]int
 	UnknownCmds    int            // commands the parser saw but doesn't model
 	UnknownCmdHist map[uint16]int // histogram of unknown opcodes for RE
 

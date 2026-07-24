@@ -58,12 +58,26 @@ Update this as facts change. If a theory is in "DISPROVEN", do not raise it agai
   forever. A trace spike at even x survives the 5555 phase FULLY — that is the
   trace-forest residue seen in faithful natural renders, plus 50%-thinned text
   inside the column range and stale-readout ghosts.
-- **OPEN — how the real instrument avoids the residue:** phases do NOT
-  alternate in the observed stream (all 944 column ops D=5555). Candidates:
-  (a) the firmware repaints all live content every cycle and the residue is
-  only content that STOPPED being drawn (markers/readouts) — small in practice;
-  (b) an undecoded second erase mechanism; (c) our sweep injection redraws at
-  positions the real loop would not. Revisit against real-HW footage.
+- **RESOLVED (2026-07-24, same session): the residue question was OUR BUG — the
+  display is PHASE-MULTIPLEXED by pixel parity.** The HD63484 draws a pixel
+  with the colour register's bit at the pixel's bit position within its word;
+  the 8593 firmware NEVER draws solid: measured, ALL 1872 APLL trace draws run
+  with CL1(WPR 0x01)=0xAAAA (odd-phase pixels) and ALL 944 flying-erase columns
+  are `SCLR AND 0x5555` (clears exactly the odd phase). Draw and erase are
+  phase-locked; the grid/box/static chrome live at the 5555 phase, untouched by
+  the trace eraser. Our pen drew SOLID (both phases) → the even-phase half of
+  every trace could never be erased → the historic "trace forest".
+  Fix: `penPhaseLit` gates drawLine/DOT pixels by CL1's bit at the pixel's
+  calcOffset position (CL1==0 → solid fallback for raw unit-test draws).
+  Verified: graph-region phase census after a 300M-cycle run = odd 1199 (≈2
+  in-flight traces) / even 1942 (box+grid) — a clean steady state; the LIVE
+  render matches the trace_longrun reference (thin floor, full dotted grid).
+- **Stale-snapshot caveat:** the stable frame snapshot (maybeFrameSnapshot) can
+  lag far behind the live buffer and SHOW long-erased accumulation — diagnostic
+  renders should use the LIVE buffer (the GUI beam integration does).
+- **OPEN (small): stopped-content ghosts** — content that ceases being redrawn
+  (old readouts/markers) leaves a 50%-dither residue until a region clear;
+  span/menu changes wipe it (verified). Check real-HW footage for the same.
 - GUI note: the beam integration + phosphor bridges the mid-cycle text
   thinning (text repaints each annunciator cycle); only STATIC probe renders
   show it eaten.
