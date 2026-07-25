@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# !!! SUPERSEDED for the 859x: ZSETADDR/ZRDWR is an 8563-family command and returns
+# !!! UNDEFINED COMMAND on the 8593E. The 859x has NO raw-memory GPIB command.
+# !!! See pkg/859x/GPIB_MEMORY_ACCESS.md for the supported cal-backup commands
+# !!! (AMPCOR?/SER?/state save) and the physical route for a raw NVRAM image.
 """dump859x.py — GPIB memory + calibration backup for the HP/Agilent 859x.
 
 Reads instrument memory over GPIB using the service-mode ZSETADDR/ZRDWR

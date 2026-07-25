@@ -1,3 +1,9 @@
+> **SUPERSEDED for the 859x.** This prompt uses the 8563 `ZSETADDR`/`ZRDWR`
+> protocol, which the 8593E rejects as UNDEFINED COMMAND. The 859x has no raw-
+> memory GPIB command. Use the supported cal-backup commands (`AMPCOR?`/`SER?`/
+> state save) — see `pkg/859x/GPIB_MEMORY_ACCESS.md` — and a physical SRAM read
+> for a raw NVRAM image. Keep the USB-trace BONUS section (still useful).
+
 # Task: back up an HP/Agilent 8593E spectrum analyzer's calibration data + memory over GPIB (Windows)
 
 You are helping me pull a calibration/memory backup off a real **HP/Agilent 8593E**
