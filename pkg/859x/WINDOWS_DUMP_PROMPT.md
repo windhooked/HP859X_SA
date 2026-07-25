@@ -211,3 +211,43 @@ if __name__ == "__main__":
   NI-488.2/NI-VISA (Runtime is enough).
 - Reads return implausible constant values (all 0x00 / 0xFF) → tell me; that's a
   protocol/terminator issue, not the real data, and I'll adjust.
+
+---
+
+## BONUS (please also do this): capture a USB trace of NI's driver init
+
+**Why:** this exact adapter (an NI GPIB-USB-HS, `3923:709b`) works on Windows but
+NOT yet on Linux (linux-gpib). It's a newer hardware revision that reports an
+init status byte `0x15` the Linux driver doesn't recognize, then hangs. The one
+piece of data needed to fix the Linux driver is a **USB capture of what NI's
+Windows driver sends when it opens the adapter** — and this Windows PC is the
+only place that trace exists. Capturing it now (while set up) saves a second trip.
+
+**This is a passive capture — it does not touch the instrument's data. Safe.**
+
+Steps:
+1. Install **Wireshark** and, when its installer offers it, the **USBPcap** capture
+   component (or install USBPcap separately from https://desowin.org/usbpcap/).
+   Reboot if USBPcap asks.
+2. Fully close NI-MAX and any program using the adapter. Open Wireshark; in the
+   capture-interfaces list pick the **USBPcap** interface that shows the NI
+   **GPIB-USB-HS** device (USBPcapN — match it by unplugging/replugging to see
+   which interface's device list changes, or by the "GPIB-USB-HS" product string).
+3. **Start** the capture, then trigger a fresh driver open of the adapter — do ONE
+   of:
+   - open **NI-MAX**, expand Devices/Interfaces, click the GPIB-USB-HS, and do
+     "Scan for Instruments" / open a VISA session to the 8593E; **or**
+   - run this tiny script (opens + IDs, which forces the full init):
+     `python -c "import pyvisa; r=pyvisa.ResourceManager(); d=r.open_resource('GPIB0::7::INSTR'); print(d.query('ID?'))"`
+   - Best of all: **unplug the adapter, Start the capture, then plug it back in**
+     so the capture includes the driver's fresh attach/init from scratch, then do
+     the open/ID above.
+4. **Stop** the capture and **Save As** `ni_gpib_hs_init.pcapng`.
+5. Give me:
+   - the saved `ni_gpib_hs_init.pcapng` file (the important one), and
+   - the adapter's info from Device Manager → the GPIB-USB-HS → Details →
+     "Hardware Ids" (shows VID/PID/REV), plus its NI-488.2 driver version.
+
+I'll diff that capture against the Linux driver's init sequence to find the extra
+step this revision needs, patch linux-gpib, and then the whole backup runs from
+Linux next time. (Full analysis: `pkg/859x/LINUX_GPIB_NI_HS.md`.)
