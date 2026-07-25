@@ -13,3 +13,5 @@ tmp/
 /caldump
 /f122check
 /gui
+.venv-gpib/
+dump_out/
