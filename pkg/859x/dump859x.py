@@ -39,26 +39,80 @@ Every read is one GPIB round-trip, so byte-wise dumps are slow (order of
 
 import argparse
 import os
-import struct
-import sys
 import time
 
-# 859x memory map (24-bit bus; verified against the emulator memory map in
-# pkg/emu/machine/machine.go + pkg/emu/device/calnvram.go, stable across the
-# A16-board family incl. the E-series). end is EXCLUSIVE.
+# 859x memory map (24-bit bus). Verified 2026-07-25 against (a) the U114 PAL
+# LCAL decode → 0x200000, (b) the emulator memory map (machine.go /
+# calnvram.go), and (c) the firmware's OWN boot access: the cal-checksum sweep
+# touches cal-NVRAM 0x200000..0x20303F (~12 KB active cal data) — measured by
+# TestCalExtentDiag. The 0x200000 window is a BOARD-level decode (A16A1 memory
+# board), shared across the A16 family incl. the 8593E. We dump the full 64 KB
+# window: if the physical SRAM is smaller it aliases within the window (captured
+# harmlessly; the repeat period reveals the true size). end is EXCLUSIVE.
 REGIONS = {
     # name:        (start,    end,       description)
-    "calnvram":   (0x200000, 0x210000, "battery-backed calibration NVRAM (64 KB)"),
+    "calnvram":   (0x200000, 0x210000, "battery-backed cal NVRAM (64 KB window; active data 0..0x303F)"),
     "calram":     (0x2FC000, 0x300000, "working cal scratch RAM (16 KB)"),
     "ram":        (0xFF0000, 0xFFF000, "main working RAM (60 KB)"),
     "rom":        (0x000000, 0x100000, "firmware ROM (1 MB) — long!"),
     "rom-sample": (0x000000, 0x000200, "ROM first 512 B — reset vector / revision spot-check"),
+    "cal-active": (0x200000, 0x203100, "just the boot-touched active cal data (~12 KB, quick)"),
 }
 # Named groups for --regions.
 GROUPS = {
     "cal": ["calnvram", "calram"],
     "all": ["calnvram", "calram", "ram", "rom"],
 }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Prologix GPIB-USB / AR488 native serial backend (pyserial). Chosen for a
+# reliable byte-exact backup: we drive the ++command protocol directly rather
+# than rely on pyvisa-py's experimental Prologix wrapper. Presents the same
+# .query()/.write() surface the rest of the script uses.
+# ─────────────────────────────────────────────────────────────────────────────
+class PrologixGPIB:
+    def __init__(self, port, addr, baud=115200, timeout_ms=3000):
+        import serial  # pyserial
+
+        self.ser = serial.Serial(port, baud, timeout=timeout_ms / 1000.0)
+        time.sleep(0.1)
+        self.ser.reset_input_buffer()
+        ver = self._cmd_query("++ver")
+        if "prologix" not in ver.lower() and "gpib" not in ver.lower():
+            print(f"WARNING: ++ver → {ver!r} — not obviously a Prologix/AR488 adapter")
+        else:
+            print(f"[prologix] {ver}")
+        # Controller mode, target address, manual read, assert EOI, LF-terminate
+        # instrument commands, generous read timeout.
+        for c in ("++mode 1", f"++addr {addr}", "++auto 0", "++eoi 1", "++eos 2",
+                  f"++read_tmo_ms {min(3000, timeout_ms)}"):
+            self._cmd(c)
+        self.timeout = timeout_ms  # for API parity; pyserial already set
+
+    def _cmd(self, s):
+        self.ser.write((s + "\n").encode("ascii"))
+        self.ser.flush()
+
+    def _cmd_query(self, s):
+        self._cmd(s)
+        return self.ser.readline().decode("ascii", "replace").strip()
+
+    def write(self, s):
+        # An instrument command (no ++): Prologix forwards it, appending EOS(LF).
+        self._cmd(s)
+
+    def query(self, s):
+        # Instrument query: send it, then explicitly read the response until EOI.
+        self._cmd(s)
+        self._cmd("++read eoi")
+        return self.ser.readline().decode("ascii", "replace").strip()
+
+    def close(self):
+        try:
+            self.ser.close()
+        except Exception:
+            pass
 
 
 def open_instr(resource, timeout_ms):
@@ -159,30 +213,48 @@ def cal_ascii(inst, outdir):
 
 def main():
     ap = argparse.ArgumentParser(description="859x GPIB memory + cal backup")
-    ap.add_argument("--resource", help="VISA resource (e.g. GPIB0::18::INSTR or ASRL/dev/cu.usbserial::INSTR)")
-    ap.add_argument("--list", action="store_true", help="enumerate visible resources and exit")
+    ap.add_argument("--prologix", metavar="PORT",
+                    help="Prologix/AR488 serial port (e.g. /dev/cu.usbserial-XXXX) — native driver")
+    ap.add_argument("--addr", type=int, default=7, help="GPIB primary address (default 7)")
+    ap.add_argument("--baud", type=int, default=115200, help="Prologix serial baud (default 115200)")
+    ap.add_argument("--resource", help="VISA resource (NI/pyvisa path: e.g. GPIB0::7::INSTR)")
+    ap.add_argument("--list", action="store_true", help="enumerate visible resources / serial ports and exit")
     ap.add_argument("--id", action="store_true", help="identify the instrument and exit")
     ap.add_argument("--regions", default="cal",
                     help="comma list of region/group names (default: cal). "
                          f"regions={list(REGIONS)}  groups={list(GROUPS)}")
     ap.add_argument("--outdir", default="dump_out", help="output directory")
-    ap.add_argument("--timeout", type=int, default=5000, help="GPIB timeout ms")
+    ap.add_argument("--timeout", type=int, default=5000, help="GPIB/serial timeout ms")
     ap.add_argument("--cal-ascii", action="store_true", help="also capture documented cal-constant queries")
     args = ap.parse_args()
 
     if args.list:
-        import pyvisa
-        for backend in ("@ivi", "@py"):
-            try:
-                rm = pyvisa.ResourceManager(backend)
-                print(f"backend {backend}: {rm.list_resources('?*')}")
-            except Exception as e:
-                print(f"backend {backend}: unavailable ({e})")
+        try:
+            import serial.tools.list_ports as lp
+            ports = [f"{p.device}  ({p.description})" for p in lp.comports()]
+            print("serial ports (Prologix/AR488 candidates):")
+            for p in ports or ["  <none>"]:
+                print("  ", p)
+        except Exception as e:
+            print("serial enumeration unavailable:", e)
+        try:
+            import pyvisa
+            for backend in ("@ivi", "@py"):
+                try:
+                    rm = pyvisa.ResourceManager(backend)
+                    print(f"pyvisa {backend}: {rm.list_resources('?*')}")
+                except Exception as e:
+                    print(f"pyvisa {backend}: unavailable ({e})")
+        except ImportError:
+            print("pyvisa not installed (only needed for the NI/VISA path)")
         return
 
-    rm, inst = open_instr(args.resource, args.timeout)
-    if inst is None:
-        raise SystemExit("no --resource given; use --list to enumerate.")
+    if args.prologix:
+        inst = PrologixGPIB(args.prologix, args.addr, baud=args.baud, timeout_ms=args.timeout)
+    elif args.resource:
+        _, inst = open_instr(args.resource, args.timeout)
+    else:
+        raise SystemExit("give --prologix PORT (serial adapter) or --resource (VISA); --list to enumerate.")
 
     q, ident = identify(inst)
     print(f"[id] {q} → {ident!r}")
