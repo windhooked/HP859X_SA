@@ -27,12 +27,25 @@ These read back ASCII you can store and later re-send to restore. Address 7:
 | **CORREK** | `CORREK?;` (on/off) | `CORREK ON/OFF;` | correction-factors enable |
 | **Trace** | `TRA?;`/`TRB?;` (+ `TDF`) | — | current trace data |
 
-**Important limitation:** `AMPCOR` is only the **user** corrections. The
-**factory cal constants** (flatness, step-gain, timebase, log-amp — the battery-
-backed A16A1 NVRAM at CPU `0x200000`) are **NOT exposed by any GPIB read
-command**. They're produced by the internal self-cal (`CAL`) routines and live
-only in NVRAM. So over GPIB you can back up user corrections + state, and you can
-re-run self-cal (`CAL ALL`), but you **cannot read the raw factory cal bytes**.
+### The CAL correction factors ARE GPIB-readable (CORRECTION 2026-07-25)
+The factory/self-cal correction factors (frequency + amplitude corrections in the
+A16A1 NVRAM) **can** be read and restored over GPIB via the `CAL` command family
+(verified on the real 8593E — `CAL DUMP` returned the data):
+
+| Command | Direction | What it does |
+|---|---|---|
+| **`CAL DUMP`** | **read → controller** | **returns the correction factors over GPIB** (the backup) |
+| `CAL DISP` | screen | displays *some* factors on the analyzer screen (subset) |
+| `CAL STORE` | working → NVRAM | saves working corrections to the power-on area (only if valid; else SRQ 110) |
+| `CAL FETCH` | NVRAM → working | recalls stored corrections into working RAM |
+| `CAL INIT` | reset | sets cal data to defaults (needs CF −37 Hz first; re-run `CAL YTF` after) |
+| `CAL ALL`/`FREQ`/`AMP`/`YTF` | run | self-cal routines (need CAL OUT / COMB OUT cabled) |
+
+Notes: the guide warns `CAL DISP` **and** `CAL DUMP` may not return *every* factor
+(historically a screen-char limit) — capture `CAL DUMP` output and check it looks
+complete. Restore workflow: get the corrections back into working RAM, then
+`CAL STORE` to commit to NVRAM. `AMPCOR?` (user amplitude corrections) is a
+SEPARATE, additional dataset — back that up too.
 
 ## Goal B — raw memory image (NVRAM/RAM byte-exact): NO GPIB PATH
 There is no service command on the 859x to dump raw memory over GPIB. Options for
