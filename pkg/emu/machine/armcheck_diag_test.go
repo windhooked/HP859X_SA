@@ -55,4 +55,7 @@ func TestArmCheckDiag(t *testing.T) {
 	t.Logf("BF3C (samples/slot) = %d  BF3E (countdown) = %d  A9A2 = %d  A9A4 = %d",
 		m.Bus.Read(0xFFBF3C, bus.Word), m.Bus.Read(0xFFBF3E, bus.Word),
 		m.Bus.Read(0xFFA9A2, bus.Word), m.Bus.Read(0xFFA9A4, bus.Word))
+	t.Logf("marker cells: B0E2=%d B0E6=%d B073=%#x BA64=%d BA68=%d",
+		m.Bus.Read(0xFFB0E2, bus.Word), m.Bus.Read(0xFFB0E6, bus.Word),
+		m.Bus.Read(0xFFB073, bus.Byte), m.Bus.Read(0xFFBA64, bus.Word), m.Bus.Read(0xFFBA68, bus.Word))
 }

@@ -25,10 +25,20 @@ func TestBootToOperatingWithSweep(t *testing.T) {
 	m.MMIO.Sweep.Spectrum.Signals = []analog.Signal{{Hz: 1.45e9, DBm: -30}}
 	m.BootToOperatingWithSweep(220_000_000)
 
-	// The firmware's own end-of-sweep IRQ handler must have raised the sweep-done
-	// flag (befa bit13) — i.e. a sweep completed without us forcing the flag.
-	if befa := uint16(m.Bus.Read(0xFFBEFA, bus.Word)); befa&0x2000 == 0 {
-		t.Errorf("befa bit13 (sweep-done) not set: befa=%#04x — sweep did not complete", befa)
+	// The firmware's own end-of-sweep IRQ handler must raise the sweep-done flag
+	// (befa bit13) — i.e. a sweep completes without us forcing the flag. The
+	// flag is TRANSIENT (the operating loop clears it at 0x121CA when it
+	// processes the sweep), so sample across a short window rather than at one
+	// arbitrary instant.
+	seen := false
+	for i := 0; i < 200 && !seen; i++ {
+		m.BootToOperatingWithSweep(100_000)
+		if uint16(m.Bus.Read(0xFFBEFA, bus.Word))&0x2000 != 0 {
+			seen = true
+		}
+	}
+	if !seen {
+		t.Errorf("befa bit13 (sweep-done) never observed across the window — sweep did not complete")
 	}
 
 	// The trace buffer (0x2FD508..bf30=0x2FD82A) must hold captured samples — the

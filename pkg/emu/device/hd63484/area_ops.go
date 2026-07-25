@@ -85,29 +85,39 @@ func (c *Chip) execClear(cr, pattern uint16, ax, ay int16) {
 			coreOff := uint32(off) & acrtcRAMMask
 			orow := int(c.core.orgDPA) / mwr
 			ocol := int(c.core.orgDPA) % mwr
+			// BPP-AWARE firmware-coordinate reconstruction (2026-07-25): a word
+			// holds ppw = 16/bpp pixels (8 at the 8593's 2bpp). The former
+			// hard-coded ×16 doubled the true x at 2bpp, so every word beyond
+			// real x≈200 computed xfw>xmax and was silently SKIPPED — the
+			// firmware's full-width flying-erase reached us but our clip cut
+			// its right half: the right-half trace pile-up.
+			bpp := c.core.getBpp()
+			ppw := 16 / bpp
 			yfw := orow - off/mwr
-			xfw := (off%mwr - ocol) * 16
-			if clip && (yfw < ymin || yfw > ymax || xfw+15 < xmin || xfw > xmax) {
+			xfw := (off%mwr - ocol) * ppw
+			if clip && (yfw < ymin || yfw > ymax || xfw+ppw-1 < xmin || xfw > xmax) {
 				continue
 			}
-			// Per-word X area-mask: which of this word's 16 px fall within
+			// Per-word X area-mask: which of this word's ppw pixels fall within
 			// [xmin,xmax]. At the area-def's right/left edge a word straddles the
-			// boundary; clearing the whole 16-px word there wiped the FIRST letter of
-			// the right-side softkey labels — their leading char sits in the boundary
-			// word (firmware x=400..415, one past xmax=400). Restrict the op to the
-			// in-bounds pixels so the boundary clear stops exactly at xmax.
+			// boundary; clearing the whole word there wiped the FIRST letter of
+			// the right-side softkey labels — restrict the op to the in-bounds
+			// pixels so the boundary clear stops exactly at xmax. Each pixel
+			// masks bpp bits.
 			am := uint16(0xFFFF)
 			if clip {
 				lo, hi := xmin-xfw, xmax-xfw
 				if lo < 0 {
 					lo = 0
 				}
-				if hi > 15 {
-					hi = 15
+				if hi > ppw-1 {
+					hi = ppw - 1
 				}
 				am = 0
 				for b := lo; b <= hi; b++ {
-					am |= 1 << uint(b)
+					for k := 0; k < bpp; k++ {
+						am |= 1 << uint(b*bpp+k)
+					}
 				}
 			}
 			if c.GraticuleToUpper && clip {

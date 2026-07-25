@@ -490,14 +490,28 @@ func (m *Machine) driveSweepCycle() {
 	if pace <= 0 {
 		pace = sweepCyclesPerPoint
 	}
+	// IRQ1:IRQ6 ratio — the firmware's capture handler (0x410A) max-peak-detects
+	// BF3C conversions per buffer slot, and its ramp/live-paint x advances per
+	// IRQ1. One ramp step must therefore deliver BF3C conversions (IRQ6s), or
+	// the ramp runs off the graph edge before the buffer fills: at the former
+	// 1:1 ratio the firmware's x counter hit its 400-px limit at slot ~200 and
+	// the live paint/erase pass went silent for the right half of every sweep
+	// (the right-half pile-up; masked pre-2bpp because 26 erase columns then
+	// happened to span the whole 1bpp-mapped graph).
+	spb := int(m.Bus.Read(0xFFBF3C, bus.Word))
+	if spb <= 0 || spb > 16 {
+		spb = 1
+	}
 	for m.sweepAccum >= pace && m.CPU.Reg(cpu.A5) < bf30 {
 		m.sweepAccum -= pace
 		m.CPU.SetIRQ(1) // sweep step: advance the ramp, reprogram the sweep DACs
 		m.CPU.Run(sweepStepCost)
 		m.CPU.SetIRQ(0)
-		m.CPU.SetIRQ(6) // capture one sample
-		m.CPU.Run(sweepCaptureCost)
-		m.CPU.SetIRQ(0)
+		for k := 0; k < spb && m.CPU.Reg(cpu.A5) < bf30; k++ {
+			m.CPU.SetIRQ(6) // capture one conversion (BF3C per slot, max-detected)
+			m.CPU.Run(sweepCaptureCost)
+			m.CPU.SetIRQ(0)
+		}
 	}
 	// Don't let the accumulator run away while the buffer is full (between a
 	// completed sweep and the firmware's re-arm) — that would burst-fire the next

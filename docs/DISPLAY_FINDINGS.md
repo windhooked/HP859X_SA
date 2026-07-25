@@ -164,12 +164,19 @@ Update this as facts change. If a theory is in "DISPROVEN", do not raise it agai
   The processing pass tracks capture 1:1 (lag ~10 slots) while running and
   halts at slot ~200 REGARDLESS — a fixed bound, not throughput. (A9A2=1,
   A9A4=0 at runtime.)
-- OPEN: find the ~200 bound in the live-pass caller — candidates: a bound cell
-  in the RAM-0xCA resident sweep routine / the 6C3C caller loop; pos/neg slot
-  pairing at the PAINTER level (paint x=k from slot pair {2k,2k+1} — would
-  show bar-x = A5/2, which the 1:1 correlation currently contradicts); or a
-  marker/centre-relative processing window. Next probe: shadow-stack trace of
-  the 6C3C invocation (cmd/rendertrace style) to read the caller loop bound.
+- **SOLVED (2026-07-25): the "~200 bound" was OUR BUG — 1bpp-era clip math in
+  execClear.** A steady-state FIFO capture (TestSegCapDiag + decode) proved the
+  firmware emits the flying erase + 8-point APLL segments EVENLY ACROSS THE
+  FULL 0..400 px — but execClear's firmware-coordinate reconstruction used a
+  hard-coded 16 px/word (`xfw = word×16`), doubling the true x at 2bpp: every
+  word beyond real x≈200 computed xfw>xmax and was silently `continue`d by the
+  area-def clip. The right half's erases arrived and were discarded by our own
+  math. Fixed bpp-aware (ppw=16/bpp for xfw + the per-word edge mask, bpp bits
+  per pixel). Long-run render: uniform thin floor across the full width, no
+  pile-up. (fcn.6C3C itself never executes in our runs — the segment updater
+  drives everything; the earlier "live pass halts at 200" reading was this
+  clip artifact. BF3C ratio also corrected: 1 IRQ1 ramp step per BF3C=3
+  max-detected conversions — 401 ramp steps/sweep, 58 ms at 2300 cyc/slot.)
 
 ## DISPROVEN / RULED OUT (do NOT propose these again)
 - ❌ **CRT persistence** is NOT the cause of the trace "forest". (User: #1 doesn't hold.)
