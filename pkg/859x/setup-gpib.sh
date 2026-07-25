@@ -11,7 +11,7 @@
 set -euo pipefail
 
 PAD="${1:-7}"
-VER="4.3.6"
+VER="4.3.7"  # 4.3.7 has the ni_usb W11-trace suspend/resume refactor (GPIB-USB-HS -110 fix)
 SRC="linux-gpib-${VER}"
 URL="https://sourceforge.net/projects/linux-gpib/files/linux-gpib%20for%203.x.x%20and%202.6.x%20kernels/${VER}/${SRC}.tar.gz/download"
 WORK="/usr/local/src/linux-gpib"
