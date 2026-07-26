@@ -1,0 +1,62 @@
+{
+  "IDNUM": {
+    "behavior": "Query returns the numeric model code. BENCH-VERIFIED on a real 8593E: `IDNUM?` -> `8593`. Native handler 0x4C530.",
+    "category": "diag/status",
+    "verified": true
+  },
+  "GSTAT": {
+    "behavior": "General-status query; also the DLP status function GSTAT(n). BENCH-VERIFIED: `GSTAT?` -> `1`. Native handler 0x19522 (dispatches on D0 status index).",
+    "category": "diag/status",
+    "verified": true
+  },
+  "DATASTAT": {
+    "behavior": "Data-status query. BENCH-VERIFIED: `DATASTAT?` -> `2`. Native handler 0x9CE4.",
+    "category": "diag/status",
+    "verified": true
+  },
+  "TRSTAT": {
+    "behavior": "Trace-status query; returns the current trace state as RE-SENDABLE parser commands. BENCH-VERIFIED: `TRSTAT?` -> `CLRW A;BLANK B;BLANK C;`. DLP-source trampoline. Capture-and-replay backs up/restores trace display state.",
+    "category": "diag/status",
+    "verified": true
+  },
+  "BUFSTAT": {
+    "behavior": "Buffer-status query. BENCH-VERIFIED: `BUFSTAT?` -> `0`. Native handler 0x40816.",
+    "category": "diag/status",
+    "verified": true
+  },
+  "WINSTAT": {
+    "behavior": "Window-status query. BENCH-VERIFIED: `WINSTAT?` -> `-9999` (sentinel = no active window). DLP-source trampoline.",
+    "category": "diag/status",
+    "verified": true
+  },
+  "EVNTCNT": {
+    "behavior": "Event-counter query. BENCH-VERIFIED: `EVNTCNT?` -> `0`. Native handler 0x401C0.",
+    "category": "diag/status",
+    "verified": true
+  },
+  "USTATE": {
+    "behavior": "USER-MEMORY DUMP. USTATE is a DLP array variable (special-token class type=0xc0, array ID 12 -- immediately after the trace arrays TRA=7,TRB=8,TRC=9,TRD=10). `USTATE?` outputs the ENTIRE user-memory region (downloaded DLPs, user variables, saved traces) as an HP `#A` binary block. BENCH-VERIFIED: `#A` header + ~5244 bytes on a real 8593E. Because it is a read/WRITE array like the trace registers, re-sending the captured block (bare `USTATE <#A block>` or via MOV) should RESTORE user memory -- the GPIB user-memory backup/restore path the 8563's ZRDWR was wrongly sought for. Generic array-access handler at slot 0x3F. Does NOT touch calibration NVRAM (use CAL DUMP for that).",
+    "category": "read/write",
+    "verified": true
+  },
+  "TRA": {
+    "behavior": "Trace A array variable (DLP token class 0xc0, array ID 7). `TRA?` outputs trace A data (format set by TDF); `MOV TRA,<data>` / `TRA <block>` writes it. Read/write array shared handler slot 0x3F.",
+    "category": "trace",
+    "verified": true
+  },
+  "TRB": {
+    "behavior": "Trace B array variable (DLP token class 0xc0, array ID 8). Read via `TRB?`, write via MOV. Shared array handler slot 0x3F.",
+    "category": "trace",
+    "verified": true
+  },
+  "TRC": {
+    "behavior": "Trace C array variable (DLP token class 0xc0, array ID 9). Shared array handler slot 0x3F.",
+    "category": "trace",
+    "verified": true
+  },
+  "TRD": {
+    "behavior": "Trace D array variable (DLP token class 0xc0, array ID 10). Shared array handler slot 0x3F.",
+    "category": "trace",
+    "verified": true
+  }
+}

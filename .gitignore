@@ -15,3 +15,7 @@ tmp/
 /gui
 .venv-gpib/
 dump_out/
+
+# Python bytecode cache
+__pycache__/
+*.pyc
