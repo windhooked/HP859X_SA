@@ -98,17 +98,29 @@ log 18:50 and the 18:57 `gpib_capture.sh` re-attach), `/etc/gpib.conf` is the
 `ni_usb_b` board with device pad 7, board reaches **CIC** after `ibrsc`+`ibsic`
 (`ibsta=0x0178` = CMPL|REM|CIC|ATN|TACS).
 
-`iblines` on this adapter only reports **REN and ATN** as valid (raw `0x50ff`) —
-the handshake lines are not exposed, so it cannot be used to sense whether the
-far end is alive.
+`iblines` on this adapter reports only a subset of the bus lines as valid, so it
+is a weak presence test: raw `0x50ff` (REN + ATN valid) on 2026-08-13, raw
+`0x52ff` (REN + ATN + **NDAC valid and asserted**) on 2026-08-14. Tempting to
+read the NDAC bit as "a device is out there", but the two readings were taken in
+different board states, so it does not reliably distinguish a live device from a
+state artifact — **the `ibln` scan is the test that counts.**
 
 Then the bus went quiet: a full `ibln` scan of pads 1–30 at T3s returned
 `{iberr 2 (ENOL): 30}` — no acceptor handshake at *any* address, where the same
 setup had found pad 7 on 2026-07-26. That is a physical-layer state (analyzer
 powered down or cable unseated), **not** the driver bug, and it is a different
 and earlier failure than the `EDVR`/`NIUSB_ADDRESSING_ERROR` above. The
-instrument was reported back up on 2026-08-14 but **the re-scan has not been
-run** — that is the first thing to do below.
+instrument was reported back up on 2026-08-14, but **the re-scan still finds
+nothing**: `--scan --id` from the synced tooling on yoda returned
+`30x iberr=2 (ENOL)` again, and `ID?`/`SER?`/`REV?`/`IDNUM?` at pad 7 all failed
+the same way.
+
+So with the analyzer powered on, the bus is still silent — which points at the
+**cable/connection** rather than instrument power. Note we are failing *earlier*
+than the known Linux blocker: the 2026-07-26 session got as far as `EDVR` /
+`NIUSB_ADDRESSING_ERROR` on the write, which means the adapter *can* address this
+instrument when the physical path is good. **Until `--scan` shows pad 7 again,
+nothing about the driver bug can be re-tested.**
 
 Tooling gap closed on the way: yoda's system python has neither `pyvisa` nor the
 linux-gpib bindings (`~/gpib859x/.venv` has pyvisa 1.16.2 but no `gpib` module),
@@ -124,7 +136,8 @@ python3 gpibprobe_linux.py --scan                  # is the 8593E listening at p
 python3 gpibprobe_linux.py --id                    # does data transfer still give EDVR?
 ```
 
-1. **Re-run the scan.** If pad 7 is back, the ENOL was the power/cable state.
+1. **Re-run the scan** after reseating the GPIB cable at both ends (run
+   2026-08-14 with the analyzer powered: still ENOL on all 30 addresses).
 2. **Re-test data transfer.** If `ID?` still returns `EDVR`, the
    `NIUSB_ADDRESSING_ERROR` blocker is unchanged and the USBPcap trace is the
    only way forward. If it now *works*, the Linux path is open — go straight to
