@@ -1,5 +1,25 @@
 # Getting the NI GPIB-USB-HS (status-0x15 revision) working on Linux — research + plan
 
+> **★ STATUS CORRECTED 2026-08-14 — the attach failure below no longer
+> reproduces.** On linux-gpib 4.3.7 / kernel 6.8 the adapter now attaches
+> **clean**: `probe succeeded` → `attached to gpib0`, with **no `0x15` warning,
+> no `-110`, and no register-write failure**. The "Exact failure" section is kept
+> as the historical record of the `0x15` revision investigation.
+>
+> **The real blocker is one layer further in: device data transfer.** With CIC
+> taken (`ibrsc(1)` + `ibsic()` — this adapter is *not* CIC after attach) `ibln`
+> finds the 8593E at pad 7, but `ibwrt("ID?;")` returns `EDVR` from
+> `ni_usb_gpib.c:816` `case NIUSB_ADDRESSING_ERROR` — the USB transfer succeeds
+> and **the adapter firmware itself** reports an addressing error. Kernel version
+> is not the answer: `ni_usb_write`/`ni_usb_send_bulk_msg` are byte-identical
+> between 4.3.7 and torvalds/master. **Fix path 1 below (the USBPcap trace) is
+> therefore still the way forward — but it must capture the addressing/write
+> sequence, not the attach sequence.**
+>
+> Current bench state, both gotchas, and the next commands to run:
+> [BENCH_STATUS.md](BENCH_STATUS.md). Measured Linux detail:
+> [bench/LINUX_RESULTS.md](bench/LINUX_RESULTS.md).
+
 Long-term goal: dump the 8593E cal/memory from Linux (yoda) instead of Windows.
 This documents exactly where linux-gpib fails with **this specific adapter** and
 the concrete path to fix it, so it can be picked up later.
@@ -90,6 +110,10 @@ likely hit the same wall; a maintainer may already have the trace.
   `/etc/gpib.conf` = `ni_usb_b` board, device pad 7, user in `dialout`.
 - Build trees under `~/gpib859x/linux-gpib-4.3.7/` (kernel + user); `fix-gpib.sh`
   does a clean module reinstall; git master clone at `~/gpib859x/lg-git`.
-- `~/gpib859x/dump859x.py` + a Python venv with pyvisa/pyvisa-py/gpib-ctypes.
-So once the driver is patched, the dump is two commands:
-`python3 dump859x.py --resource GPIB0::7::INSTR --id` then `--cal-ascii`.
+- `~/gpib859x/dump859x.py` + a venv at `~/gpib859x/.venv` (pyvisa 1.16.2) — but
+  **note that venv has no `gpib` module**, and the system python3 has neither
+  pyvisa nor the linux-gpib bindings, so the pyvisa-based scripts cannot run on
+  yoda as things stand. Use `pkg/859x/gpibprobe_linux.py` instead: it drives
+  `libgpib.so.0` through ctypes and needs only python3.
+- The bench working dir is `~/gpib859x`; the Windows-side scripts, findings and
+  captures it held are now versioned in the repo under `pkg/859x/bench/`.

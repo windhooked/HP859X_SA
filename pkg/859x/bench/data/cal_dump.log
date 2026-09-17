@@ -1,0 +1,20 @@
+[open] GPIB0::7::INSTR via backend @ivi
+[id] ID? -> 'HP8593E'
+[cal-ascii] 6 responsive queries -> dump_out\cal_constants.txt
+
+=== calnvram: battery-backed cal NVRAM (64 KB; active data 0..0x303F) ===
+[calnvram] 200000..210000 (65536 B); resuming at +0
+Traceback (most recent call last):
+  File "C:\Users\Admin\Documents\src\gpib\dump859x.py", line 143, in <module>
+    main()
+    ~~~~^^
+  File "C:\Users\Admin\Documents\src\gpib\dump859x.py", line 139, in main
+    dump_region(inst, name, s, e, args.outdir)
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Admin\Documents\src\gpib\dump859x.py", line 64, in dump_region
+    buf.append(read_byte(inst, addr))
+               ~~~~~~~~~^^^^^^^^^^^^
+  File "C:\Users\Admin\Documents\src\gpib\dump859x.py", line 50, in read_byte
+    return int(inst.query("ZRDWR?").strip()) & 0xFF   # read one byte, decimal
+           ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: invalid literal for int() with base 10: '200.0E3'

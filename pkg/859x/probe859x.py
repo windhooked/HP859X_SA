@@ -35,7 +35,16 @@ Output: probe_out/probe_YYYYMMDD_HHMMSS/  with _log.txt + one file per command.
 import argparse
 import datetime
 import os
+import sys
 import time
+
+# This script prints Unicode (arrows, ellipsis); the Windows console defaults to
+# cp1252 and would crash on them. Force UTF-8 output so it runs everywhere.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SAFE query list. Every entry is a READ. `send` is the exact bytes we transmit;

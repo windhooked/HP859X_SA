@@ -1,0 +1,173 @@
+# 859x READ-ONLY probe  20260726_064711
+# ID? -> 'HP8593E'
+
+## ID?   (instrument identity)
+response: 9 B ascii: 'HP8593E  '
+ERR?: 0,0,0,0
+file: 01_id_ID.txt
+
+## *IDN?   (SCPI identity (if supported))
+response: 2 B ascii: '  '
+ERR?: 0,0,0,0
+file: 02_id_IDN.txt
+
+## IDNUM?   (numeric id / model code (undocumented))
+response: 6 B ascii: '8593  '
+ERR?: 0,0,0,0
+file: 03_id_IDNUM.txt
+
+## SER?   (serial number)
+response: 5 B ascii: '155  '
+ERR?: 0,0,0,0
+file: 04_id_SER.txt
+
+## REV?   (firmware revision)
+response: 8 B ascii: '940822  '
+ERR?: 0,0,0,0
+file: 05_id_REV.txt
+
+## SHOWOPT   (installed options (undocumented; no '?'))
+response: <no response>
+ERR?: 0,0,0,0
+file: 06_id_SHOWOPT.txt
+
+## CAL DUMP;   (calibration correction factors (backup))
+response: 2239 B ascii: '300000000,127426944,56451885,22341247,1.80178E-04,1.006844E-'…
+ERR?: 0,0,0,0
+file: 07_cal_CAL_DUMP.bin
+
+## AMPCOR?;   (user amplitude-correction table)
+response: 5 B ascii: '0,0  '
+ERR?: 0,0,0,0
+file: 08_cal_AMPCOR.txt
+
+## CORREK?;   (correction-factors on/off state)
+response: 3 B ascii: '1  '
+ERR?: 0,0,0,0
+file: 09_cal_CORREK.txt
+
+## CF?;   (center frequency)
+response: 13 B ascii: '14375000000  '
+ERR?: 0,0,0,0
+file: 10_state_CF.txt
+
+## SP?;   (span)
+response: 13 B ascii: '23250000000  '
+ERR?: 0,0,0,0
+file: 11_state_SP.txt
+
+## RL?;   (reference level)
+response: 3 B ascii: '0  '
+ERR?: 0,0,0,0
+file: 12_state_RL.txt
+
+## RB?;   (resolution bandwidth)
+response: 9 B ascii: '3000000  '
+ERR?: 0,0,0,0
+file: 13_state_RB.txt
+
+## VB?;   (video bandwidth)
+response: 9 B ascii: '1000000  '
+ERR?: 0,0,0,0
+file: 14_state_VB.txt
+
+## ST?;   (sweep time)
+response: 9 B ascii: '.465000  '
+ERR?: 0,0,0,0
+file: 15_state_ST.txt
+
+## AT?;   (input attenuation)
+response: 4 B ascii: '10  '
+ERR?: 0,0,0,0
+file: 16_state_AT.txt
+
+## DET?;   (detector mode)
+response: 5 B ascii: 'POS  '
+ERR?: 0,0,0,0
+file: 17_state_DET.txt
+
+## TITLE?;   (screen title)
+response: 2 B ascii: '  '
+ERR?: 0,0,0,0
+file: 18_state_TITLE.txt
+
+## GSTAT?;   (general status (undocumented))
+response: 3 B ascii: '1  '
+ERR?: 0,0,0,0
+file: 19_diag_GSTAT.txt
+
+## DATASTAT?;   (data status (undocumented))
+response: 3 B ascii: '2  '
+ERR?: 0,0,0,0
+file: 20_diag_DATASTAT.txt
+
+## TRSTAT?;   (trace status (undocumented))
+response: 25 B ascii: 'CLRW A;BLANK B;BLANK C;  '
+ERR?: 0,0,0,0
+file: 21_diag_TRSTAT.txt
+
+## BUFSTAT?;   (buffer status (undocumented))
+response: 3 B ascii: '0  '
+ERR?: 0,0,0,0
+file: 22_diag_BUFSTAT.txt
+
+## DDSTAT?;   (data-display status (undocumented))
+response: 3 B ascii: '0  '
+ERR?: 0,0,0,0
+file: 23_diag_DDSTAT.txt
+
+## TVTSTAT?;   (TV-trigger status (undocumented))
+response: 3 B ascii: '0  '
+ERR?: 0,0,0,0
+file: 24_diag_TVTSTAT.txt
+
+## WINSTAT?;   (window status (undocumented))
+response: 7 B ascii: '-9999  '
+ERR?: 0,0,0,0
+file: 25_diag_WINSTAT.txt
+
+## PARSTAT?;   (parser status (undocumented))
+response: 3 B ascii: '0  '
+ERR?: 0,0,0,0
+file: 26_diag_PARSTAT.txt
+
+## USTATE?;   (user state (undocumented))
+response: 5250 B binary: '#A\x14|\x00\x00\x00\x00 :\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00P\x10\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00P\x10\x00\x00\x00\x00\x00\x00'…
+ERR?: 0,0,0,0
+file: 27_diag_USTATE.txt
+
+## PWRUPOB?;   (power-up option-board readout (undocumented))
+response: 2 B ascii: '  '
+ERR?: 0,0,0,0
+file: 28_diag_PWRUPOB.txt
+
+## EVNTCNT?;   (event counter (undocumented))
+response: 3 B ascii: '0  '
+ERR?: 0,0,0,0
+file: 29_diag_EVNTCNT.txt
+
+## ADCSHOW?;   (ADC readback (undocumented))
+response: 2 B ascii: '  '
+ERR?: 0,0,0,0
+file: 30_diag_ADCSHOW.txt
+
+## IDNUM?;   (id number (undocumented))
+response: 6 B ascii: '8593  '
+ERR?: 0,0,0,0
+file: 31_diag_IDNUM.txt
+
+## ERR?;   (error queue (also our safety probe))
+response: 9 B ascii: '0,0,0,0  '
+ERR?: 0,0,0,0
+file: 32_diag_ERR.txt
+
+## TDF P;   (set trace format to ASCII P (read-side only))
+response: <no response>
+ERR?: 0,0,0,0
+file: 33_trace_TDF_P.txt
+
+## TRA?;   (trace A data)
+response: 2808 B ascii: '-62.97,-63.56,-62.85,-62.96,-63.24,-63.91,-62.01,-63.15,-63.'…
+ERR?: 0,0,0,0
+file: 34_trace_TRA.bin
+

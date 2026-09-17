@@ -1,0 +1,27 @@
+# CAL?
+<no response: VI_ERROR_TMO (-1073807339): Timeout expired before operation completed.>
+
+# ERR?
+0,0,0,0
+
+# SER?
+155
+
+# REV?
+940822
+
+# MODEL?
+
+
+# IDN?
+
+
+# SPAN?
+13.64E9
+
+# CF?
+13998443868
+
+# RL?
+-9.00
+
