@@ -9,6 +9,10 @@ package musashi
 
 /*
 #cgo CFLAGS: -I${SRCDIR}/../../../../third_party/musashi
+// Musashi's m68kfpu.c calls sin/cos/sincos. On macOS libm is part of libSystem
+// and links implicitly; on Linux it is not, so every cgo binary fails to link
+// with "undefined reference to sincos". Link it explicitly there.
+#cgo linux LDFLAGS: -lm
 #include "m68k.h"
 #include "bridge.h"
 */

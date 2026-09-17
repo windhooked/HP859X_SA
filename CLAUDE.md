@@ -33,6 +33,8 @@ Two cgo dependencies:
 - **Musashi** (vendored in `third_party/musashi/`) — built by `go build` via unity build in `pkg/emu/cpu/musashi/musashi_core.c`; no separate install needed.
 - **Unicorn** — dynamically linked native library; install with `brew install unicorn` on macOS; set `DYLD_FALLBACK_LIBRARY_PATH=/usr/local/lib` when running Unicorn-linked tests.
 
+**Second checkout on the Linux bench host** (`yoda`, where the real 8593E hangs off GPIB): `/bigdata/src/HP859X_SA`, go 1.26.2. `go build ./...` is clean and the Musashi + romloader tests pass, so the emulator runs there. Two Linux-specific things: Musashi's `m68kfpu.c` calls `sin`/`cos`/`sincos`, which link implicitly on macOS but not on Linux — hence `#cgo linux LDFLAGS: -lm` in [pkg/emu/cpu/musashi/musashi.go](pkg/emu/cpu/musashi/musashi.go); and **libunicorn is not installed there**, so `internal/emutest` (the DiffCores oracle gate) fails to link — build/test the specific packages you need rather than `./...` if that matters.
+
 ## Firmware
 
 **Canonical image: Rev L 98.06.15** (1 MB, 4 × 27C020 EEPROMs). Sourced from `hp8593a_eeproms/*.HEX` (Intel HEX format, parsed on the fly by [pkg/emu/romloader/](pkg/emu/romloader/)). Reset vector SP=`0xFF948A`, PC=`0x1B34`.
